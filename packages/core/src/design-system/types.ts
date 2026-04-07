@@ -1,0 +1,245 @@
+/**
+ * Design System types — machine-readable brand spec (parsed from DESIGN.md).
+ *
+ * A DesignSystem describes brand-level rules: typography hierarchy, color roles,
+ * component styles, layout spacing, and responsive breakpoints.
+ * The engine uses this to make smarter semantic classification and pixel-perfect
+ * adaptation that respects the brand's design language.
+ */
+
+import type { BannerElementType } from '../resize/contracts/types';
+
+// ---------------------------------------------------------------------------
+//  Typography
+// ---------------------------------------------------------------------------
+
+export type TypographyRole = 'hero' | 'title' | 'subtitle' | 'body' | 'caption' | 'disclaimer' | 'button';
+
+export interface TypographyRule {
+  role: TypographyRole;
+  fontFamily?: string;
+  fontSize: number;
+  fontWeight: number;
+  lineHeight: number;         // multiplier (1.0 = 100%)
+  letterSpacing: number;      // px (negative = tight)
+  textTransform?: 'uppercase' | 'lowercase' | 'capitalize' | 'none';
+}
+
+/** Typography at a specific breakpoint (responsive scaling). */
+export interface TypographyBreakpointOverride {
+  breakpointName: string;
+  role: TypographyRole;
+  fontSize: number;
+  letterSpacing?: number;
+  lineHeight?: number;
+}
+
+// ---------------------------------------------------------------------------
+//  Colors
+// ---------------------------------------------------------------------------
+
+export interface ColorRole {
+  name: string;               // e.g. 'primary', 'cta', 'background', 'text', 'accent'
+  hex: string;                // e.g. '#0071e3'
+  opacity?: number;           // 0..1
+}
+
+export interface DesignSystemColors {
+  primary?: string;
+  background?: string;
+  text?: string;
+  accent?: string;
+  /** Full semantic color map: role name → hex. */
+  roles: Map<string, string>;
+}
+
+// ---------------------------------------------------------------------------
+//  Components
+// ---------------------------------------------------------------------------
+
+export type ButtonStyle = 'pill' | 'rounded' | 'square';
+
+export interface ButtonSpec {
+  borderRadius: number;       // px (9999 = pill)
+  style: ButtonStyle;
+  fontWeight?: number;
+  textTransform?: 'uppercase' | 'none';
+}
+
+export interface CardSpec {
+  borderRadius: number;
+  shadowLayers?: number;
+}
+
+export interface DesignSystemComponents {
+  button?: ButtonSpec;
+  card?: CardSpec;
+}
+
+// ---------------------------------------------------------------------------
+//  Layout & Spacing
+// ---------------------------------------------------------------------------
+
+export interface DesignSystemLayout {
+  spacingUnit: number;        // base grid (e.g. 8)
+  maxWidth?: number;          // content container max-width
+  sectionSpacing?: number;    // vertical gap between sections
+  borderRadiusScale: number[];// e.g. [0, 2, 4, 8, 12, 16, 9999]
+}
+
+// ---------------------------------------------------------------------------
+//  Responsive
+// ---------------------------------------------------------------------------
+
+export interface Breakpoint {
+  name: string;               // e.g. 'mobile', 'tablet', 'desktop'
+  width: number;              // min-width px
+}
+
+export interface DesignSystemResponsive {
+  breakpoints: Breakpoint[];
+  /** Typography overrides per breakpoint. */
+  typographyOverrides: TypographyBreakpointOverride[];
+}
+
+// ---------------------------------------------------------------------------
+//  Shadows / Depth
+// ---------------------------------------------------------------------------
+
+export interface ShadowLayer {
+  offsetX: number;
+  offsetY: number;
+  blur: number;
+  spread: number;
+  color: string;              // rgba string or hex
+}
+
+export interface DesignSystemDepth {
+  elevationLevels: ShadowLayer[][];  // index = elevation level, value = shadow stack
+}
+
+// ---------------------------------------------------------------------------
+//  Root DesignSystem
+// ---------------------------------------------------------------------------
+
+export interface DesignSystem {
+  brand: string;
+  version?: string;
+
+  colors: DesignSystemColors;
+  typography: {
+    hierarchy: TypographyRule[];
+  };
+  components: DesignSystemComponents;
+  layout: DesignSystemLayout;
+  responsive: DesignSystemResponsive;
+  depth?: DesignSystemDepth;
+
+  /** Raw markdown source (for debugging / re-export). */
+  rawMarkdown?: string;
+}
+
+// ---------------------------------------------------------------------------
+//  Mapping helpers: TypographyRole ↔ BannerElementType
+// ---------------------------------------------------------------------------
+
+const SLOT_TO_TYPO: Partial<Record<BannerElementType, TypographyRole[]>> = {
+  title:       ['hero', 'title'],
+  description: ['subtitle', 'body'],
+  disclaimer:  ['caption', 'disclaimer'],
+  button:      ['button'],
+  ageRating:   ['caption'],
+};
+
+const TYPO_TO_SLOT: Partial<Record<TypographyRole, BannerElementType>> = {
+  hero:       'title',
+  title:      'title',
+  subtitle:   'description',
+  body:       'description',
+  caption:    'disclaimer',
+  disclaimer: 'disclaimer',
+  button:     'button',
+};
+
+/** Get candidate typography roles for a semantic slot type. */
+export function typographyRolesForSlot(slot: BannerElementType): TypographyRole[] {
+  return SLOT_TO_TYPO[slot] ?? [];
+}
+
+/** Get the most likely slot type for a typography role. */
+export function slotForTypographyRole(role: TypographyRole): BannerElementType {
+  return TYPO_TO_SLOT[role] ?? 'other';
+}
+
+// ---------------------------------------------------------------------------
+//  Query helpers
+// ---------------------------------------------------------------------------
+
+/** Find the best matching typography rule for a slot type. */
+export function findTypographyForSlot(ds: DesignSystem, slot: BannerElementType): TypographyRule | undefined {
+  const roles = typographyRolesForSlot(slot);
+  for (const role of roles) {
+    const rule = ds.typography.hierarchy.find(r => r.role === role);
+    if (rule) return rule;
+  }
+  return undefined;
+}
+
+/** Find typography rule for a slot at a specific target width (responsive). */
+export function findTypographyForSlotAtWidth(
+  ds: DesignSystem,
+  slot: BannerElementType,
+  targetWidth: number
+): TypographyRule | undefined {
+  const base = findTypographyForSlot(ds, slot);
+  if (!base) return undefined;
+
+  // Find the applicable breakpoint for this width
+  const sorted = [...ds.responsive.breakpoints].sort((a, b) => b.width - a.width);
+  const bp = sorted.find(b => targetWidth >= b.width);
+  if (!bp) return base;
+
+  // Check for override at this breakpoint
+  const roles = typographyRolesForSlot(slot);
+  for (const role of roles) {
+    const override = ds.responsive.typographyOverrides.find(
+      o => o.breakpointName === bp.name && o.role === role
+    );
+    if (override) {
+      return {
+        ...base,
+        fontSize: override.fontSize,
+        letterSpacing: override.letterSpacing ?? base.letterSpacing,
+        lineHeight: override.lineHeight ?? base.lineHeight,
+      };
+    }
+  }
+
+  return base;
+}
+
+/** Get button border radius from design system. */
+export function getButtonBorderRadius(ds: DesignSystem): number {
+  return ds.components.button?.borderRadius ?? 8;
+}
+
+/** Find closest border-radius in the design system's scale. */
+export function snapToRadiusScale(ds: DesignSystem, rawRadius: number): number {
+  const scale = ds.layout.borderRadiusScale;
+  if (scale.length === 0) return rawRadius;
+  let best = scale[0];
+  let bestDist = Math.abs(rawRadius - best);
+  for (const r of scale) {
+    const d = Math.abs(rawRadius - r);
+    if (d < bestDist) { bestDist = d; best = r; }
+  }
+  return best;
+}
+
+/** Check if a fontSize approximately matches a typography role (±20%). */
+export function fontSizeMatchesRole(ds: DesignSystem, fontSize: number, role: TypographyRole): boolean {
+  const rule = ds.typography.hierarchy.find(r => r.role === role);
+  if (!rule) return false;
+  const ratio = fontSize / rule.fontSize;
+  return ratio >= 0.8 && ratio <= 1.2;
+}

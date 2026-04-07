@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "reframe": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["tsx", "packages/mcp/src/index.ts"]
+    }
+  }
+}

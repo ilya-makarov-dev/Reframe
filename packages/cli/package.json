@@ -1,0 +1,35 @@
+{
+  "name": "@reframe/cli",
+  "version": "0.1.0",
+  "description": "Reframe CLI — build, test, and export designs from config",
+  "bin": {
+    "reframe": "./dist/cli/src/index.js"
+  },
+  "main": "dist/cli/src/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/cli/src/index.js"
+  },
+  "dependencies": {
+    "@reframe/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.37",
+    "typescript": "^5.4.0"
+  },
+  "license": "AGPL-3.0-or-later",
+  "author": "Ilya Makarov",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ilya-makarov-dev/reframe.git",
+    "directory": "packages/cli"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist/",
+    "LICENSE"
+  ]
+}

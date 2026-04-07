@@ -1,0 +1,43 @@
+{
+  "name": "@reframe/mcp",
+  "version": "0.1.0",
+  "description": "Reframe MCP server — AI design pipeline with validation and multi-format export",
+  "bin": {
+    "reframe-mcp": "./dist/mcp/src/index.js",
+    "reframe-http": "./dist/mcp/src/http-server.js"
+  },
+  "main": "dist/mcp/src/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/mcp/src/index.js",
+    "start:http": "node dist/mcp/src/http-server.js"
+  },
+  "dependencies": {
+    "@reframe/core": "*",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.37",
+    "typescript": "^5.4.0"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Ilya Makarov",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ilya-makarov-dev/reframe.git",
+    "directory": "packages/mcp"
+  },
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=18"
+  }
+}

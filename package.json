@@ -1,0 +1,34 @@
+{
+  "name": "reframe",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Programmable design engine — parse, validate, transform, export.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build:core && npm run build:cli && npm run build:mcp",
+    "build:core": "npm run build -w packages/core",
+    "build:cli": "npm run build -w packages/cli",
+    "build:mcp": "npm run build -w packages/mcp",
+    "typecheck": "tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/mcp/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json",
+    "test": "npx tsx scripts/test-pipeline.ts && npx tsx scripts/test-reframe-all.ts",
+    "test:pipeline": "npx tsx scripts/test-pipeline.ts",
+    "test:reframe": "npx tsx scripts/test-reframe-all.ts",
+    "test:build": "npx tsx scripts/test-build-system.ts",
+    "studio": "npm run dev -w packages/studio",
+    "studio:build": "npm run build -w packages/studio"
+  },
+  "author": "Ilya Makarov",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ilya-makarov-dev/reframe.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

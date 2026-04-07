@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDEs & editors
+.vscode/
+.idea/
+.cursor/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test output
+test-output/
+**/test-output/
+coverage/
+
+# Generated files
+scripts/*.html
+
+# NPM artifacts
+*.tgz
+
+# TSC output leaked into src
+packages/mcp/src/**/*.js
+packages/mcp/src/**/*.js.map
+packages/mcp/src/**/*.d.ts
+packages/mcp/src/**/*.d.ts.map
+
+# reframe local data (generated at runtime)
+.reframe/
+
+# MCP config (user-specific)
+.mcp.json
+
+# External libraries (not distributed, clone separately)
+awesome-design-md-main/

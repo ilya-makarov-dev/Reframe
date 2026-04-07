@@ -1,0 +1,957 @@
+{
+  "presets": [
+    {
+      "width": 240,
+      "height": 400,
+      "key": "240x400"
+    },
+    {
+      "width": 640,
+      "height": 960,
+      "key": "640x960"
+    },
+    {
+      "width": 960,
+      "height": 640,
+      "key": "960x640"
+    },
+    {
+      "width": 1400,
+      "height": 1000,
+      "key": "1400x1000"
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "key": "1920x1080"
+    },
+    {
+      "width": 300,
+      "height": 250,
+      "key": "300x250"
+    },
+    {
+      "width": 1080,
+      "height": 1080,
+      "key": "1080x1080"
+    },
+    {
+      "width": 336,
+      "height": 280,
+      "key": "336x280"
+    },
+    {
+      "width": 300,
+      "height": 600,
+      "key": "300x600"
+    },
+    {
+      "width": 1080,
+      "height": 1920,
+      "key": "1080x1920"
+    },
+    {
+      "width": 970,
+      "height": 250,
+      "key": "970x250"
+    },
+    {
+      "width": 640,
+      "height": 200,
+      "key": "640x200"
+    }
+  ],
+  "guides": {
+    "240x400": {
+      "width": 240,
+      "height": 400,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.03356778462727864,
+          "top": 0.6628598327636719,
+          "widthRatio": 0.9295189005533855,
+          "heightRatio": 0.08015754699707031
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.20860482279459636,
+          "top": 0.04009703063964844,
+          "widthRatio": 0.6120619761149089,
+          "heightRatio": 0.0445943193435669
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.03286542256673177,
+          "top": 0.12509065246582032,
+          "widthRatio": 0.9288864847819011,
+          "heightRatio": 0.1504327392578125
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.1914078318277995,
+          "top": 0.7724509887695312,
+          "widthRatio": 0.616223398844401,
+          "heightRatio": 0.09546510314941406
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05830550130208333,
+          "top": 0.8927363128662109,
+          "widthRatio": 0.8877919158935547,
+          "heightRatio": 0.0675147705078125
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.22044380696614582,
+          "top": 0.3022900543212891,
+          "widthRatio": 0.5504548034667969,
+          "heightRatio": 0.3299984283447266
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.8793796183268229,
+          "top": 0.9271672821044922,
+          "widthRatio": 0.06295303344726562,
+          "heightRatio": 0.03982229614257812
+        }
+      ]
+    },
+    "640x960": {
+      "width": 640,
+      "height": 960,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.07751927947998047,
+          "top": 0.6739539845784505,
+          "widthRatio": 0.8412441215515136,
+          "heightRatio": 0.07963782755533853
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.23610868072509766,
+          "top": 0.04764727528889974,
+          "widthRatio": 0.5543794498443604,
+          "heightRatio": 0.04555701684951782
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.07987969970703124,
+          "top": 0.13320078531901042,
+          "widthRatio": 0.8421481285095215,
+          "heightRatio": 0.1503500213623047
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.22656610107421876,
+          "top": 0.7818344472249349,
+          "widthRatio": 0.5477438621520996,
+          "heightRatio": 0.0945700257619222
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.0512144775390625,
+          "top": 0.9059587249755859,
+          "widthRatio": 0.8039164428710937,
+          "heightRatio": 0.06895494079589844
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.24690270996093752,
+          "top": 0.31224786376953123,
+          "widthRatio": 0.49864747428894046,
+          "heightRatio": 0.3320013516743978
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9109935455322266,
+          "top": 0.9418760935465494,
+          "widthRatio": 0.05740309143066406,
+          "heightRatio": 0.041116348266601564
+        }
+      ]
+    },
+    "960x640": {
+      "width": 960,
+      "height": 640,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.06812193806966145,
+          "top": 0.4655182800292969,
+          "widthRatio": 0.5613551508585611,
+          "heightRatio": 0.11836633300781249
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.06743115743001302,
+          "top": 0.0709658088684082,
+          "widthRatio": 0.36953650029500323,
+          "heightRatio": 0.06823554968833924
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.0678564961751302,
+          "top": 0.20632968139648436,
+          "widthRatio": 0.5613040339152018,
+          "heightRatio": 0.22498236083984374
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.06811078389485677,
+          "top": 0.6581296844482422,
+          "widthRatio": 0.36489785512288414,
+          "heightRatio": 0.14249071216583253
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.06794336446126302,
+          "top": 0.8859965362548828,
+          "widthRatio": 0.6436282348632812,
+          "heightRatio": 0.06883088684082032
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.5448907114664714,
+          "top": 0.21886398315429687,
+          "widthRatio": 0.4254989471435547,
+          "heightRatio": 0.6376910858154297
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9409026794433594,
+          "top": 0.8718543243408202,
+          "widthRatio": 0.059660034179687495,
+          "heightRatio": 0.12816676330566404
+        }
+      ]
+    },
+    "1400x1000": {
+      "width": 1400,
+      "height": 1000,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.04955108642578125,
+          "top": 0.47019145202636714,
+          "widthRatio": 0.6009782235281809,
+          "heightRatio": 0.10950386047363281
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.04988505554199219,
+          "top": 0.06983822631835938,
+          "widthRatio": 0.3956568102155413,
+          "heightRatio": 0.06812776947021484
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05022640991210938,
+          "top": 0.2087406005859375,
+          "widthRatio": 0.6016556985037668,
+          "heightRatio": 0.2245048065185547
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.050173904418945314,
+          "top": 0.8931842956542969,
+          "widthRatio": 0.5740581338065011,
+          "heightRatio": 0.05973725891113281
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.525889654976981,
+          "top": 0.25327520751953125,
+          "widthRatio": 0.4202109375,
+          "heightRatio": 0.5882258605957031
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9417338082449777,
+          "top": 0.8860211029052735,
+          "widthRatio": 0.05840353611537388,
+          "heightRatio": 0.11440562438964844
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.050090682983398443,
+          "top": 0.6583949127197266,
+          "widthRatio": 0.3473574436732701,
+          "heightRatio": 0.12840194702148436
+        }
+      ]
+    },
+    "1920x1080": {
+      "width": 1920,
+      "height": 1080,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.043678009033203125,
+          "top": 0.47488114929199216,
+          "widthRatio": 0.4731705945332845,
+          "heightRatio": 0.115150553950557
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.04410447692871094,
+          "top": 0.07175292403609665,
+          "widthRatio": 0.3121157582600912,
+          "heightRatio": 0.0675988128096969
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.043776031494140624,
+          "top": 0.20892267523871527,
+          "widthRatio": 0.47295327885945637,
+          "heightRatio": 0.22490975952148437
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.043341918945312495,
+          "top": 0.6577725502296731,
+          "widthRatio": 0.3061408284505209,
+          "heightRatio": 0.14136466866952402
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.044050277709960936,
+          "top": 0.8893222458450882,
+          "widthRatio": 0.535355702718099,
+          "heightRatio": 0.06666442362467448
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.5194556325276692,
+          "top": 0.11355342441134983,
+          "widthRatio": 0.4190738830566406,
+          "heightRatio": 0.7451561064543547
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9488153737386068,
+          "top": 0.877433081732856,
+          "widthRatio": 0.05150599161783854,
+          "heightRatio": 0.12241025627983941
+        }
+      ]
+    },
+    "300x250": {
+      "width": 300,
+      "height": 250,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05622716776529948,
+          "top": 0.44377487182617187,
+          "widthRatio": 0.6702048034667969,
+          "heightRatio": 0.1680718994140625
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.056418223063151036,
+          "top": 0.06816877746582031,
+          "widthRatio": 0.5097981719970703,
+          "heightRatio": 0.07508872985839843
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05696995035807292,
+          "top": 0.19607965087890625,
+          "widthRatio": 0.7764765116373697,
+          "heightRatio": 0.216166259765625
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.057041620890299474,
+          "top": 0.6595120086669922,
+          "widthRatio": 0.4148834686279297,
+          "heightRatio": 0.12866882324218748
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05646903483072916,
+          "top": 0.8276972503662109,
+          "widthRatio": 0.8871331787109374,
+          "heightRatio": 0.11973109436035156
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.5268840128580728,
+          "top": 0.2717889251708985,
+          "widthRatio": 0.4431219380696615,
+          "heightRatio": 0.5319717407226563
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9067893625895181,
+          "top": 0.8839907684326171,
+          "widthRatio": 0.05652349344889323,
+          "heightRatio": 0.07233370971679687
+        }
+      ]
+    },
+    "1080x1080": {
+      "width": 1080,
+      "height": 1080,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.055531645033094615,
+          "top": 0.3074542366310402,
+          "widthRatio": 0.6704586718523944,
+          "heightRatio": 0.09118281837745949
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.0554274427625868,
+          "top": 0.05584489271375868,
+          "widthRatio": 0.45934321311668114,
+          "heightRatio": 0.05636144736961082
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.055409025404188364,
+          "top": 0.15922214988425926,
+          "widthRatio": 0.7765198963306568,
+          "heightRatio": 0.11848974044234664
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.05528768751356337,
+          "top": 0.44196912638346353,
+          "widthRatio": 0.3861520391393591,
+          "heightRatio": 0.1018731952243381
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05535265943739149,
+          "top": 0.9023300165247035,
+          "widthRatio": 0.8870764617919922,
+          "heightRatio": 0.057634275083188656
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.44024531103063513,
+          "top": 0.3401217758743851,
+          "widthRatio": 0.5220130700005425,
+          "heightRatio": 0.5218255547417535
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9193990190294054,
+          "top": 0.9255555340802228,
+          "widthRatio": 0.08026553175184463,
+          "heightRatio": 0.07359777097348813
+        }
+      ]
+    },
+    "336x280": {
+      "width": 336,
+      "height": 280,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05645123054867699,
+          "top": 0.4435185230800084,
+          "widthRatio": 0.6696694495791481,
+          "heightRatio": 0.1500294189453125
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.05626823189145043,
+          "top": 0.0682167238507952,
+          "widthRatio": 0.5096244376046317,
+          "heightRatio": 0.07473356355939592
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.056215146564301995,
+          "top": 0.19557568740844725,
+          "widthRatio": 0.77645654296875,
+          "heightRatio": 0.21406914629255022
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.05650492622738793,
+          "top": 0.6477363673618862,
+          "widthRatio": 0.40763569059826077,
+          "heightRatio": 0.1263077948434012
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05621835091000512,
+          "top": 0.8283958609444755,
+          "widthRatio": 0.887828832717169,
+          "heightRatio": 0.11805701773507254
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.5261852871122814,
+          "top": 0.27174056788853235,
+          "widthRatio": 0.44362854984828404,
+          "heightRatio": 0.5317441798618862
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9099678671700614,
+          "top": 0.8873617815290179,
+          "widthRatio": 0.05406559971400669,
+          "heightRatio": 0.06742538016183035
+        }
+      ]
+    },
+    "300x600": {
+      "width": 300,
+      "height": 600,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.0024052006403605143,
+          "top": 0.6837307484944661,
+          "widthRatio": 0.9969173329671225,
+          "heightRatio": 0.07022145080566407
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.18781559244791668,
+          "top": 0.05198388163248698,
+          "widthRatio": 0.6566519063313803,
+          "heightRatio": 0.03978263092041016
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.0,
+          "top": 0.13325032552083332,
+          "widthRatio": 0.9974896138509115,
+          "heightRatio": 0.130442626953125
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.17011468505859376,
+          "top": 0.7851722717285157,
+          "widthRatio": 0.6629734802246094,
+          "heightRatio": 0.0849812100728353
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.058014363606770834,
+          "top": 0.9103064575195313,
+          "widthRatio": 0.8871754913330078,
+          "heightRatio": 0.05538595581054687
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.17342354329427084,
+          "top": 0.3066217142740885,
+          "widthRatio": 0.6565274607340494,
+          "heightRatio": 0.32872894795735674
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.883176503499349,
+          "top": 0.9367492014567057,
+          "widthRatio": 0.1169559580485026,
+          "heightRatio": 0.056616999308268225
+        }
+      ]
+    },
+    "1080x1920": {
+      "width": 1080,
+      "height": 1920,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.8937263127079716,
+          "top": 0.8751034596761067,
+          "widthRatio": 0.05094119997377749,
+          "heightRatio": 0.03166578674316406
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.05696616165726273,
+          "top": 0.874250996907552,
+          "widthRatio": 0.8878065338134765,
+          "heightRatio": 0.029171778361002605
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.048413071243851274,
+          "top": 0.6687876739501952,
+          "widthRatio": 0.9044128491436995,
+          "heightRatio": 0.07065053304036459
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.21679369382505065,
+          "top": 0.0627527618408203,
+          "widthRatio": 0.5959325640643085,
+          "heightRatio": 0.0413886931737264
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.048582581131546586,
+          "top": 0.13735013834635418,
+          "widthRatio": 0.9045188977276838,
+          "heightRatio": 0.134440185546875
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.22253432549370658,
+          "top": 0.7721068166097005,
+          "widthRatio": 0.5563144610369647,
+          "heightRatio": 0.08239441172281901
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.20165472355595343,
+          "top": 0.30015137227376304,
+          "widthRatio": 0.5956442328559028,
+          "heightRatio": 0.3354247245788574
+        }
+      ]
+    },
+    "970x250": {
+      "width": 970,
+      "height": 250,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.03720281856576192,
+          "top": 0.13596447753906252,
+          "widthRatio": 0.25634856815928037,
+          "heightRatio": 0.1223078384399414
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.44603222498942896,
+          "top": 0.08389662170410157,
+          "widthRatio": 0.2146021791586236,
+          "heightRatio": 0.8316665649987408
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.7075936921109859,
+          "top": 0.692281509399414,
+          "widthRatio": 0.2617960540142256,
+          "heightRatio": 0.1684966278076172
+        },
+        {
+          "name": "Product image",
+          "type": "frame",
+          "slotType": "other",
+          "left": 0.03672132747689473,
+          "top": 0.3318799438476563,
+          "widthRatio": 0.4229758683037512,
+          "heightRatio": 0.4643028411865235
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.7074422791471187,
+          "top": 0.3719965057373047,
+          "widthRatio": 0.25023858768423807,
+          "heightRatio": 0.25434178161621096
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9639676966716334,
+          "top": 0.8636685028076172,
+          "widthRatio": 0.03568356370434318,
+          "heightRatio": 0.13640693664550782
+        }
+      ]
+    },
+    "640x200": {
+      "width": 640,
+      "height": 200,
+      "elements": [
+        {
+          "name": ".background illustration",
+          "type": "background",
+          "slotType": "background",
+          "fill": true
+        },
+        {
+          "name": "Logo",
+          "type": "instance",
+          "slotType": "logo",
+          "left": 0.040300201416015625,
+          "top": 0.11006117248535156,
+          "widthRatio": 0.2804947633743286,
+          "heightRatio": 0.11045670890808106
+        },
+        {
+          "name": "Product image",
+          "type": "rounded-rectangle",
+          "slotType": "other",
+          "left": 0.42145079040527345,
+          "top": 0.11526771545410157,
+          "widthRatio": 0.23883401490916503,
+          "heightRatio": 0.7697127838661909
+        },
+        {
+          "name": "Description",
+          "type": "text",
+          "slotType": "description",
+          "left": 0.7078919219970703,
+          "top": 0.6745837097167969,
+          "widthRatio": 0.2859503173828125,
+          "heightRatio": 0.15038368225097656
+        },
+        {
+          "name": "Product image",
+          "type": "frame",
+          "slotType": "other",
+          "left": 0.04033335876464844,
+          "top": 0.29964816284179685,
+          "widthRatio": 0.5123679656982422,
+          "heightRatio": 0.5898656005859375
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.07170064973831178,
+          "top": 1.0,
+          "widthRatio": 0.22947982788085936,
+          "heightRatio": 0.18970640563964844
+        },
+        {
+          "name": "Age rating",
+          "type": "text",
+          "slotType": "ageRating",
+          "left": 0.9567420692443848,
+          "top": 0.8636307830810547,
+          "widthRatio": 0.04337232971191406,
+          "heightRatio": 0.13561919021606444
+        },
+        {
+          "name": "Button",
+          "type": "frame",
+          "slotType": "button",
+          "left": 0.7079514770507812,
+          "top": 0.39462803649902345,
+          "widthRatio": 0.24677594280242918,
+          "heightRatio": 0.2086048126220703
+        }
+      ]
+    }
+  }
+}
