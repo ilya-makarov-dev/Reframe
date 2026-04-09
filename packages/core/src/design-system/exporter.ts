@@ -1,167 +1,224 @@
 /**
- * DesignSystem exporter — generates DESIGN.md markdown from a DesignSystem object.
+ * DesignSystem exporter — generates DESIGN.md from extracted DesignSystem.
  *
- * DESIGN.md is not just a config file — it's a PROMPT for AI.
- * The format is designed to be read by AI agents and used as
- * design guidance. Every section informs the AI HOW to design.
+ * DESIGN.md is brand CONTEXT, not a template. It tells the AI:
+ *   - WHAT colors, fonts, spacing to use (Theme, Typography, Spacing)
+ *   - HOW components look (Components)
+ *   - WHAT to avoid (Rules)
+ *
+ * It does NOT tell the AI how to structure layouts — that's the AI's job.
+ * The AI creates unique designs, reframe validates them.
  */
 
 import type { DesignSystem } from './types';
 
 export function exportDesignMd(ds: DesignSystem): string {
-  const lines: string[] = [];
+  const s: string[] = [];
   const brand = ds.brand || 'Brand';
-
-  lines.push(`# ${brand}`);
-  lines.push('');
-
-  // ── 1. Atmosphere ──────────────────────────────────────────
-  // This is the most important section for AI — it sets the TONE.
   const bg = ds.colors.background ?? '#ffffff';
   const isDark = isColorDark(bg);
   const primary = ds.colors.primary ?? '#6366f1';
-  const btnStyle = ds.components.button?.style ?? 'rounded';
-  const heroWeight = ds.typography.hierarchy[0]?.fontWeight ?? 700;
+  const text = ds.colors.text ?? (isDark ? '#fafafa' : '#111827');
+  const muted = ds.colors.roles.get('muted') ?? (isDark ? '#71717a' : '#6b7280');
+  const surface = ds.colors.roles.get('surface') ?? (isDark ? '#111827' : '#f9fafb');
+  const border = ds.colors.roles.get('border') ?? (isDark ? '#27272a' : '#e5e7eb');
+  const unit = ds.layout.spacingUnit || 8;
   const fontFamily = ds.typography.hierarchy[0]?.fontFamily ?? 'Inter';
+  const heroWeight = ds.typography.hierarchy[0]?.fontWeight ?? 700;
+  const btnRadius = ds.components.button?.borderRadius ?? 8;
+  const cardRadius = ds.components.card?.borderRadius ?? 12;
+  const radiusScale = ds.layout.borderRadiusScale.length > 0
+    ? ds.layout.borderRadiusScale
+    : [0, 4, 8, 12, 16, 9999];
 
-  lines.push('## Visual Atmosphere');
-  lines.push('');
-  lines.push(`${isDark ? 'Dark' : 'Light'} theme with ${describeColor(primary)} as primary accent. `
-    + `Typography uses ${fontFamily} at weight ${heroWeight} for display — `
-    + `${heroWeight <= 400 ? 'light and confident, luxury feel' : heroWeight <= 500 ? 'balanced, modern feel' : 'bold and commanding'}. `
-    + `${btnStyle === 'pill' ? 'Pill-shaped buttons (9999px radius) for a modern, friendly feel' : btnStyle === 'rounded' ? 'Rounded buttons for approachable, clean UI' : 'Sharp/square buttons for a precise, technical feel'}.`);
-  lines.push('');
+  // ── Brand ──
+  s.push(`# ${brand}`);
+  s.push('');
 
-  // ── 2. Colors ──────────────────────────────────────────────
-  lines.push('## Colors');
-  lines.push('');
-  if (ds.colors.roles.size > 0) {
-    lines.push('| Role | Value |');
-    lines.push('|------|-------|');
-    for (const [role, hex] of ds.colors.roles) {
-      lines.push(`| ${role} | ${hex} |`);
-    }
+  // ── Atmosphere (mood, not instructions) ──
+  s.push('## Atmosphere');
+  s.push('');
+  const weightVibe = heroWeight <= 400
+    ? 'Light type — luxury, editorial restraint.'
+    : heroWeight <= 500
+    ? 'Medium type — precision with warmth.'
+    : 'Bold type — direct, commanding.';
+  const themeVibe = isDark
+    ? 'Dark foundation. Content and color lead.'
+    : 'Light foundation. Clean, open, focused.';
+  s.push(`${themeVibe} ${weightVibe}`);
+  s.push('');
+
+  // ── Theme (extracted colors) ──
+  s.push('## Theme');
+  s.push('');
+  s.push('```');
+  s.push(`fills.primary:    ${primary}`);
+  s.push(`fills.background: ${bg}`);
+  s.push(`fills.surface:    ${surface}`);
+  s.push(`fills.text:       ${text}`);
+  s.push(`fills.muted:      ${muted}`);
+  s.push(`fills.border:     ${border}`);
+  for (const [role, hex] of ds.colors.roles) {
+    if (['primary', 'background', 'surface', 'text', 'muted', 'border'].includes(role)) continue;
+    if (role.startsWith('color-')) continue;
+    s.push(`fills.${role}:${' '.repeat(Math.max(1, 14 - role.length - 6))}${hex}`);
   }
-  lines.push('');
+  s.push('```');
+  s.push('');
 
-  // ── 3. Typography ──────────────────────────────────────────
-  lines.push('## Typography');
-  lines.push('');
+  // ── Typography (extracted) ──
+  s.push('## Typography');
+  s.push('');
+  s.push('```');
   if (ds.typography.hierarchy.length > 0) {
-    lines.push('| Role | Size | Weight | Line Height | Letter Spacing | Font |');
-    lines.push('|------|------|--------|-------------|----------------|------|');
-    for (const rule of ds.typography.hierarchy) {
-      lines.push(
-        `| ${rule.role} | ${rule.fontSize}px | ${rule.fontWeight} | ${rule.lineHeight} | ${rule.letterSpacing}px | ${rule.fontFamily ?? fontFamily} |`
-      );
+    for (const r of ds.typography.hierarchy) {
+      const roleName = mapTypoRole(r.role);
+      const parts = [
+        `fontSize ${r.fontSize}`,
+        `fontWeight ${r.fontWeight}`,
+        `lineHeight ${r.lineHeight}`,
+        `letterSpacing ${r.letterSpacing}`,
+      ];
+      if (r.fontFamily && r.fontFamily !== fontFamily) {
+        parts.push(`fontFamily "${r.fontFamily}"`);
+      }
+      s.push(`${roleName}:${' '.repeat(Math.max(1, 11 - roleName.length))}${parts.join('  ')}`);
     }
   }
-  lines.push('');
+  s.push('```');
+  s.push('');
 
-  // ── 4. Components ──────────────────────────────────────────
-  if (ds.components.button) {
-    lines.push('## Components');
-    lines.push('');
-    const btn = ds.components.button;
-    lines.push('### Button');
-    lines.push(`- Border radius: ${btn.borderRadius}px (${btn.style})`);
-    lines.push(`- Min height: 44px (touch target)`);
-    if (btn.fontWeight) lines.push(`- Font weight: ${btn.fontWeight}`);
-    if (btn.textTransform) lines.push(`- Text transform: ${btn.textTransform}`);
-    lines.push('');
+  // ── Spacing (derived from unit) ──
+  s.push('## Spacing');
+  s.push('');
+  s.push('```');
+  s.push(`unit: ${unit}`);
+  s.push(`scale: ${unit * 0.5}  ${unit}  ${unit * 2}  ${unit * 3}  ${unit * 4}  ${unit * 6}  ${unit * 8}  ${unit * 10}  ${unit * 16}  ${unit * 20}`);
+  s.push('```');
+  s.push('');
+
+  // ── Radius (extracted) ──
+  s.push('## Radius');
+  s.push('');
+  s.push('```');
+  s.push(`scale: ${radiusScale.join('  ')}`);
+  s.push(`button: ${btnRadius}  card: ${cardRadius}  badge: 9999`);
+  s.push('```');
+  s.push('');
+
+  // ── Depth ──
+  s.push('## Depth');
+  s.push('');
+  s.push('```');
+  if (ds.depth && ds.depth.elevationLevels.length > 0) {
+    ds.depth.elevationLevels.forEach((layers, i) => {
+      if (layers.length === 0) {
+        s.push(`level.${i}: none`);
+      } else {
+        const shadowStr = layers.map(l => `shadow(${l.offsetX}, ${l.offsetY}, ${l.blur}, ${l.spread}, ${l.color})`).join(' ');
+        s.push(`level.${i}: ${shadowStr}`);
+      }
+    });
+  } else {
+    s.push('level.0: none');
+    s.push('level.1: shadow(0, 1, 3, 0, rgba(0,0,0,0.1))');
+    s.push('level.2: shadow(0, 4, 12, 0, rgba(0,0,0,0.15))');
+    s.push('level.3: shadow(0, 8, 32, 0, rgba(0,0,0,0.2))');
   }
+  s.push('```');
+  s.push('');
 
-  // ── 5. Layout ──────────────────────────────────────────────
-  lines.push('## Spacing');
-  lines.push('');
-  lines.push(`- Base unit: ${ds.layout.spacingUnit}px`);
-  if (ds.layout.maxWidth) lines.push(`- Max content width: ${ds.layout.maxWidth}px`);
-  lines.push(`- Border radius scale: ${ds.layout.borderRadiusScale.join(', ')}px`);
-  lines.push('');
+  // ── Components (specs, not layout templates) ──
+  s.push('## Components');
+  s.push('');
+  s.push('```');
+  s.push('button.filled:');
+  s.push(`  fills [${primary}]  cornerRadius ${btnRadius}  pad [12, 24]  minHeight 44`);
+  s.push(`  text: fills [#ffffff]  fontWeight ${ds.components.button?.fontWeight ?? 600}`);
+  s.push('');
+  s.push('button.outline:');
+  s.push(`  fills []  strokes [${primary}]  cornerRadius ${btnRadius}  pad [12, 24]  minHeight 44`);
+  s.push(`  text: fills [${primary}]  fontWeight 500`);
+  s.push('');
+  s.push('card:');
+  s.push(`  fills [${surface}]  cornerRadius ${cardRadius}  pad 24  gap 16`);
+  s.push('');
+  s.push('badge:');
+  s.push(`  fills [rgba(${hexToRgbStr(primary)}, 0.1)]  cornerRadius 9999  pad [4, 12]`);
+  s.push(`  text: fontSize 12  fontWeight 500  fills [${primary}]`);
+  s.push('');
+  s.push('divider:');
+  s.push(`  fills [${border}]  height 1`);
+  s.push('```');
+  s.push('');
 
-  // ── 6. Responsive ──────────────────────────────────────────
-  if (ds.responsive.breakpoints.length > 0) {
-    lines.push('## Breakpoints');
-    lines.push('');
-    lines.push('| Name | Width |');
-    lines.push('|------|-------|');
-    for (const bp of ds.responsive.breakpoints) {
-      lines.push(`| ${bp.name} | ${bp.width}px |`);
-    }
-    lines.push('');
+  // ── Color Strategy ──
+  s.push('## Color Strategy');
+  s.push('');
+  s.push('```');
+  s.push(`approach: ${isDark ? 'dark' : 'light'}`);
+  if (isDark) {
+    s.push(`elevation: luminance stacking (${bg} → ${surface} → rgba(255,255,255,0.05))`);
   }
+  s.push(`semantic: info #3b82f6  success #10b981  warning #f59e0b  error #ef4444`);
+  s.push('```');
+  s.push('');
 
-  // ── 7. Design Patterns ─────────────────────────────────────
-  // This section teaches AI HOW to compose layouts.
-  lines.push('## Patterns');
-  lines.push('');
-  lines.push(`### Hero Section`);
-  lines.push(`- Background: ${isDark ? bg : 'white or gradient'}`);
-  lines.push(`- Padding: ${Math.max(80, ds.layout.spacingUnit * 12)}px vertical, ${Math.max(60, ds.layout.spacingUnit * 8)}px horizontal`);
-  lines.push(`- Headline: ${ds.typography.hierarchy[0]?.fontSize ?? 56}px, weight ${heroWeight}, centered`);
-  lines.push(`- Subtext: ${ds.typography.hierarchy.find(r => r.role === 'body')?.fontSize ?? 18}px, muted color, max-width 600px, centered`);
-  lines.push(`- CTA: 1-2 buttons centered, ${ds.layout.spacingUnit * 2}px gap`);
-  lines.push('');
-  lines.push(`### Card Grid`);
-  lines.push(`- 3 columns desktop, 1 mobile`);
-  lines.push(`- Card padding: ${ds.layout.spacingUnit * 3}px`);
-  lines.push(`- Gap: ${ds.layout.spacingUnit * 2}px between cards`);
-  lines.push(`- Each card: heading + body text + optional icon/stat`);
-  lines.push('');
-  lines.push(`### Dashboard`);
-  lines.push(`- Sidebar: 240-280px fixed width, ${isDark ? 'dark' : 'light gray'} background`);
-  lines.push(`- Main: flex-grow, padding ${ds.layout.spacingUnit * 4}px`);
-  lines.push(`- Stats row: equal-width cards, ${ds.layout.spacingUnit * 2}px gap`);
-  lines.push(`- Use subtle shadows for card elevation`);
-  lines.push('');
-  lines.push(`### Navbar`);
-  lines.push(`- Height: 48-64px, ${isDark ? bg : 'white'} background`);
-  lines.push(`- Logo left, nav links center or right, CTA button right`);
-  lines.push(`- Nav links: ${ds.typography.hierarchy.find(r => r.role === 'caption' || r.role === 'button')?.fontSize ?? 14}px`);
-  lines.push('');
+  // ── Rules (constraints, not templates) ──
+  s.push('## Rules');
+  s.push('');
+  s.push('```');
+  s.push('do:');
+  s.push(`  - Spacing multiples of ${unit}`);
+  s.push('  - Touch targets min 44px');
+  s.push('  - Contrast 4.5:1 body, 3:1 large text');
+  s.push('  - Explicit fills on every container and text');
+  s.push('  - cornerRadius from scale only');
+  s.push('  - Colors from theme only');
+  s.push('');
+  s.push('dont:');
+  s.push('  - Colors outside palette');
+  s.push('  - Weights outside typography table');
+  s.push('  - cornerRadius outside scale');
+  s.push('```');
+  s.push('');
 
-  // ── 8. Do's and Don'ts ─────────────────────────────────────
-  lines.push('## Rules');
-  lines.push('');
-  lines.push('### Do');
-  lines.push(`- Use ${fontFamily} for all text`);
-  lines.push(`- Use weight ${heroWeight} for headlines`);
-  lines.push(`- Use ${primary} as the primary accent color`);
-  lines.push(`- Keep border-radius within scale: ${ds.layout.borderRadiusScale.slice(0, 5).join(', ')}px`);
-  lines.push(`- Spacing must be multiples of ${ds.layout.spacingUnit}px`);
-  lines.push(`- Minimum touch target: 44x44px for buttons`);
-  lines.push(`- Text contrast: minimum 4.5:1 for body, 3:1 for large text`);
-  lines.push('');
-  lines.push('### Don\'t');
-  lines.push(`- Don't use colors outside the palette`);
-  lines.push(`- Don't use font weights not in the typography table`);
-  lines.push(`- Don't use pure black (#000000) for text — use ${ds.colors.text ?? '#1a1a1a'}`);
-  lines.push(`- Don't make buttons smaller than 44px height`);
-  lines.push(`- Don't overcrowd — ${isDark ? 'dark themes need breathing room' : 'use generous whitespace'}`);
-  lines.push('');
-
-  return lines.join('\n');
+  return s.join('\n');
 }
 
 // ── Helpers ──────────────────────────────────────────────────
 
 function isColorDark(hex: string): boolean {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return (r * 299 + g * 587 + b * 114) / 1000 < 128;
+  const rgb = hexToRgb(hex);
+  if (!rgb) return false;
+  return (rgb.r * 299 + rgb.g * 587 + rgb.b * 114) / 1000 < 128;
 }
 
-function describeColor(hex: string): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  if (r > 200 && g < 100 && b < 100) return 'red';
-  if (r > 200 && g > 100 && b < 100) return 'orange';
-  if (r > 200 && g > 200 && b < 100) return 'yellow';
-  if (r < 100 && g > 180 && b < 100) return 'green';
-  if (r < 100 && g < 100 && b > 200) return 'blue';
-  if (r > 100 && g < 100 && b > 200) return 'purple';
-  if (r > 200 && g < 100 && b > 150) return 'pink';
-  return 'accent';
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const h = hex.replace('#', '');
+  if (h.length < 6) return null;
+  return {
+    r: parseInt(h.slice(0, 2), 16),
+    g: parseInt(h.slice(2, 4), 16),
+    b: parseInt(h.slice(4, 6), 16),
+  };
+}
+
+function hexToRgbStr(hex: string): string {
+  const rgb = hexToRgb(hex);
+  return rgb ? `${rgb.r},${rgb.g},${rgb.b}` : '99,102,241';
+}
+
+function mapTypoRole(role: string): string {
+  switch (role) {
+    case 'hero': return 'display';
+    case 'title': return 'heading';
+    case 'subtitle': return 'subhead';
+    case 'body': return 'body';
+    case 'caption': return 'caption';
+    case 'disclaimer': return 'caption';
+    case 'button': return 'button';
+    default: return role;
+  }
 }

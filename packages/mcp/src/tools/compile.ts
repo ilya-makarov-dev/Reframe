@@ -13,36 +13,28 @@
 import { z } from 'zod';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
+import { execSync } from 'child_process';
 import { importFromHtml } from '../../../core/src/importers/html.js';
 import { compileTemplate, autoPickLayout } from '../../../core/src/compiler/index.js';
 import { build } from '../../../core/src/builder.js';
 import { resolveBlueprint } from '../../../core/src/ui/blueprint.js';
 import { fromDesignMd } from '../../../core/src/ui/theme.js';
-import { computeAllLayouts } from '../../../core/src/engine/layout.js';
+import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
 import { exportToHtml } from '../../../core/src/exporters/html.js';
-import { exportToSvg } from '../../../core/src/exporters/svg.js';
 import { exportToReact } from '../../../core/src/exporters/react.js';
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
-import { setHost } from '../../../core/src/host/context.js';
+import { runWithHostAsync } from '../../../core/src/host/context.js';
 import { parseDesignMd } from '../../../core/src/design-system/index.js';
-import {
-  audit,
-  textOverflow, minFontSize as minFontSizeRule, noEmptyText, noZeroSize,
-  contrastMinimum, fontInPalette, colorInPalette, fontWeightCompliance,
-  fontSizeRoleMatch, borderRadiusCompliance, spacingGridCompliance,
-  visualHierarchy, contentDensity, visualBalance, ctaVisibility,
-  type AuditRule,
-} from '../../../core/src/audit.js';
+import { audit } from '../../../core/src/audit.js';
+import { buildInspectAuditRules } from '../../../core/src/inspect-audit-rules.js';
 import { runAutoFixLoop } from './_auto-fix.js';
-import { exportScene } from '../engine.js';
-import { storeScene, getScene } from '../store.js';
+import { exportSvgFromGraph } from '../engine.js';
+import { storeScene, getScene, resaveScene, getExportsBaseDir, getWorkspaceRoot, getReframeDir } from '../store.js';
 import { autoSaveScene } from './project.js';
 import { getSession } from '../session.js';
-
-// ─── Constants ────────────────────────────────────────────────
-
-const MAX_INLINE_BYTES = 50_000;
+import { MCP_LIMITS } from '../limits.js';
+import { makeToolJsonErrorResult } from '../tool-result.js';
 
 function countNodesInGraph(graph: any, rootId: string): number {
   let count = 0;
@@ -78,11 +70,14 @@ export const compileInputSchema = {
   ),
 
   // Path 3: HTML import
-  html: z.string().optional().describe('HTML/CSS \u2192 import path. Use content, blueprint, OR html.'),
+  html: z.string().optional().describe('HTML/CSS string to import. Use content, blueprint, html, OR file.'),
+  file: z.string().optional().describe('Path to HTML file to import (e.g. .reframe/src/home.html). Alternative to html — engine reads the file. Use after editing source HTML.'),
 
   // Shared
   designMd: z.string().optional().describe('DESIGN.md content. Required for compiler, optional for HTML.'),
-  brand: z.string().optional().describe('Brand name from library (stripe, linear, vercel, etc.) — auto-loads DESIGN.md. Alternative to designMd.'),
+  brand: z.string().optional().describe(
+    'Optional slug — same as reframe_design: fetches DESIGN.md via local clone / GitHub raw (loadBrandDesignMd). No built-in catalog. Alternative to designMd.',
+  ),
   name: z.string().optional().describe('Scene name prefix.'),
 
   // Single size or multi-size
@@ -131,6 +126,7 @@ interface CompileInput {
   blueprint?: Record<string, any>;
   layout?: 'centered' | 'left-aligned' | 'split' | 'stacked' | 'auto';
   html?: string;
+  file?: string;
   designMd?: string;
   brand?: string;
   name?: string;
@@ -153,6 +149,15 @@ export async function handleCompile(input: CompileInput) {
   const session = getSession();
   session.recordToolCall('compile');
 
+  // ─── Resolve file → html ──
+  if (input.file && !input.html) {
+    const filePath = resolve(getWorkspaceRoot(), input.file);
+    if (!existsSync(filePath)) {
+      return { content: [{ type: 'text' as const, text: `File not found: ${filePath}` }] };
+    }
+    input.html = readFileSync(filePath, 'utf-8');
+  }
+
   // ─── Auto-load DESIGN.md: explicit brand → session brand → none ──
   if (!input.designMd && input.brand) {
     const loaded = await loadBrandDesignMd(input.brand);
@@ -162,12 +167,11 @@ export async function handleCompile(input: CompileInput) {
       const ds = session.getOrParseDesignMd(loaded, parseDesignMd);
       session.setBrand(input.brand, loaded, ds);
     } else {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: `Brand "${input.brand}" not found. Use reframe_design to see available brands.`,
-        }],
-      };
+      return makeToolJsonErrorResult(
+        `Brand "${input.brand}" not found. Use reframe_design (url/html/slug) or pass designMd.`,
+        'compile.brand_not_found',
+        { brand: input.brand },
+      );
     }
   }
   // Fallback to session brand if no explicit brand/designMd
@@ -222,6 +226,66 @@ export async function handleCompile(input: CompileInput) {
         text: 'Provide width + height, sizes[], or html (size auto-detected from HTML).',
       }],
     };
+  }
+
+  // ─── Size / payload bounds ──────────────────────────────────
+
+  if (input.html && input.html.length > MCP_LIMITS.compileHtmlMaxChars) {
+    return makeToolJsonErrorResult(
+      `html exceeds ${MCP_LIMITS.compileHtmlMaxChars} characters (got ${input.html.length}).`,
+      'compile.html_too_large',
+      { length: input.html.length, max: MCP_LIMITS.compileHtmlMaxChars },
+    );
+  }
+  if (input.designMd && input.designMd.length > MCP_LIMITS.compileDesignMdMaxChars) {
+    return makeToolJsonErrorResult(
+      `designMd exceeds ${MCP_LIMITS.compileDesignMdMaxChars} characters (got ${input.designMd.length}).`,
+      'compile.design_md_too_large',
+      { length: input.designMd.length, max: MCP_LIMITS.compileDesignMdMaxChars },
+    );
+  }
+  if (useBlueprint && input.blueprint) {
+    let bpLen = 0;
+    try {
+      bpLen = JSON.stringify(input.blueprint).length;
+    } catch {
+      return makeToolJsonErrorResult('blueprint could not be serialized to JSON.', 'compile.blueprint_invalid');
+    }
+    if (bpLen > MCP_LIMITS.compileBlueprintJsonMaxChars) {
+      return makeToolJsonErrorResult(
+        `blueprint JSON exceeds ${MCP_LIMITS.compileBlueprintJsonMaxChars} characters (got ${bpLen}).`,
+        'compile.blueprint_too_large',
+        { length: bpLen, max: MCP_LIMITS.compileBlueprintJsonMaxChars },
+      );
+    }
+  }
+  if (sizes.length > MCP_LIMITS.compileSizesMaxCount) {
+    return makeToolJsonErrorResult(
+      `Too many sizes (${sizes.length}); max ${MCP_LIMITS.compileSizesMaxCount}.`,
+      'compile.too_many_sizes',
+      { count: sizes.length, max: MCP_LIMITS.compileSizesMaxCount },
+    );
+  }
+  for (const s of sizes) {
+    const maxD = MCP_LIMITS.compileSizeMaxDimension;
+    const needsDims = useBlueprint || useCompiler;
+    if (needsDims) {
+      if (s.width <= 0 || s.height <= 0 || s.width > maxD || s.height > maxD) {
+        return makeToolJsonErrorResult(
+          `Invalid size ${s.name}: width/height must be 1…${maxD} for blueprint/compiler paths.`,
+          'compile.size_out_of_range',
+          { name: s.name, width: s.width, height: s.height, max: maxD },
+        );
+      }
+    } else if (input.html && (s.width !== 0 || s.height !== 0)) {
+      if (s.width > maxD || s.height > maxD || s.width < 0 || s.height < 0) {
+        return makeToolJsonErrorResult(
+          `Invalid HTML import size override for ${s.name}: dimensions must be 0…${maxD}.`,
+          'compile.size_out_of_range',
+          { name: s.name, width: s.width, height: s.height, max: maxD },
+        );
+      }
+    }
   }
 
   // ─── Parse design system once ───────────────────────────────
@@ -295,8 +359,7 @@ export async function handleCompile(input: CompileInput) {
         const built = build(blueprint);
         graph = built.graph;
         rootId = built.root.id;
-        setHost(new StandaloneHost(graph));
-        try { computeAllLayouts(graph, rootId); } catch (_) {}
+        ensureSceneLayout(graph, rootId);
         resolvedLayout = 'blueprint' as any;
       } else if (useCompiler) {
         // ── COMPILER PATH ──────────────────────────────────
@@ -316,10 +379,9 @@ export async function handleCompile(input: CompileInput) {
         const built = build(blueprint);
         graph = built.graph;
         rootId = built.root.id;
-        setHost(new StandaloneHost(graph));
 
         try {
-          computeAllLayouts(graph, rootId);
+          ensureSceneLayout(graph, rootId);
         } catch (_) {
           // Yoga may not be initialized — layout falls back to blueprint positions
         }
@@ -340,7 +402,9 @@ export async function handleCompile(input: CompileInput) {
       continue;
     }
 
+    await runWithHostAsync(new StandaloneHost(graph), async () => {
     const root = graph.getNode(rootId)!;
+    ensureSceneLayout(graph, rootId);
 
     // ── AUDIT + AUTOFIX ────────────────────────────────────
     let auditSummary = '';
@@ -355,30 +419,14 @@ export async function handleCompile(input: CompileInput) {
         }
       }
 
-      const rules: AuditRule[] = [
-        textOverflow(),
-        minFontSizeRule(minFS),
-        noEmptyText(),
-        noZeroSize(),
-        contrastMinimum(minCR),
-        fontWeightCompliance(),
-        fontSizeRoleMatch(),
-        borderRadiusCompliance(),
-        spacingGridCompliance(),
-        visualHierarchy(),
-        contentDensity(),
-        visualBalance(),
-        ctaVisibility(),
-      ];
-      if (auditDs) {
-        rules.push(fontInPalette());
-        rules.push(colorInPalette());
-      }
+      const rules = buildInspectAuditRules(auditDs as any, {
+        minFontSize: minFS,
+        minContrast: minCR,
+      });
 
       const { finalIssues, allFixed, passCount } = runAutoFixLoop(
         graph, rootId,
         () => {
-          setHost(new StandaloneHost(graph));
           const wrappedRoot = new StandaloneNode(graph, graph.getNode(rootId)!);
           return audit(wrappedRoot, rules, auditDs as any);
         },
@@ -388,15 +436,27 @@ export async function handleCompile(input: CompileInput) {
       const errors = finalIssues.filter(i => i.severity === 'error');
 
       if (allFixed.length > 0) {
-        auditSummary += `Auto-fixed: ${allFixed.join(', ')}\n`;
+        // Collapse duplicate fixes: "contrast-minimum: auto-corrected" x6 → "contrast-minimum: auto-corrected (×6)"
+        const fixCounts = new Map<string, number>();
+        for (const f of allFixed) fixCounts.set(f, (fixCounts.get(f) ?? 0) + 1);
+        const fixSummary = [...fixCounts].map(([f, n]) => n > 1 ? `${f} (×${n})` : f).join(', ');
+        auditSummary += `Auto-fixed: ${fixSummary}\n`;
       }
+      const warnings = finalIssues.filter(i => i.severity === 'warning');
+
       if (errors.length > 0) {
         auditSummary += `Audit: ${errors.length} error${errors.length > 1 ? 's' : ''}\n`;
         for (const i of errors) {
           auditSummary += `  [x] ${i.rule}: ${i.message}\n`;
         }
+      } else if (warnings.length > 0) {
+        auditSummary += `Audit: PASS with ${warnings.length} warning${warnings.length > 1 ? 's' : ''}\n`;
+        for (const i of warnings) {
+          auditSummary += `  [!] ${i.rule}: ${i.message}\n`;
+          if (i.fix) auditSummary += `      fix: ${i.fix.css}\n`;
+        }
       } else {
-        auditSummary += `Audit: PASS (${rules.length} rules, ${passCount} pass${passCount > 1 ? 'es' : ''})\n`;
+        auditSummary += `Audit: PASS (${rules.length} rules)\n`;
       }
 
       // Record audit in session
@@ -428,6 +488,32 @@ export async function handleCompile(input: CompileInput) {
       !!input.designMd,
     );
 
+    // ── SAVE SOURCE HTML ───────────────────────────────────
+    // Persist source HTML so the agent can read/edit it later and re-compile.
+    // If name contains '/' (e.g. "site/home"), use the prefix as group and create subdirectory.
+    if (input.html) {
+      try {
+        // Parse group from name: "site/home" → group="site", leaf="home"
+        const nameParts = (input.name ?? sceneName).split('/');
+        const group = nameParts.length > 1 ? nameParts.slice(0, -1).join('/') : undefined;
+        const leafName = nameParts[nameParts.length - 1];
+        const srcSubDir = group ? join(getReframeDir(), 'src', group) : join(getReframeDir(), 'src');
+        if (!existsSync(srcSubDir)) mkdirSync(srcSubDir, { recursive: true });
+        const srcFileName = `${leafName}.html`;
+        const srcPath = join(srcSubDir, srcFileName);
+        writeFileSync(srcPath, input.html, 'utf-8');
+        const srcRelative = group ? `src/${group}/${srcFileName}` : `src/${srcFileName}`;
+
+        // Store source path + group on the scene, then re-save to update manifest
+        const stored = getScene(sceneId);
+        if (stored) {
+          (stored as any).sourceFile = srcRelative;
+          (stored as any).group = group;
+          resaveScene(sceneId);
+        }
+      } catch { /* best-effort */ }
+    }
+
     // ── EXPORT ─────────────────────────────────────────────
     const exportResults: Record<string, string> = {};
 
@@ -442,12 +528,13 @@ export async function handleCompile(input: CompileInput) {
             break;
           }
           case 'svg': {
-            const sceneData = { root: exportScene(graph, rootId) };
-            exportResults.svg = exportToSvg(sceneData as any);
+            exportResults.svg = exportSvgFromGraph(graph, rootId, {
+              xmlDeclaration: true,
+              includeNames: true,
+            });
             break;
           }
           case 'react': {
-            setHost(new StandaloneHost(graph));
             const wrappedRoot = new StandaloneNode(graph, graph.getNode(rootId)!);
             exportResults.react = exportToReact(wrappedRoot);
             break;
@@ -475,9 +562,19 @@ export async function handleCompile(input: CompileInput) {
       }
     }
 
+    // Report source HTML path (for agent to read/edit later)
+    const stored = getScene(sceneId);
+    if (input.html && stored) {
+      const srcRelative = (stored as any).sourceFile;
+      if (srcRelative) {
+        const srcPath = join(getReframeDir(), '..', '.reframe', srcRelative).replace(/\\/g, '/');
+        sections.push(`    source: [${srcRelative}](${join(getReframeDir(), srcRelative).replace(/\\/g, '/')})`);
+      }
+    }
+
     // Auto-save exports to .reframe/exports/
     const extMap: Record<string, string> = { html: 'html', svg: 'svg', react: 'tsx' };
-    const exportDir = join(process.cwd(), '.reframe', 'exports');
+    const exportDir = getExportsBaseDir();
     if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
 
     for (const [fmt, content] of Object.entries(exportResults)) {
@@ -493,6 +590,7 @@ export async function handleCompile(input: CompileInput) {
     }
 
     sections.push('');
+    });
   }
 
   // ─── Summary ────────────────────────────────────────────────
@@ -510,7 +608,7 @@ export async function handleCompile(input: CompileInput) {
     }
   }
   sections.push('');
-  sections.push(`Next: reframe_inspect({ sceneId: "${sceneIds[0]}" }) — review the design, fix issues with reframe_edit, then export.`);
+  sections.push(`Next: reframe_inspect({ sceneId: "${sceneIds[0]}" })`);
 
   return { content: [{ type: 'text' as const, text: sections.join('\n') }] };
 }
@@ -522,33 +620,24 @@ const BRAND_ALIASES: Record<string, string> = {
   together: 'together.ai', opencode: 'opencode.ai',
 };
 
-async function loadBrandDesignMd(brand: string): Promise<string | null> {
+/** Fetch DESIGN.md by brand slug via npx getdesign. Caches in project .reframe/brands/. */
+export async function loadBrandDesignMd(brand: string): Promise<string | null> {
   const brandKey = BRAND_ALIASES[brand.toLowerCase()] ?? brand.toLowerCase();
+  const outDir = join(getWorkspaceRoot(), '.reframe', 'brands', brandKey);
+  const outFile = join(outDir, 'DESIGN.md');
 
-  // Try local files
-  const localPaths = [
-    join(process.cwd(), 'awesome-design-md-main', 'design-md', brandKey, 'DESIGN.md'),
-    join(__dirname, '..', '..', '..', '..', '..', '..', 'awesome-design-md-main', 'design-md', brandKey, 'DESIGN.md'),
-    join(__dirname, '..', '..', '..', '..', 'awesome-design-md-main', 'design-md', brandKey, 'DESIGN.md'),
-  ];
-  for (const p of localPaths) {
-    try {
-      const resolved = resolve(p);
-      if (existsSync(resolved)) return readFileSync(resolved, 'utf-8');
-    } catch {}
-  }
+  // Cached locally in project
+  if (existsSync(outFile)) return readFileSync(outFile, 'utf-8');
 
-  // Fallback: GitHub
-  const ghUrls = [
-    `https://raw.githubusercontent.com/anthropics/awesome-design-md/main/design-md/${brandKey}/DESIGN.md`,
-    `https://raw.githubusercontent.com/ilya-makarov-dev/awesome-design-md/main/design-md/${brandKey}/DESIGN.md`,
-  ];
-  for (const url of ghUrls) {
-    try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      if (resp.ok) return await resp.text();
-    } catch {}
-  }
+  // Fetch via npm
+  try {
+    mkdirSync(outDir, { recursive: true });
+    execSync(`npx getdesign add ${brandKey} --out "${outFile}"`, {
+      timeout: 30000,
+      stdio: 'pipe',
+    });
+    if (existsSync(outFile)) return readFileSync(outFile, 'utf-8');
+  } catch {}
 
   return null;
 }

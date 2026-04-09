@@ -11,13 +11,16 @@ import { LayersPanel } from './components/LayersPanel';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { ProjectPanel } from './components/ProjectPanel';
 import { Toolbar } from './components/Toolbar';
-import { useSceneStore } from './store/scene';
+import { ArtboardTabs } from './components/ArtboardTabs';
+import { AuditPanel } from './components/AuditPanel';
+import { useSceneStore, getActiveArtboard } from './store/scene';
 import { useMcpAutoConnect } from './mcp/hooks';
 import { loadFromUrlHash } from './components/ShareDialog';
 import './styles/app.css';
 
 export function App() {
-  const { undo, redo, deleteNode, selectedIds, rootId, loadSceneJson, setTimeline, loadDesignMd } = useSceneStore();
+  const { undo, redo, deleteNode, selectedIds, loadSceneJson, setTimeline, loadDesignMd } = useSceneStore();
+  const rootId = useSceneStore(s => getActiveArtboard(s)?.rootId ?? null);
 
   useMcpAutoConnect();
 
@@ -60,8 +63,14 @@ export function App() {
         {/* Panels float over canvas */}
         <div className="panel float-panel float-panel--left">
           <ProjectPanel />
-          <div style={{ flex: 1, overflow: 'auto' }}>
-            <LayersPanel />
+          <ArtboardTabs />
+          <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <div style={{ flex: 1, overflow: 'auto' }}>
+              <LayersPanel />
+            </div>
+            <div style={{ flexShrink: 0, maxHeight: 240, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              <AuditPanel />
+            </div>
           </div>
         </div>
 

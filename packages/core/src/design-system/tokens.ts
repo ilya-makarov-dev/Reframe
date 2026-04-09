@@ -183,11 +183,93 @@ export function tokenizeDesignSystem(
   const fullRadius = scale.find(r => r >= 9999) ?? 9999;
   addToken('radius.full', 'FLOAT', fullRadius);
 
+  // ── Spacing scale tokens ────────────────────────────────────
+  if (ds.layout.spacingScale && ds.layout.spacingScale.length > 0) {
+    for (const val of ds.layout.spacingScale) {
+      addToken(`space.${val}`, 'FLOAT', val);
+    }
+  }
+  if (ds.layout.sectionSpacing) {
+    addToken('space.section', 'FLOAT', ds.layout.sectionSpacing);
+  }
+  if (ds.layout.maxWidth) {
+    addToken('layout.maxWidth', 'FLOAT', ds.layout.maxWidth);
+  }
+
   // ── Button tokens ──────────────────────────────────────────
   if (ds.components.button) {
-    addToken('button.radius', 'FLOAT', ds.components.button.borderRadius);
-    if (ds.components.button.fontWeight) {
-      addToken('button.fontWeight', 'FLOAT', ds.components.button.fontWeight);
+    const btn = ds.components.button;
+    addToken('button.radius', 'FLOAT', btn.borderRadius);
+    if (btn.fontWeight) addToken('button.fontWeight', 'FLOAT', btn.fontWeight);
+    if (btn.textTransform) addToken('button.textTransform', 'STRING', btn.textTransform);
+
+    // Button variants
+    if (btn.variants) {
+      for (const v of btn.variants) {
+        const prefix = `button.${v.name}`;
+        if (v.background) addToken(`${prefix}.bg`, 'COLOR', hexToColor(v.background));
+        if (v.color) addToken(`${prefix}.color`, 'COLOR', hexToColor(v.color));
+        if (v.borderRadius != null) addToken(`${prefix}.radius`, 'FLOAT', v.borderRadius);
+        if (v.fontWeight) addToken(`${prefix}.fontWeight`, 'FLOAT', v.fontWeight);
+        if (v.fontSize) addToken(`${prefix}.fontSize`, 'FLOAT', v.fontSize);
+        if (v.paddingX != null) addToken(`${prefix}.paddingX`, 'FLOAT', v.paddingX);
+        if (v.paddingY != null) addToken(`${prefix}.paddingY`, 'FLOAT', v.paddingY);
+        if (v.minHeight) addToken(`${prefix}.minHeight`, 'FLOAT', v.minHeight);
+        if (v.hover?.background) addToken(`${prefix}.hoverBg`, 'COLOR', hexToColor(v.hover.background));
+      }
+    }
+  }
+
+  // ── Card tokens ────────────────────────────────────────────
+  if (ds.components.card) {
+    const card = ds.components.card;
+    addToken('card.radius', 'FLOAT', card.borderRadius);
+    if (card.background) addToken('card.bg', 'COLOR', hexToColor(card.background));
+    if (card.borderColor) addToken('card.borderColor', 'COLOR', hexToColor(card.borderColor));
+    if (card.padding) addToken('card.padding', 'FLOAT', card.padding);
+  }
+
+  // ── Badge tokens ───────────────────────────────────────────
+  if (ds.components.badge) {
+    const badge = ds.components.badge;
+    addToken('badge.radius', 'FLOAT', badge.borderRadius);
+    if (badge.fontSize) addToken('badge.fontSize', 'FLOAT', badge.fontSize);
+    if (badge.fontWeight) addToken('badge.fontWeight', 'FLOAT', badge.fontWeight);
+    if (badge.paddingX != null) addToken('badge.paddingX', 'FLOAT', badge.paddingX);
+    if (badge.paddingY != null) addToken('badge.paddingY', 'FLOAT', badge.paddingY);
+    if (badge.background) addToken('badge.bg', 'COLOR', hexToColor(badge.background));
+    if (badge.color) addToken('badge.color', 'COLOR', hexToColor(badge.color));
+  }
+
+  // ── Input tokens ───────────────────────────────────────────
+  if (ds.components.input) {
+    const input = ds.components.input;
+    addToken('input.radius', 'FLOAT', input.borderRadius);
+    if (input.borderColor) addToken('input.borderColor', 'COLOR', hexToColor(input.borderColor));
+    if (input.fontSize) addToken('input.fontSize', 'FLOAT', input.fontSize);
+    if (input.height) addToken('input.height', 'FLOAT', input.height);
+    if (input.focusBorderColor) addToken('input.focusBorderColor', 'COLOR', hexToColor(input.focusBorderColor));
+  }
+
+  // ── Nav tokens ─────────────────────────────────────────────
+  if (ds.components.nav) {
+    const nav = ds.components.nav;
+    if (nav.height) addToken('nav.height', 'FLOAT', nav.height);
+    if (nav.fontSize) addToken('nav.fontSize', 'FLOAT', nav.fontSize);
+    if (nav.fontWeight) addToken('nav.fontWeight', 'FLOAT', nav.fontWeight);
+    if (nav.background) addToken('nav.bg', 'COLOR', hexToColor(nav.background));
+  }
+
+  // ── Font feature tokens ────────────────────────────────────
+  if (ds.typography.fontFeatures && ds.typography.fontFeatures.length > 0) {
+    const featureStr = ds.typography.fontFeatures.map(f => f.tag).join(',');
+    addToken('type.fontFeatures', 'STRING', featureStr);
+  }
+
+  // ── Gradient tokens ────────────────────────────────────────
+  if (ds.colors.gradients) {
+    for (const [name, css] of ds.colors.gradients) {
+      addToken(`gradient.${name}`, 'STRING', css);
     }
   }
 

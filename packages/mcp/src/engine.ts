@@ -8,7 +8,26 @@
 import { SceneGraph } from '../../core/src/engine/scene-graph.js';
 import { StandaloneHost } from '../../core/src/adapters/standalone/adapter.js';
 import { setHost } from '../../core/src/host/context.js';
-import { serializeSceneNode, deserializeToGraph, migrateScene, type INodeJSON } from '../../core/src/serialize.js';
+import { exportToSvg, type SvgExportOptions } from '../../core/src/exporters/svg.js';
+import {
+  serializeSceneNode,
+  deserializeToGraph,
+  deserializeScene,
+  migrateScene,
+  migrateSceneJSON,
+  applyImportedNodeLayoutProps,
+  type INodeJSON,
+} from '../../core/src/serialize.js';
+
+function isSceneJsonEnvelope(scene: unknown): boolean {
+  if (scene === null || typeof scene !== 'object') return false;
+  const o = scene as Record<string, unknown>;
+  return (
+    typeof o.version === 'number' ||
+    o.timeline != null ||
+    (o.images !== null && typeof o.images === 'object')
+  );
+}
 
 // ─── Scene Import/Export ───────────────────────────────────────
 
@@ -30,18 +49,7 @@ function importNodeRecursive(graph: SceneGraph, parentId: string, nodeJson: any)
     overrides[key] = value;
   }
 
-  // Normalize constraints → engine fields
-  if (nodeJson.constraints) {
-    overrides.horizontalConstraint = nodeJson.constraints.horizontal;
-    overrides.verticalConstraint = nodeJson.constraints.vertical;
-    delete overrides.constraints;
-  }
-
-  // Normalize characters → text
-  if ('characters' in overrides && !('text' in overrides)) {
-    overrides.text = overrides.characters;
-    delete overrides.characters;
-  }
+  applyImportedNodeLayoutProps(overrides);
 
   const node = graph.createNode(nodeJson.type ?? 'FRAME', parentId, {
     name: nodeJson.name ?? nodeJson.type ?? 'Node',
@@ -65,6 +73,12 @@ export function exportScene(graph: SceneGraph, nodeId: string): INodeJSON {
   return serializeSceneNode(graph, nodeId, { compact: true });
 }
 
+/** Serialize from live SceneGraph (with image hashes, layout, etc.) then render SVG — same idea as CLI export-svg. */
+export function exportSvgFromGraph(graph: SceneGraph, rootId: string, options?: SvgExportOptions): string {
+  // Serialized INode matches the SVG shape at runtime; cast matches CLI export-svg.
+  return exportToSvg({ root: exportScene(graph, rootId) } as any, options);
+}
+
 export function countNodes(graph: SceneGraph, id: string): number {
   let n = 1;
   const node = graph.getNode(id);
@@ -74,16 +88,41 @@ export function countNodes(graph: SceneGraph, id: string): number {
 
 // ─── Scene Setup ───────────────────────────────────────────────
 
+/**
+ * Build a SceneGraph from inline JSON (`resolveScene({ scene })` path).
+ * Uses the same deserialization as Studio/core: `deserializeToGraph` / `deserializeScene`
+ * (instance index, MIXED sentinels, BOOLEAN_OPERATION → VECTOR) instead of ad-hoc `importScene`.
+ *
+ * Envelope: `packages/core/src/spec/scene-envelope.ts`
+ */
 export function createSceneFromJson(sceneJson: any): { graph: SceneGraph; rootId: string } {
-  const graph = new SceneGraph();
-  const host = new StandaloneHost(graph);
-  setHost(host);
-  const page = graph.addPage('Source');
-  const rootId = importScene(graph, page.id, sceneJson.root);
+  if (!sceneJson?.root || typeof sceneJson.root !== 'object') {
+    throw new Error('Invalid scene JSON: expected an object with a `root` node');
+  }
+
+  let graph: SceneGraph;
+  let rootId: string;
+
+  if (isSceneJsonEnvelope(sceneJson)) {
+    const migrated = migrateSceneJSON(sceneJson);
+    ({ graph, rootId } = deserializeScene(migrated));
+  } else {
+    const migratedRoot = migrateScene(sceneJson.root) as INodeJSON;
+    ({ graph, rootId } = deserializeToGraph(migratedRoot));
+  }
+
+  setHost(new StandaloneHost(graph));
   return { graph, rootId };
 }
 
 // ─── Inspect ───────────────────────────────────────────────────
+
+export interface InspectSceneOptions {
+  /** Max depth below root to traverse for the text tree (root = 0). Deeper nodes omitted from tree lines. */
+  treeMaxDepth?: number;
+  /** Max lines for the text tree; remaining siblings are collapsed. */
+  treeMaxLines?: number;
+}
 
 export interface InspectResult {
   name: string;
@@ -97,9 +136,13 @@ export interface InspectResult {
     autoLayoutFrames: number;
   };
   tree: string;
+  treeTruncated?: boolean;
 }
 
-export function inspectScene(graph: SceneGraph, rootId: string): InspectResult {
+export function inspectScene(graph: SceneGraph, rootId: string, options?: InspectSceneOptions): InspectResult {
+  const maxDepthCap = options?.treeMaxDepth;
+  const maxLines = options?.treeMaxLines;
+
   const root = graph.getNode(rootId)!;
   const stats = { total: 0, byType: {} as Record<string, number>, maxDepth: 0, textNodes: 0, autoLayoutFrames: 0 };
 
@@ -116,7 +159,13 @@ export function inspectScene(graph: SceneGraph, rootId: string): InspectResult {
   walk(rootId, 0);
 
   const treeLines: string[] = [];
-  function buildTree(id: string, prefix: string, isLast: boolean, isRoot: boolean) {
+  let truncated = false;
+
+  function buildTree(id: string, prefix: string, isLast: boolean, isRoot: boolean, depth: number) {
+    if (maxLines !== undefined && treeLines.length >= maxLines) {
+      truncated = true;
+      return;
+    }
     const n = graph.getNode(id);
     if (!n) return;
     const connector = isRoot ? '' : (isLast ? '└── ' : '├── ');
@@ -125,14 +174,25 @@ export function inspectScene(graph: SceneGraph, rootId: string): InspectResult {
       const preview = n.text.length > 30 ? n.text.slice(0, 30) + '...' : n.text;
       line += ` "${preview}"`;
     }
+    if (maxDepthCap !== undefined && depth >= maxDepthCap - 1 && n.childIds.length > 0) {
+      line += ` … (${n.childIds.length} children omitted — treeMaxDepth ${maxDepthCap})`;
+    }
     treeLines.push(line);
+    if (maxDepthCap !== undefined && depth >= maxDepthCap - 1) {
+      if (n.childIds.length > 0) truncated = true;
+      return;
+    }
     const children = n.childIds;
     for (let i = 0; i < children.length; i++) {
+      if (maxLines !== undefined && treeLines.length >= maxLines) {
+        truncated = true;
+        break;
+      }
       const childPrefix = isRoot ? '' : prefix + (isLast ? '    ' : '│   ');
-      buildTree(children[i], childPrefix, i === children.length - 1, false);
+      buildTree(children[i], childPrefix, i === children.length - 1, false, depth + 1);
     }
   }
-  buildTree(rootId, '', true, true);
+  buildTree(rootId, '', true, true, 0);
 
   return {
     name: root.name,
@@ -140,5 +200,6 @@ export function inspectScene(graph: SceneGraph, rootId: string): InspectResult {
     aspect: Math.round((root.width / root.height) * 10000) / 10000,
     stats,
     tree: treeLines.join('\n'),
+    ...(truncated ? { treeTruncated: true } : {}),
   };
 }

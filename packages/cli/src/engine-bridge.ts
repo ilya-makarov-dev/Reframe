@@ -10,7 +10,7 @@ export { SceneGraph } from '../../core/src/engine/scene-graph';
 export { StandaloneHost } from '../../core/src/adapters/standalone/adapter';
 export { StandaloneNode } from '../../core/src/adapters/standalone/node';
 export { setHost, getHost } from '../../core/src/host/context';
-export { computeLayout, computeAllLayouts, setTextMeasurer } from '../../core/src/engine/layout';
+export { computeLayout, computeAllLayouts, ensureSceneLayout, setTextMeasurer } from '../../core/src/engine/layout';
 export { loadFont, ensureNodeFont, collectFontKeys, setFontRegistrar } from '../../core/src/engine/fonts';
 export { initYoga } from '../../core/src/engine/yoga-init';
 
@@ -37,7 +37,7 @@ import { SceneGraph } from '../../core/src/engine/scene-graph';
 import { StandaloneHost } from '../../core/src/adapters/standalone/adapter';
 import { StandaloneNode } from '../../core/src/adapters/standalone/node';
 import { setHost } from '../../core/src/host/context';
-import { computeAllLayouts } from '../../core/src/engine/layout';
+import { ensureSceneLayout } from '../../core/src/engine/layout';
 import { applyConstraints } from '../../core/src/engine/constraints';
 
 // ─── Target Size ────────────────────────────────────────────────
@@ -92,6 +92,9 @@ export function adaptScene(
 
   // Clone scene for adaptation
   const graph = new SceneGraph();
+  for (const [hash, data] of sourceGraph.images) {
+    graph.images.set(hash, new Uint8Array(data));
+  }
   const page = graph.addPage('Adapted');
 
   // Deep clone source tree into new graph
@@ -134,7 +137,7 @@ export function adaptScene(
       graph.updateNode(clonedRootId, { width: dstW, height: dstH });
       applyConstraints(graph, clonedRootId, { srcWidth: srcW, srcHeight: srcH, dstWidth: dstW, dstHeight: dstH });
       // Skip the default resize + scaleChildren below
-      computeAllLayouts(graph, clonedRootId);
+      ensureSceneLayout(graph, clonedRootId);
       const constraintNodes = countNodes(graph, clonedRootId);
       return {
         target, rootId: clonedRootId, graph,
@@ -164,7 +167,7 @@ export function adaptScene(
   }
 
   // Recompute layout
-  computeAllLayouts(graph, clonedRootId);
+  ensureSceneLayout(graph, clonedRootId);
 
   const nodesProcessed = countNodes(graph, clonedRootId);
 

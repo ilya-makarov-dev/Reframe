@@ -7,6 +7,7 @@
  */
 
 import { type INode, NodeType, MIXED, type ISolidPaint } from '../host';
+import type { StateOverride, ResponsiveRule } from '../engine/types';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -52,7 +53,51 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   const cssClasses = new Map<string, Record<string, string | number>>();
   let classCounter = 0;
 
-  const jsx = renderNode(node, true, indentSize, 1, useCssModules, cssClasses, () => `node${classCounter++}`, useImages);
+  // Collect behavioral CSS (states + responsive) from the tree
+  const behaviorStyles: string[] = [];
+  let behaviorCounter = 0;
+  const behaviorClassMap = new Map<string, string>();
+
+  function collectBehavior(n: INode) {
+    if (n.removed || n.visible === false) return;
+    const hasStates = n.states && Object.keys(n.states).length > 0;
+    const hasResponsive = n.responsive && n.responsive.length > 0;
+
+    if (hasStates || hasResponsive) {
+      const cls = `rf${behaviorCounter++}`;
+      behaviorClassMap.set(nodeKey(n), cls);
+
+      if (hasStates) {
+        const stateMap: Record<string, string> = {
+          hover: ':hover', active: ':active', focus: ':focus',
+          disabled: '[disabled]', selected: '[aria-selected="true"]',
+        };
+        for (const [state, override] of Object.entries(n.states!)) {
+          const pseudo = stateMap[state] ?? `:${state}`;
+          const cssProps = stateOverrideToCssReact(override as StateOverride);
+          if (cssProps.length > 0) {
+            const transition = (override as StateOverride).transition ?? 150;
+            behaviorStyles.push(`.${cls}${pseudo} { ${cssProps.join('; ')} }`);
+            if (!behaviorStyles.some(s => s.includes(`.${cls} {`) && s.includes('transition'))) {
+              behaviorStyles.push(`.${cls} { transition: all ${transition}ms ease; }`);
+            }
+          }
+        }
+      }
+      if (hasResponsive) {
+        for (const rule of n.responsive!) {
+          const cssProps = responsiveRuleToCssReact(rule);
+          if (cssProps.length > 0) {
+            behaviorStyles.push(`@media (max-width: ${rule.maxWidth}px) { .${cls} { ${cssProps.join('; ')} } }`);
+          }
+        }
+      }
+    }
+    if (n.children) for (const c of n.children) collectBehavior(c);
+  }
+  collectBehavior(node);
+
+  const jsx = renderNode(node, true, indentSize, 1, useCssModules, cssClasses, () => `node${classCounter++}`, useImages, behaviorClassMap);
 
   const typeAnnotation = ts ? ': React.FC' : '';
   const imports: string[] = [`import React from 'react';`];
@@ -60,18 +105,26 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     imports.push(`import styles from './${name}.module.css';`);
   }
 
+  // Build style tag for states/responsive if any
+  const styleJsx = behaviorStyles.length > 0
+    ? `\n      <style>{\`\n        ${behaviorStyles.join('\n        ')}\n      \`}</style>`
+    : '';
+
   const lines: string[] = [
     ...imports,
     '',
     `const ${name}${typeAnnotation} = () => {`,
     `  return (`,
+    `    <>`,
     jsx,
+    styleJsx ? styleJsx : '',
+    `    </>`,
     `  );`,
     `};`,
     '',
     `export default ${name};`,
     '',
-  ];
+  ].filter(l => l !== '');
 
   const result: ReactExportResult = { component: lines.join('\n') };
 
@@ -97,17 +150,22 @@ function renderNode(
   node: INode, isRoot: boolean, indentSize: number, depth: number,
   useCssModules: boolean, cssClasses: Map<string, Record<string, string | number>>,
   genClassName: () => string, useImages: boolean,
+  behaviorClassMap?: Map<string, string>,
 ): string {
   const pad = ' '.repeat(indentSize * (depth + 2));
   const style = computeStyle(node, isRoot);
 
+  const behaviorCls = behaviorClassMap?.get(nodeKey(node));
   let styleAttr: string;
   if (useCssModules) {
     const className = genClassName();
     cssClasses.set(className, style);
-    styleAttr = `className={styles.${className}}`;
+    styleAttr = behaviorCls
+      ? `className={\`\${styles.${className}} ${behaviorCls}\`}`
+      : `className={styles.${className}}`;
   } else {
     styleAttr = `style={${formatStyleObject(style, pad, indentSize)}}`;
+    if (behaviorCls) styleAttr += ` className="${behaviorCls}"`;
   }
 
   // Image node
@@ -139,7 +197,7 @@ function renderNode(
   }
 
   const childJsx = children
-    .map(c => renderNode(c, false, indentSize, depth + 1, useCssModules, cssClasses, genClassName, useImages))
+    .map(c => renderNode(c, false, indentSize, depth + 1, useCssModules, cssClasses, genClassName, useImages, behaviorClassMap))
     .join('\n');
 
   return `${pad}<div ${styleAttr}>\n${childJsx}\n${pad}</div>`;
@@ -449,6 +507,43 @@ function colorToRgba(color: { r: number; g: number; b: number; a?: number }, opa
 
 function round(n: number): number {
   return Math.round(n * 1000) / 1000;
+}
+
+/** Stable key for a node (used to match behavior classes) */
+function nodeKey(node: INode): string {
+  return node.id ?? `${node.name}:${node.x}:${node.y}`;
+}
+
+/** Convert StateOverride to CSS properties */
+function stateOverrideToCssReact(override: StateOverride): string[] {
+  const props: string[] = [];
+  if (override.fills && override.fills.length > 0) {
+    const fill = override.fills[0] as any;
+    if (fill?.type === 'SOLID' && fill.color) {
+      props.push(`background: ${colorToRgba(fill.color, fill.opacity)}`);
+    }
+  }
+  if (override.opacity !== undefined) props.push(`opacity: ${round(override.opacity)}`);
+  if (override.cornerRadius !== undefined) props.push(`border-radius: ${override.cornerRadius}px`);
+  if (override.fontSize !== undefined) props.push(`font-size: ${override.fontSize}px`);
+  if (override.fontWeight !== undefined) props.push(`font-weight: ${override.fontWeight}`);
+  return props;
+}
+
+/** Convert ResponsiveRule to CSS properties */
+function responsiveRuleToCssReact(rule: ResponsiveRule): string[] {
+  const props: string[] = [];
+  const p = rule.props as any;
+  if (p.width !== undefined) props.push(`width: ${p.width}px`);
+  if (p.height !== undefined) props.push(`height: ${p.height}px`);
+  if (p.fontSize !== undefined) props.push(`font-size: ${p.fontSize}px`);
+  if (p.fontWeight !== undefined) props.push(`font-weight: ${p.fontWeight}`);
+  if (p.opacity !== undefined) props.push(`opacity: ${p.opacity}`);
+  if (p.visible === false) props.push('display: none');
+  if (p.layoutMode !== undefined) {
+    props.push(`flex-direction: ${p.layoutMode === 'VERTICAL' ? 'column' : 'row'}`);
+  }
+  return props;
 }
 
 function gradientTransformToAngle(t: { m00: number; m01: number; m02: number; m10: number; m11: number; m12: number }): number {

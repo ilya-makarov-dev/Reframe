@@ -10,21 +10,17 @@ import type { ReframeConfig, BuildOutput, BuildResult, ExportFormat, LayoutStyle
 import { resolveDesignMd, resolveSceneSizes } from './loader.js';
 import { compileTemplate, autoPickLayout } from '../compiler/index.js';
 import { build } from '../builder.js';
-import { computeAllLayouts } from '../engine/layout.js';
+import { ensureSceneLayout } from '../engine/layout.js';
 import { exportToHtml } from '../exporters/html.js';
 import { exportToSvg, exportSceneGraphToSvg } from '../exporters/svg.js';
 import { exportToReact } from '../exporters/react.js';
 import { parseDesignMd } from '../design-system/index.js';
+import type { DesignSystem } from '../design-system/index.js';
 import { StandaloneNode } from '../adapters/standalone/node.js';
 import { StandaloneHost } from '../adapters/standalone/adapter.js';
 import { setHost } from '../host/context.js';
-import {
-  audit, textOverflow, minFontSize as minFontSizeRule, noEmptyText, noZeroSize,
-  contrastMinimum, fontInPalette, colorInPalette, fontWeightCompliance,
-  fontSizeRoleMatch, borderRadiusCompliance, spacingGridCompliance,
-  visualHierarchy, contentDensity, visualBalance, ctaVisibility,
-  type AuditRule,
-} from '../audit.js';
+import { audit, type AuditRule } from '../audit.js';
+import { buildInspectAuditRules } from '../inspect-audit-rules.js';
 import type { SceneGraph } from '../engine/scene-graph.js';
 
 export interface BuildLogger {
@@ -97,22 +93,19 @@ export async function buildAll(
         const host = new StandaloneHost(graph);
         setHost(host);
 
-        try { computeAllLayouts(graph, root.id); } catch (_) {}
+        ensureSceneLayout(graph, root.id);
 
         logger?.compiled(sceneName, size.name, resolvedLayout ?? 'auto');
 
-        // 3. Audit
-        const rules: AuditRule[] = [
-          textOverflow(), minFontSizeRule(8), noEmptyText(), noZeroSize(),
-          contrastMinimum(3), fontWeightCompliance(), fontSizeRoleMatch(),
-          borderRadiusCompliance(), spacingGridCompliance(),
-          visualHierarchy(), contentDensity(), visualBalance(), ctaVisibility(),
-          fontInPalette(), colorInPalette(),
-        ];
+        // 3. Audit (same rule stack as MCP inspect + Studio AuditPanel)
+        const rules: AuditRule[] = buildInspectAuditRules(ds as DesignSystem, {
+          minFontSize: 8,
+          minContrast: 3,
+        });
 
         setHost(new StandaloneHost(graph));
         const wrappedRoot = new StandaloneNode(graph, graph.getNode(root.id)!);
-        let issues = audit(wrappedRoot, rules, ds as any);
+        let issues = audit(wrappedRoot, rules, ds as DesignSystem);
         const fixCount = applySimpleFixes(graph, root.id, issues);
 
         // Re-audit after fixes

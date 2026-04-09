@@ -29,6 +29,8 @@ export interface ProjectStore {
   error: string | null;
   dirty: Set<string>;  // artboard IDs with unsaved changes
   sessionScenes: SessionScene[];  // live scenes from MCP session
+  /** Latest MCP graph revision hint (SSE). Studio pulls or shows conflict when dirty. */
+  remoteSessionScene: { sceneId: string; revision: number } | null;
 
   // Actions
   setManifest: (manifest: ProjectManifest | null) => void;
@@ -40,6 +42,7 @@ export interface ProjectStore {
   markClean: (artboardId: string) => void;
   markAllClean: () => void;
   setSessionScenes: (scenes: SessionScene[]) => void;
+  clearRemoteSessionScene: () => void;
 
   // Project events from SSE
   handleEvent: (event: ProjectEvent | { type: string; [key: string]: any }) => void;
@@ -55,6 +58,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   error: null,
   dirty: new Set(),
   sessionScenes: [],
+  remoteSessionScene: null,
 
   setManifest: (manifest) => set({ manifest }),
   setConnected: (connected) => set({ connected, error: connected ? null : get().error }),
@@ -77,6 +81,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   markAllClean: () => set({ dirty: new Set() }),
 
   setSessionScenes: (scenes) => set({ sessionScenes: scenes }),
+
+  clearRemoteSessionScene: () => set({ remoteSessionScene: null }),
 
   handleEvent: (event) => {
     const state = get();
@@ -153,6 +159,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }
       case 'design-system:updated':
         break;
+      case 'scene:session-changed': {
+        const ev = event as ProjectEvent & { type: 'scene:session-changed' };
+        set({ remoteSessionScene: { sceneId: ev.sceneId, revision: ev.revision } });
+        break;
+      }
     }
   },
 }));

@@ -8,7 +8,7 @@
 
 import { z } from 'zod';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { execSync } from 'child_process';
 import { importFromHtml } from '../../../core/src/importers/html.js';
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
@@ -22,15 +22,23 @@ import {
   getButtonBorderRadius,
 } from '../../../core/src/design-system/index.js';
 import type { DesignSystem } from '../../../core/src/design-system/index.js';
+import { saveDesignSystem } from '../../../core/src/project/io.js';
 import { getSession } from '../session.js';
+import { getReframeDir } from '../store.js';
+import { getProjectDir } from './project.js';
+import { loadBrandDesignMd } from './compile.js';
+import { MCP_LIMITS } from '../limits.js';
+import { makeToolJsonErrorResult } from '../tool-result.js';
 
 // ─── Schema ────────────────────────────────────────────────────
 
 export const designInputSchema = {
-  action: z.enum(['extract', 'prompt']),
+  action: z.enum(['extract', 'prompt', 'list']),
   html: z.string().optional().describe('HTML to extract design system from (for action: extract)'),
   url: z.string().optional().describe('Website URL to fetch and extract design system from (for action: extract). Alternative to html.'),
-  brand: z.string().optional().describe('Brand name — load pre-built DESIGN.md. Or override name when extracting from html/url.'),
+  brand: z.string().optional().describe(
+    'Brand slug to fetch DESIGN.md via npm (npx getdesign). Examples: "stripe", "airbnb", "linear". Use action "list" to see all available brands.',
+  ),
   designMd: z.string().optional().describe('DESIGN.md content (for action: prompt)'),
   sizes: z.array(z.object({
     width: z.number(),
@@ -38,43 +46,81 @@ export const designInputSchema = {
     name: z.string().optional(),
   })).optional(),
   focus: z.enum(['banners', 'social', 'web', 'all']).optional().default('all'),
+  search: z.string().optional().describe('Filter brand list by keyword (for action: list). Example: "ai", "crypto", "automotive".'),
 };
 
 // ─── Handler ───────────────────────────────────────────────────
 
 export async function handleDesign(input: {
-  action: 'extract' | 'prompt';
+  action: 'extract' | 'prompt' | 'list';
   html?: string;
   url?: string;
   brand?: string;
   designMd?: string;
   sizes?: Array<{ width: number; height: number; name?: string }>;
   focus?: 'banners' | 'social' | 'web' | 'all';
+  search?: string;
 }) {
+  if (input.action === 'list') {
+    return handleList(input.search);
+  }
   if (input.action === 'extract') {
     return handleExtract(input);
   }
   return handlePrompt(input);
 }
 
+// ─── List ─────────────────────────────────────────────────────
+
+async function handleList(search?: string) {
+  try {
+    const raw = execSync('npx getdesign list', { timeout: 30000, stdio: 'pipe' }).toString();
+    let lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0 && !l.startsWith('npm'));
+
+    const allLines = [...lines];
+
+    if (search) {
+      const q = search.toLowerCase();
+      lines = lines.filter(l => l.toLowerCase().includes(q));
+    }
+
+    if (lines.length === 0 && search) {
+      // No match — show all brands so agent can pick
+      const slugs = allLines.map(l => l.split(' ')[0]).filter(Boolean);
+      return { content: [{ type: 'text' as const, text:
+        `No brands matching "${search}". Pick from all ${allLines.length} available:\n\n` +
+        allLines.join('\n') +
+        '\n\nUsage: reframe_design({ action: "extract", brand: "<slug>" })',
+      }] };
+    }
+
+    const header = `Available brands (${lines.length}${search ? ` matching "${search}"` : ''}):\n`;
+    const hint = '\n\nUsage: reframe_design({ action: "extract", brand: "<slug>" })';
+
+    return { content: [{ type: 'text' as const, text: header + lines.join('\n') + hint }] };
+  } catch (err: any) {
+    return makeToolJsonErrorResult(`Failed to list brands: ${err.message}`, 'BRAND_LIST_FAILED');
+  }
+}
+
 // ─── Extract ───────────────────────────────────────────────────
 
-// Known brands in the design-md library
-const KNOWN_BRANDS = [
-  'airbnb', 'airtable', 'apple', 'bmw', 'cal', 'claude', 'clay', 'clickhouse',
-  'cohere', 'coinbase', 'composio', 'cursor', 'elevenlabs', 'expo', 'figma',
-  'framer', 'hashicorp', 'ibm', 'intercom', 'kraken', 'linear.app', 'lovable',
-  'minimax', 'mintlify', 'miro', 'mistral.ai', 'mongodb', 'notion', 'nvidia',
-  'ollama', 'opencode.ai', 'pinterest', 'posthog', 'raycast', 'replicate',
-  'resend', 'revolut', 'runwayml', 'sanity', 'sentry', 'spacex', 'spotify',
-  'stripe', 'supabase', 'superhuman', 'together.ai', 'uber', 'vercel',
-  'voltagent', 'warp', 'webflow', 'wise', 'x.ai', 'zapier',
-];
-
-const BRAND_ALIASES: Record<string, string> = {
-  linear: 'linear.app', mistral: 'mistral.ai', xai: 'x.ai',
-  together: 'together.ai', opencode: 'opencode.ai',
-};
+/** Canonical DESIGN.md on disk — same as reframe_project save_design. */
+function persistCanonicalDesignMd(designMd: string): 'manifest' | 'file' {
+  const projectDir = getProjectDir();
+  if (projectDir) {
+    try {
+      saveDesignSystem(projectDir, designMd);
+      return 'manifest';
+    } catch {
+      /* fall through to workspace file */
+    }
+  }
+  const rd = getReframeDir();
+  if (!existsSync(rd)) mkdirSync(rd, { recursive: true });
+  writeFileSync(join(rd, 'design.md'), designMd, 'utf-8');
+  return 'file';
+}
 
 async function handleExtract(input: {
   html?: string;
@@ -84,59 +130,39 @@ async function handleExtract(input: {
   const session = getSession();
   session.recordToolCall('design');
 
-  // ── Path 1: Brand from awesome-design-md library ──
+  // ── Path 1: Fetch DESIGN.md by slug (optional local clone + GitHub raw) → canonical design.md ──
   if (input.brand && !input.html && !input.url) {
-    const brandKey = BRAND_ALIASES[input.brand.toLowerCase()] ?? input.brand.toLowerCase();
-    if (KNOWN_BRANDS.includes(brandKey)) {
-      // Try local files first (monorepo or installed)
-      const localPaths = [
-        join(process.cwd(), 'awesome-design-md-main', 'design-md', brandKey, 'DESIGN.md'),
-        join(__dirname, '..', '..', '..', '..', '..', '..', 'awesome-design-md-main', 'design-md', brandKey, 'DESIGN.md'),
-        join(__dirname, '..', '..', '..', '..', 'awesome-design-md-main', 'design-md', brandKey, 'DESIGN.md'),
-      ];
-      for (const p of localPaths) {
-        try {
-          const resolved = resolve(p);
-          if (existsSync(resolved)) {
-            const designMd = readFileSync(resolved, 'utf-8');
-            // Set active brand for session
-            const ds = session.getOrParseDesignMd(designMd, parseDesignMd);
-            session.setBrand(brandKey, designMd, ds);
-            // Save to .reframe/brand.md for AI to read on demand
-            const brandDir = join(process.cwd(), '.reframe');
-            if (!existsSync(brandDir)) mkdirSync(brandDir, { recursive: true });
-            writeFileSync(join(brandDir, 'brand.md'), designMd, 'utf-8');
-            // Return compact cheat sheet — AI reads full file when needed
-            const cheatSheet = generateBrandCheatSheet(ds);
-            return {
-              content: [{ type: 'text' as const, text: `Brand **${brandKey}** loaded → \`.reframe/brand.md\`\nRead the file for full design philosophy, do's/don'ts, and component specs.\n\n${cheatSheet}` }],
-            };
-          }
-        } catch {}
-      }
-
-      // Fallback: fetch from GitHub
-      const ghUrls = [
-        `https://raw.githubusercontent.com/anthropics/awesome-design-md/main/design-md/${brandKey}/DESIGN.md`,
-        `https://raw.githubusercontent.com/ilya-makarov-dev/awesome-design-md/main/design-md/${brandKey}/DESIGN.md`,
-      ];
-      for (const ghUrl of ghUrls) {
-        try {
-          const resp = await fetch(ghUrl, { signal: AbortSignal.timeout(5000) });
-          if (resp.ok) {
-            const designMd = await resp.text();
-            return {
-              content: [{ type: 'text' as const, text: designMd }],
-            };
-          }
-        } catch {}
-      }
+    const designMd = await loadBrandDesignMd(input.brand);
+    if (!designMd?.trim()) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text:
+            `Could not load DESIGN.md for slug "${input.brand}". ` +
+            'Use reframe_design({ action: "list" }) to see available brands, or use url/html to extract from a website.',
+        }],
+      };
     }
-    // Brand not found
+
+    const ds = session.getOrParseDesignMd(designMd, parseDesignMd);
+    const brandLabel = (ds.brand && ds.brand.trim()) || input.brand.trim();
+    session.setBrand(brandLabel, designMd, ds);
+
+    const persisted = persistCanonicalDesignMd(designMd);
+
+    const persistNote =
+      persisted === 'manifest'
+        ? 'Saved to .reframe/design.md and linked in project.json.'
+        : 'Saved to .reframe/design.md.';
+
+    // Return the FULL DESIGN.md — it IS the prompt.
+    // awesome-design-md files are 300+ lines of prose with exact values,
+    // philosophy, do's/don'ts, component prompts, iteration guides.
+    // No need to re-digest — the original is the best context for the agent.
     return {
       content: [{
         type: 'text' as const,
-        text: `Brand "${input.brand}" not found in library. Available: ${KNOWN_BRANDS.join(', ')}.\n\nAlternatively, provide \`html\` or \`url\` to extract from a website.`,
+        text: `${designMd}\n\n---\n${persistNote}`,
       }],
     };
   }
@@ -152,16 +178,30 @@ async function handleExtract(input: {
     }
   }
 
+  if (html && html.length > MCP_LIMITS.designFetchHtmlMaxChars) {
+    return makeToolJsonErrorResult(
+      `Fetched HTML exceeds ${MCP_LIMITS.designFetchHtmlMaxChars} characters (got ${html.length}). Try a smaller page or use html with a fragment.`,
+      'design.html_too_large',
+      { length: html.length, max: MCP_LIMITS.designFetchHtmlMaxChars },
+    );
+  }
+
   if (!html) {
     return {
       content: [{
         type: 'text' as const,
-        text: 'Provide one of:\n- `brand`: brand name from library (stripe, linear, vercel, ...)\n- `url`: website URL to extract from\n- `html`: raw HTML string',
+        text:
+          'Provide one of:\n' +
+          '- brand: slug to fetch DESIGN.md (optional local/GitHub sources in engine)\n' +
+          '- url: website URL to extract from\n' +
+          '- html: raw HTML string',
       }],
     };
   }
 
   // ── Extract design system from HTML ──
+  // Clean noise (scripts, iframes, hidden SVGs) before parsing
+  html = cleanHtmlForExtraction(html);
   const imported = await importFromHtml(html);
   const root = imported.graph.getNode(imported.rootId)!;
 
@@ -240,9 +280,19 @@ async function handleExtract(input: {
   }
 
   const designMd = exportDesignMd(ds);
+  session.setBrand(ds.brand || 'extracted', designMd, ds);
+
+  const persisted = persistCanonicalDesignMd(designMd);
+  const persistNote = persisted === 'manifest'
+    ? 'Saved to .reframe/design.md and linked in project.json.'
+    : 'Saved to .reframe/design.md.';
+
+  // Return a PROMPT-format summary — actionable instructions for the agent,
+  // not just raw values. Full DESIGN.md is on disk for audit/parser.
+  const prompt = buildDesignPrompt(ds);
 
   return {
-    content: [{ type: 'text' as const, text: designMd }],
+    content: [{ type: 'text' as const, text: `${prompt}\n\n---\n${persistNote} Full spec: .reframe/design.md` }],
   };
 }
 
@@ -257,6 +307,13 @@ async function handlePrompt(input: {
     return {
       content: [{ type: 'text' as const, text: 'Error: designMd is required for action: prompt' }],
     };
+  }
+  if (input.designMd.length > MCP_LIMITS.designPromptDesignMdMaxChars) {
+    return makeToolJsonErrorResult(
+      `designMd exceeds ${MCP_LIMITS.designPromptDesignMdMaxChars} characters (got ${input.designMd.length}).`,
+      'design.design_md_too_large',
+      { length: input.designMd.length, max: MCP_LIMITS.designPromptDesignMdMaxChars },
+    );
   }
 
   const session = getSession();
@@ -303,20 +360,72 @@ async function handlePrompt(input: {
     sections.push('');
   }
 
+  // ── Font Features
+  if (ds.typography.fontFeatures && ds.typography.fontFeatures.length > 0) {
+    sections.push(`**OpenType features**: Apply \`font-feature-settings: ${ds.typography.fontFeatures.map(f => `"${f.tag}"`).join(', ')}\` on all \`${fonts[0] ?? 'primary font'}\` text.`);
+    sections.push('');
+  }
+
   // ── Button Style
   if (ds.components.button) {
     sections.push('## Button Style');
     const btn = ds.components.button;
-    sections.push(`- Border radius: ${btn.borderRadius}px (${btn.style})`);
+    sections.push(`- Default radius: ${btn.borderRadius}px (${btn.style})`);
     if (btn.fontWeight) sections.push(`- Font weight: ${btn.fontWeight}`);
     if (btn.textTransform) sections.push(`- Text transform: ${btn.textTransform}`);
+    if (btn.variants && btn.variants.length > 0) {
+      sections.push('');
+      sections.push('**Variants** (use these exact values):');
+      for (const v of btn.variants) {
+        const parts: string[] = [];
+        if (v.background) parts.push(`bg \`${v.background}\``);
+        else parts.push('bg transparent');
+        if (v.color) parts.push(`text \`${v.color}\``);
+        if (v.borderRadius != null) parts.push(`radius \`${v.borderRadius}px\``);
+        if (v.paddingY != null && v.paddingX != null) parts.push(`padding \`${v.paddingY}px ${v.paddingX}px\``);
+        if (v.hover?.background) parts.push(`hover bg \`${v.hover.background}\``);
+        sections.push(`- **${v.name}**: ${parts.join(', ')}`);
+      }
+    }
+    sections.push('');
+  }
+
+  // ── Component Specs
+  const hasComponentSpecs = ds.components.card || ds.components.badge || ds.components.input || ds.components.nav;
+  if (hasComponentSpecs) {
+    sections.push('## Component Specs');
+    if (ds.components.card) {
+      const c = ds.components.card;
+      sections.push(`- **Card**: radius \`${c.borderRadius}px\`${c.background ? `, bg \`${c.background}\`` : ''}${c.borderColor ? `, border \`${c.borderColor}\`` : ''}${c.padding ? `, padding \`${c.padding}px\`` : ''}`);
+    }
+    if (ds.components.badge) {
+      const b = ds.components.badge;
+      sections.push(`- **Badge**: radius \`${b.borderRadius}px\`${b.fontSize ? `, ${b.fontSize}px` : ''}${b.fontWeight ? ` w${b.fontWeight}` : ''}${b.paddingX != null ? `, padding \`${b.paddingY ?? 0}px ${b.paddingX}px\`` : ''}`);
+    }
+    if (ds.components.input) {
+      const i = ds.components.input;
+      sections.push(`- **Input**: radius \`${i.borderRadius}px\`${i.borderColor ? `, border \`${i.borderColor}\`` : ''}${i.height ? `, height \`${i.height}px\`` : ''}${i.focusBorderColor ? `, focus border \`${i.focusBorderColor}\`` : ''}`);
+    }
+    if (ds.components.nav) {
+      const n = ds.components.nav;
+      const parts: string[] = [];
+      if (n.height) parts.push(`height \`${n.height}px\``);
+      if (n.fontSize) parts.push(`${n.fontSize}px`);
+      if (n.fontWeight) parts.push(`w${n.fontWeight}`);
+      if (n.activeIndicator) parts.push(`active: ${n.activeIndicator}`);
+      if (parts.length > 0) sections.push(`- **Nav**: ${parts.join(', ')}`);
+    }
     sections.push('');
   }
 
   // ── Layout
   sections.push('## Layout Rules');
   sections.push(`- Spacing grid: ${ds.layout.spacingUnit}px (all padding/margin/gaps must be multiples of ${ds.layout.spacingUnit})`);
+  if (ds.layout.spacingScale && ds.layout.spacingScale.length > 0) {
+    sections.push(`- Spacing scale: [${ds.layout.spacingScale.join(', ')}]px — prefer these values`);
+  }
   if (ds.layout.maxWidth) sections.push(`- Max content width: ${ds.layout.maxWidth}px`);
+  if (ds.layout.sectionSpacing) sections.push(`- Section spacing: ${ds.layout.sectionSpacing}px`);
   sections.push(`- Border radius scale: [${ds.layout.borderRadiusScale.join(', ')}]px — only use these values`);
   sections.push('');
 
@@ -656,7 +765,7 @@ async function fetchUrl(url: string): Promise<string | null> {
       { maxBuffer: 5 * 1024 * 1024, timeout: 20000 },
     );
     const html = result.toString('utf-8');
-    if (html.length > 100) return html;
+    if (html.length > 100 && html.length <= MCP_LIMITS.designFetchHtmlMaxChars) return html;
   } catch {}
 
   try {
@@ -668,7 +777,10 @@ async function fetchUrl(url: string): Promise<string | null> {
       redirect: 'follow',
       signal: AbortSignal.timeout(15000),
     });
-    if (resp.ok) return await resp.text();
+    if (resp.ok) {
+      const text = await resp.text();
+      if (text.length <= MCP_LIMITS.designFetchHtmlMaxChars) return text;
+    }
   } catch {}
 
   return null;
@@ -692,9 +804,29 @@ function resolveUrl(base: string, href: string): string {
  * Fetch HTML + all external CSS stylesheets, inline them as <style> blocks.
  * This makes linkedom see ALL styles, not just inline ones.
  */
+/** Strip noise from HTML before design extraction — scripts, iframes, SVG sprites, hidden elements. */
+function cleanHtmlForExtraction(html: string): string {
+  // Remove elements that are never visual design
+  html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+  html = html.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+  html = html.replace(/<iframe[\s\S]*?<\/iframe>/gi, '');
+  html = html.replace(/<template[\s\S]*?<\/template>/gi, '');
+  // Remove hidden SVG sprite sheets (large, no visual impact)
+  html = html.replace(/<svg[^>]*style="[^"]*display:\s*none[^"]*"[\s\S]*?<\/svg>/gi, '');
+  html = html.replace(/<svg[^>]*hidden[\s\S]*?<\/svg>/gi, '');
+  // Remove HTML comments (can be huge in CMS output)
+  html = html.replace(/<!--[\s\S]*?-->/g, '');
+  // Remove data URIs in images (bloat, not needed for design extraction)
+  html = html.replace(/src="data:image\/[^"]{1000,}"/gi, 'src=""');
+  return html;
+}
+
 async function fetchHtml(url: string): Promise<string | null> {
   let html = await fetchUrl(url);
   if (!html) return null;
+
+  // Clean noise before processing
+  html = cleanHtmlForExtraction(html);
 
   // Find all <link rel="stylesheet" href="..."> and fetch them
   const linkRe = /<link[^>]+rel=["']?stylesheet["']?[^>]*href=["']([^"']+)["'][^>]*>/gi;
@@ -711,7 +843,10 @@ async function fetchHtml(url: string): Promise<string | null> {
     }
   }
 
-  if (cssUrls.size === 0) return html;
+  if (cssUrls.size === 0) {
+    if (html.length > MCP_LIMITS.designFetchHtmlMaxChars) return null;
+    return html;
+  }
 
   // Fetch all CSS in parallel (up to 10)
   const urls = [...cssUrls].slice(0, 10);
@@ -740,6 +875,10 @@ async function fetchHtml(url: string): Promise<string | null> {
     html = html.replace('</head>', `${injectedStyles}\n</head>`);
   } else {
     html = `${injectedStyles}\n${html}`;
+  }
+
+  if (html.length > MCP_LIMITS.designFetchHtmlMaxChars) {
+    return null;
   }
 
   return html;
@@ -771,17 +910,186 @@ function generateBrandCheatSheet(ds: DesignSystem): string {
   const sectionPad = Math.max(80, Math.round(heroSize * 1.5));
   const cardBg = isDark ? '#111' : '#ffffff';
 
+  const fontFeatures = ds.typography.fontFeatures;
+  const ffStr = fontFeatures && fontFeatures.length > 0
+    ? ` · ff ${fontFeatures.map(f => `"${f.tag}"`).join(',')}`
+    : '';
+  const btnVariants = ds.components.button?.variants;
+  const btnLine = btnVariants && btnVariants.length > 0
+    ? `BUTTON:   ${btnVariants.map(v => `${v.name}${v.background ? ' ' + v.background : ''}`).join(' · ')} · radius ${radius}`
+    : `BUTTON:   filled ${primary} · radius ${radius} · ghost transparent + border`;
+
   return `## Quick Reference for ${ds.brand}
 
 \`\`\`
-HERO:     pad [${heroPad}, ${Math.round(heroPad * 0.75)}] · display ${heroSize}/${heroWeight}/${heroLS} · lh ${heroLH} · bg ${bg}
+HERO:     display ${heroSize}/${heroWeight}/${heroLS} · lh ${heroLH} · bg ${bg}${ffStr}
 BODY:     ${bodySize}/${bodyWeight} · color ${muted} · lh 1.6
-BUTTON:   filled ${primary} · radius ${radius} · ghost transparent + border
-CARD:     pad ${spacing * 3} · gap ${spacing * 1.5} · bg ${cardBg} · radius ${cardRadius}
+${btnLine}
+CARD:     pad ${spacing * 3} · bg ${cardBg} · radius ${cardRadius}${ds.components.card?.borderColor ? ' · border ' + ds.components.card.borderColor : ''}
 SECTION:  pad [${sectionPad}, ${Math.round(sectionPad * 0.8)}] · gap ${spacing * 6}
 TEXT:     primary ${text} · muted ${muted} · accent ${primary}
-SPACING:  unit ${spacing} · hero ${heroPad} · section ${sectionPad} · card ${spacing * 3}
-FONT:     ${font} · hero w${heroWeight} · body w${bodyWeight}
+SPACING:  unit ${spacing}${ds.layout.spacingScale ? ' · scale [' + ds.layout.spacingScale.slice(0, 8).join(',') + ']' : ''}
+FONT:     ${font}${ds.typography.secondaryFont ? ' · mono ' + ds.typography.secondaryFont : ''} · hero w${heroWeight} · body w${bodyWeight}
 THEME:    ${isDark ? 'dark' : 'light'} · card bg ${cardBg} · surface ${isDark ? '#111827' : '#f9fafb'}
 \`\`\``;
+}
+
+// ─── Design Prompt Builder ─────────────────────────────────────
+
+/**
+ * Build an actionable prompt from DesignSystem — tells the agent HOW to use values,
+ * not just what they are. This is what the agent sees after extract.
+ */
+function buildDesignPrompt(ds: DesignSystem): string {
+  const brand = ds.brand || 'Brand';
+  const bg = ds.colors.background ?? '#ffffff';
+  const text = ds.colors.text ?? '#fafafa';
+  const muted = ds.colors.roles.get('muted') ?? ds.colors.roles.get('body') ?? '#71717a';
+  const primary = ds.colors.primary ?? '#6366f1';
+  const accent = ds.colors.accent;
+  const surface = ds.colors.roles.get('surface') ?? ds.colors.roles.get('surface-alt') ?? '#18181b';
+  const border = ds.colors.roles.get('border-default') ?? ds.colors.roles.get('border') ?? '#27272a';
+  const isDark = bg < '#888888';
+  const unit = ds.layout.spacingUnit || 8;
+
+  const typo = ds.typography.hierarchy;
+  const heroRule = typo.find(r => r.role === 'hero');
+  const titleRule = typo.find(r => r.role === 'title');
+  const subtitleRule = typo.find(r => r.role === 'subtitle');
+  const bodyRule = typo.find(r => r.role === 'body');
+  const buttonRule = typo.find(r => r.role === 'button');
+  const captionRule = typo.find(r => r.role === 'caption');
+  const font = ds.typography.primaryFont ?? heroRule?.fontFamily ?? 'Inter';
+  const monoFont = ds.typography.secondaryFont;
+
+  const lines: string[] = [];
+
+  lines.push(`# ${brand} — Design Context`);
+  lines.push('');
+  lines.push(`**${isDark ? 'Dark' : 'Light'} theme.** Background \`${bg}\`, text \`${text}\`, muted \`${muted}\`.`);
+  lines.push(`**Primary accent** \`${primary}\` — buttons, links, highlights.${accent ? ` **Decorative accent** \`${accent}\`.` : ''}`);
+  lines.push(`**Surface** \`${surface}\` — cards, containers. **Border** \`${border}\`.`);
+  lines.push('');
+
+  // ── Typography
+  lines.push('## Typography');
+  lines.push(`Font: \`${font}\`${monoFont ? ` · Mono: \`${monoFont}\`` : ''}`);
+  if (heroRule) lines.push(`- Hero: \`${heroRule.fontSize}px\` w\`${heroRule.fontWeight}\` lh\`${heroRule.lineHeight}\` ls\`${heroRule.letterSpacing}px\``);
+  if (titleRule) lines.push(`- Title: \`${titleRule.fontSize}px\` w\`${titleRule.fontWeight}\` lh\`${titleRule.lineHeight}\` ls\`${titleRule.letterSpacing}px\``);
+  if (subtitleRule) lines.push(`- Subtitle: \`${subtitleRule.fontSize}px\` w\`${subtitleRule.fontWeight}\``);
+  if (bodyRule) lines.push(`- Body: \`${bodyRule.fontSize}px\` w\`${bodyRule.fontWeight}\` lh\`${bodyRule.lineHeight}\``);
+  if (buttonRule) lines.push(`- Button: \`${buttonRule.fontSize}px\` w\`${buttonRule.fontWeight}\``);
+  if (captionRule) lines.push(`- Caption: \`${captionRule.fontSize}px\` w\`${captionRule.fontWeight}\``);
+
+  // Font features
+  const fontFeatures = ds.typography.fontFeatures;
+  if (fontFeatures && fontFeatures.length > 0) {
+    const featureStr = fontFeatures.map(f => `\`"${f.tag}"\`${f.description ? ` (${f.description})` : ''}`).join(', ');
+    lines.push(`- **OpenType**: ${featureStr} — apply via \`font-feature-settings\``);
+  }
+  lines.push('');
+
+  // ── Components
+  lines.push('## Components');
+
+  // Button variants
+  const btn = ds.components.button;
+  if (btn?.variants && btn.variants.length > 0) {
+    for (const v of btn.variants) {
+      const parts = [`radius \`${v.borderRadius ?? btn.borderRadius}px\``];
+      if (v.background) parts.push(`bg \`${v.background}\``);
+      if (v.color) parts.push(`text \`${v.color}\``);
+      if (v.paddingY != null && v.paddingX != null) parts.push(`pad \`${v.paddingY}px ${v.paddingX}px\``);
+      if (v.hover?.background) parts.push(`hover \`${v.hover.background}\``);
+      lines.push(`- **Button ${v.name}**: ${parts.join(' · ')}`);
+    }
+  } else if (btn) {
+    lines.push(`- **Button**: radius \`${btn.borderRadius}px\` (${btn.style}), min-height \`44px\``);
+  }
+
+  // Card
+  const card = ds.components.card;
+  if (card) {
+    const parts = [`radius \`${card.borderRadius}px\``];
+    if (card.background) parts.push(`bg \`${card.background}\``);
+    if (card.borderColor) parts.push(`border \`${card.borderColor}\``);
+    if (card.padding) parts.push(`pad \`${card.padding}px\``);
+    lines.push(`- **Card**: ${parts.join(' · ')}`);
+  }
+
+  // Badge
+  const badge = ds.components.badge;
+  if (badge) {
+    const parts = [`radius \`${badge.borderRadius}px\``];
+    if (badge.fontSize) parts.push(`${badge.fontSize}px`);
+    if (badge.fontWeight) parts.push(`w${badge.fontWeight}`);
+    if (badge.paddingX != null) parts.push(`pad \`${badge.paddingY ?? 0}px ${badge.paddingX}px\``);
+    lines.push(`- **Badge**: ${parts.join(' · ')}`);
+  }
+
+  // Input
+  const input = ds.components.input;
+  if (input) {
+    const parts = [`radius \`${input.borderRadius}px\``];
+    if (input.borderColor) parts.push(`border \`${input.borderColor}\``);
+    if (input.height) parts.push(`height \`${input.height}px\``);
+    if (input.focusBorderColor) parts.push(`focus \`${input.focusBorderColor}\``);
+    lines.push(`- **Input**: ${parts.join(' · ')}`);
+  }
+
+  // Nav
+  const nav = ds.components.nav;
+  if (nav) {
+    const parts: string[] = [];
+    if (nav.height) parts.push(`height \`${nav.height}px\``);
+    if (nav.fontSize) parts.push(`${nav.fontSize}px`);
+    if (nav.fontWeight) parts.push(`w${nav.fontWeight}`);
+    if (nav.activeIndicator) parts.push(`active: ${nav.activeIndicator}`);
+    if (parts.length > 0) lines.push(`- **Nav**: ${parts.join(' · ')}`);
+  }
+  lines.push('');
+
+  // ── Layout & Spacing
+  lines.push('## Layout');
+  lines.push(`Spacing grid: \`${unit}px\`. All padding/margin/gaps must be multiples of ${unit}.`);
+  if (ds.layout.spacingScale && ds.layout.spacingScale.length > 0) {
+    lines.push(`Scale: \`[${ds.layout.spacingScale.join(', ')}]\`px`);
+  }
+  if (ds.layout.maxWidth) lines.push(`Max content width: \`${ds.layout.maxWidth}px\``);
+  if (ds.layout.sectionSpacing) lines.push(`Section spacing: \`${ds.layout.sectionSpacing}px\``);
+  lines.push(`Radius scale: \`[${ds.layout.borderRadiusScale.join(', ')}]\`px — only use these values`);
+
+  // Gradients
+  if (ds.colors.gradients && ds.colors.gradients.size > 0) {
+    lines.push('');
+    lines.push('**Gradients:**');
+    for (const [name, css] of ds.colors.gradients) {
+      lines.push(`- ${name}: \`${css}\``);
+    }
+  }
+  lines.push('');
+
+  // ── Shadows
+  if (ds.depth && ds.depth.elevationLevels.length > 0) {
+    lines.push('## Shadows');
+    const levelNames = ['Flat', 'Subtle', 'Standard', 'Elevated', 'Floating'];
+    for (let i = 0; i < ds.depth.elevationLevels.length; i++) {
+      const layers = ds.depth.elevationLevels[i];
+      const shadowCss = layers.map(l =>
+        `${l.inset ? 'inset ' : ''}${l.color} ${l.offsetX}px ${l.offsetY}px ${l.blur}px ${l.spread}px`
+      ).join(', ');
+      lines.push(`- L${i} (${levelNames[i] ?? `Level ${i}`}): \`${shadowCss}\``);
+    }
+    lines.push('');
+  }
+
+  // ── Rules
+  lines.push('## Rules');
+  lines.push('Colors only from palette. Weights only from typography. Radius only from scale.');
+  lines.push('Every container needs explicit background + text color. Min touch target 44px.');
+  if (fontFeatures && fontFeatures.length > 0) {
+    lines.push(`Apply \`font-feature-settings: ${fontFeatures.map(f => `"${f.tag}"`).join(', ')}\` on all \`${font}\` text.`);
+  }
+
+  return lines.join('\n');
 }

@@ -11,6 +11,8 @@ import { importFromHtml } from '../importers/html';
 import { setHost } from '../host/context';
 import { StandaloneHost } from '../adapters/standalone/adapter';
 import { StandaloneNode } from '../adapters/standalone/node';
+import { readdirSync, readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import { extractDesignSystemFromFrame } from '../design-system/extractor';
 import { exportDesignMd } from '../design-system/exporter';
 import { parseDesignMd } from '../design-system/parser';
@@ -359,6 +361,72 @@ export const DESIGN_SYSTEM_SPECS: FunctionalSpec[] = [
     },
   },
 
+  {
+    name: 'ds/parse-etalon-freeform-nonstandard',
+    category: 'design-system',
+    test: () => {
+      const md = `# BrandX
+
+### Palette
+- primary: #5B6CFF
+- background: #0B1020
+- text: #E5E7EB
+- surface: #111827
+
+### Type Scale
+- Heading: 48 / 700 / line-height 1.1
+- Subheading: 24 / Medium / line-height 1.3
+- Body: 16 / Regular / line-height 1.5
+
+### UI
+**Button**: rounded
+- border-radius: 10px
+- font-weight: 600
+- text-transform: uppercase
+
+### Grid
+- Base unit: 10px
+- Border radius scale: 0, 4, 8, 10, 16, 9999
+`;
+
+      const ds = parseDesignMd(md);
+
+      if (ds.colors.roles.size < 4) return `colors not parsed enough: ${ds.colors.roles.size}`;
+      if (!ds.colors.primary || !ds.colors.primary.toLowerCase().includes('5b6cff')) return `bad primary: ${ds.colors.primary}`;
+      if (ds.typography.hierarchy.length < 3) return `typography not parsed: ${ds.typography.hierarchy.length}`;
+      const title = ds.typography.hierarchy.find(r => r.role === 'title');
+      if (!title) return 'missing title rule from "Heading" alias';
+      if (Math.round(title.fontSize) !== 48) return `title size mismatch: ${title.fontSize}`;
+      if (!ds.components.button) return 'missing button';
+      if (ds.components.button.borderRadius !== 10) return `button radius mismatch: ${ds.components.button.borderRadius}`;
+      if (ds.components.button.fontWeight !== 600) return `button font weight mismatch: ${ds.components.button.fontWeight}`;
+      if (ds.components.button.textTransform !== 'uppercase') return `button transform mismatch: ${ds.components.button.textTransform}`;
+      if (ds.layout.spacingUnit !== 10) return `spacing mismatch: ${ds.layout.spacingUnit}`;
+
+      return true;
+    },
+  },
+
+  {
+    name: 'ds/parse-rgb-colors',
+    category: 'design-system',
+    test: () => {
+      const md = `# RGBBrand
+
+## Colors
+- primary: rgb(99, 102, 241)
+- background: rgb(9, 9, 11)
+- text: rgb(250, 250, 250)
+`;
+      const ds = parseDesignMd(md);
+      if (!ds.colors.primary) return 'missing rgb primary';
+      if (ds.colors.primary.toLowerCase() !== '#6366f1') return `rgb->hex primary mismatch: ${ds.colors.primary}`;
+      if (!ds.colors.background || ds.colors.background.toLowerCase() !== '#09090b') return `rgb->hex bg mismatch: ${ds.colors.background}`;
+      if (!ds.colors.text || ds.colors.text.toLowerCase() !== '#fafafa') return `rgb->hex text mismatch: ${ds.colors.text}`;
+      return true;
+    },
+  },
+
   // ─── Full Pipeline: HTML → extract → markdown → parse ───
 
   {
@@ -476,6 +544,47 @@ export const DESIGN_SYSTEM_SPECS: FunctionalSpec[] = [
       if (!fills || fills.length === 0) return 'hero has no fills';
       const r = fills[0]?.color?.r;
       if (typeof r !== 'number' || r < 0.9) return `hero color.r=${r}, expected ~1.0 (#FF3366 from #id selector)`;
+
+      return true;
+    },
+  },
+
+  // ─── getdesign npm: parser coverage across all brands ───
+
+  {
+    name: 'ds/getdesign-parser-coverage',
+    category: 'design-system',
+    test: () => {
+      const brandsDir = join(__dirname, '..', '..', '..', '..', '.reframe', 'brands');
+      if (!existsSync(brandsDir)) return 'skip: .reframe/brands/ not found (run npx getdesign add <slug> first)';
+
+      const slugs = readdirSync(brandsDir).filter(d =>
+        existsSync(join(brandsDir, d, 'DESIGN.md')),
+      );
+      if (slugs.length === 0) return 'skip: no brands downloaded';
+
+      const failures: string[] = [];
+
+      for (const slug of slugs) {
+        const md = readFileSync(join(brandsDir, slug, 'DESIGN.md'), 'utf-8');
+        const ds = parseDesignMd(md);
+        const missing: string[] = [];
+
+        if (!ds.colors.primary) missing.push('primary');
+        if (!ds.colors.background) missing.push('background');
+        if (!ds.colors.text) missing.push('text');
+        if (ds.typography.hierarchy.length < 3) missing.push(`typography(${ds.typography.hierarchy.length}/3)`);
+        if (!ds.typography.hierarchy.some(r => r.fontFamily)) missing.push('fontFamily');
+        if (!ds.layout.borderRadiusScale || ds.layout.borderRadiusScale.length < 2) missing.push('radiusScale');
+
+        if (missing.length > 0) {
+          failures.push(`${slug}: ${missing.join(', ')}`);
+        }
+      }
+
+      if (failures.length > 0) {
+        return `${failures.length}/${slugs.length} brands failed:\n${failures.join('\n')}`;
+      }
 
       return true;
     },

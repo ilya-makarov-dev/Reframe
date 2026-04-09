@@ -24,7 +24,6 @@ import { layoutGuide } from './data/guides';
 import { pickBestGuideKeyForDimensions } from './orchestration/guide-picker';
 import type { DesignSystem } from '../design-system/types';
 import type { BannerElementType, GuideSize } from './contracts/types';
-import { computeAllLayouts } from '../engine/layout';
 
 // ─── Types ─────────────────────────────────────────────────────
 

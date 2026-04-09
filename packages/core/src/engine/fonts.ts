@@ -134,15 +134,24 @@ export function isVariableFont(data: ArrayBuffer): boolean {
 // ─── Google Fonts ───────────────────────────────────────────────
 
 const GOOGLE_FONTS_API = 'https://www.googleapis.com/webfonts/v1/webfonts';
-const GOOGLE_FONTS_KEY = 'AIzaSyAPcbKiHmMOQRMYyATi95veNFkXtY30lnA';
+
+function getGoogleFontsApiKey(): string | undefined {
+  const proc = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } })
+    .process;
+  const key = proc?.env?.GOOGLE_FONTS_API_KEY?.trim();
+  return key || undefined;
+}
 
 async function fetchGoogleFontFiles(family: string): Promise<Record<string, string> | null> {
   const normalized = normalizeFontFamily(family);
   if (googleFontsCache.has(normalized)) return googleFontsCache.get(normalized)!;
   if (googleFontsFailed.has(normalized)) return null;
 
+  const apiKey = getGoogleFontsApiKey();
+  if (!apiKey) return null;
+
   try {
-    const url = `${GOOGLE_FONTS_API}?family=${encodeURIComponent(normalized)}&key=${GOOGLE_FONTS_KEY}`;
+    const url = `${GOOGLE_FONTS_API}?family=${encodeURIComponent(normalized)}&key=${apiKey}`;
     const res = await fetch(url);
     if (!res.ok) {
       googleFontsFailed.add(normalized);

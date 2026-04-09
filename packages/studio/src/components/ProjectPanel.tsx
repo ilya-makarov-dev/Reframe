@@ -3,7 +3,7 @@
  *
  * Shows above Layers in left panel.
  * Displays MCP status, scene count, and scene cards.
- * New scenes auto-load as artboards.
+ * Session scenes (s1, s2, …) open into **one** MCP workspace tab — switch scene in the list, not a new tab per scene.
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
@@ -67,11 +67,34 @@ function getMcpSessionIdFromArtboard(ab: Pick<Artboard, 'mcpSceneId' | 'name'>):
   return m ? m[1].toLowerCase() : undefined;
 }
 
+/** Documents tab that receives MCP scene switches; pinned after first open. */
+function getMcpTargetArtboardId(): string {
+  const st = useSceneStore.getState();
+  const persisted = st.mcpSessionArtboardId;
+  if (persisted && st.artboards.some(a => a.id === persisted)) {
+    return persisted;
+  }
+  if (st.artboards.length === 1) {
+    const id = st.artboards[0].id;
+    st.setMcpSessionArtboardId(id);
+    return id;
+  }
+  const linked = st.artboards.find(a => a.mcpSceneId);
+  if (linked) {
+    st.setMcpSessionArtboardId(linked.id);
+    return linked.id;
+  }
+  const id = st.activeArtboardId;
+  st.setMcpSessionArtboardId(id);
+  return id;
+}
+
 async function pullMcpSceneIntoArtboard(
   baseUrl: string,
   sceneSessionId: string,
   targetArtboardId: string,
   fallbackSlug?: string,
+  sceneDisplayName?: string,
 ): Promise<boolean> {
   const getStore = () => useSceneStore.getState();
   const primary = String(sceneSessionId).trim();
@@ -80,14 +103,25 @@ async function pullMcpSceneIntoArtboard(
   if ((!data?.root || typeof data.root !== 'object' || Array.isArray(data.root)) && _slug_valid(slug, primary)) {
     data = await fetchMcpSceneJson(baseUrl, slug!);
   }
+  const revision = typeof data?.revision === 'number' ? data.revision : undefined;
   const rootOk = data?.root && typeof data.root === 'object' && !Array.isArray(data.root);
   if (rootOk) {
     try {
       const clone = JSON.parse(JSON.stringify(data)) as { root: unknown };
-      if (getStore().loadSceneJson(clone, targetArtboardId)) return true;
+      if (getStore().loadSceneJson(clone, targetArtboardId, { fromMcp: true })) {
+        if (revision != null) getStore().setLastKnownMcpRevision(targetArtboardId, revision);
+        getStore().bindArtboardMcpSession(targetArtboardId, primary, sceneDisplayName ?? primary);
+        useProjectStore.getState().markClean(targetArtboardId);
+        return true;
+      }
     } catch (e) {
       console.warn('[Studio] scene JSON clone failed, using raw', e);
-      if (getStore().loadSceneJson(data, targetArtboardId)) return true;
+      if (getStore().loadSceneJson(data, targetArtboardId, { fromMcp: true })) {
+        if (revision != null) getStore().setLastKnownMcpRevision(targetArtboardId, revision);
+        getStore().bindArtboardMcpSession(targetArtboardId, primary, sceneDisplayName ?? primary);
+        useProjectStore.getState().markClean(targetArtboardId);
+        return true;
+      }
     }
   }
   let htmlResp: Response | null = null;
@@ -106,14 +140,22 @@ async function pullMcpSceneIntoArtboard(
   if (!htmlResp?.ok) return false;
   const html = await htmlResp.text();
   if (!html.trim()) return false;
-  return getStore().importHtml(html, targetArtboardId);
+  const ok = await getStore().importHtml(html, targetArtboardId, { fromMcp: true });
+  if (ok) {
+    getStore().bindArtboardMcpSession(targetArtboardId, primary, sceneDisplayName ?? primary);
+    useProjectStore.getState().markClean(targetArtboardId);
+  }
+  return ok;
 }
 
 function _slug_valid(slug: string | undefined, primary: string): slug is string {
   return !!slug && slug !== primary;
 }
 
-async function fetchMcpSceneJson(baseUrl: string, sceneId: string): Promise<{ root?: unknown } | null> {
+async function fetchMcpSceneJson(
+  baseUrl: string,
+  sceneId: string,
+): Promise<{ root?: unknown; revision?: number } | null> {
   const key = String(sceneId).trim();
   let j: Response;
   try {
@@ -128,69 +170,27 @@ async function fetchMcpSceneJson(baseUrl: string, sceneId: string): Promise<{ ro
   const text = await j.text();
   const ct = j.headers.get('content-type') ?? '';
   try {
-    if (ct.includes('application/json')) return JSON.parse(text) as { root?: unknown };
-    return JSON.parse(text) as { root?: unknown };
+    if (ct.includes('application/json')) return JSON.parse(text) as { root?: unknown; revision?: number };
+    return JSON.parse(text) as { root?: unknown; revision?: number };
   } catch {
     return null;
   }
 }
 
 export function ProjectPanel() {
-  const { connected, connecting, connect, disconnect, error } = useMcpConnection();
+  const { connected, connecting, connect, error } = useMcpConnection();
   const sessionScenes = useProjectStore(s => s.sessionScenes);
-  const addArtboard = useSceneStore(s => s.addArtboard);
   const switchArtboard = useSceneStore(s => s.switchArtboard);
   const clearArtboardGraph = useSceneStore(s => s.clearArtboardGraph);
 
   const [loadingId, setLoadingId] = useState<string | null>(null);
-  const loadedScenes = useRef<Set<string>>(new Set());
   /** Stops tight retry loops when JSON + HTML import both fail for a scene id. */
   const mcpPullFailedRef = useRef(new Set<string>());
 
   const activeArtboardId = useSceneStore(s => s.activeArtboardId);
   const artboards = useSceneStore(s => s.artboards);
 
-  const autoLoadScene = useCallback(async (sceneId: string, name: string, _size: string, slug?: string) => {
-    try {
-      const url = useProjectStore.getState().mcpUrl;
-      const getStore = () => useSceneStore.getState();
-      const rawId = String(sceneId).trim();
-      let tab = findArtboardForScene(getStore().artboards, rawId);
-      if (!tab) {
-        getStore().addArtboard(`${name} (${rawId})`, undefined, undefined, rawId, { activate: false });
-        tab = findArtboardForScene(getStore().artboards, rawId);
-      }
-
-      const targetArtboardId = tab?.id;
-      if (!targetArtboardId) return;
-
-      const fresh = getStore().artboards.find(ab => ab.id === targetArtboardId);
-      if (fresh?.graph && fresh.rootId) return;
-
-      const ok = await enqueueStudioMcpPull(() => pullMcpSceneIntoArtboard(url, rawId, targetArtboardId, slug));
-      const sidKey = rawId.toLowerCase();
-      if (ok) mcpPullFailedRef.current.delete(sidKey);
-      else mcpPullFailedRef.current.add(sidKey);
-    } catch (e) {
-      console.error('autoLoadScene:', e);
-    }
-  }, []);
-
-  /** Catch-up session scenes; pulls are serialized by enqueueStudioMcpPull. */
-  const syncMissingSessionScenes = useCallback(async () => {
-    const scenes = [...useProjectStore.getState().sessionScenes].sort(
-      (a, b) => (a.nodes ?? 0) - (b.nodes ?? 0),
-    );
-    for (const scene of scenes) {
-      const sid = String(scene.id).trim();
-      if (mcpPullFailedRef.current.has(sid.toLowerCase())) continue;
-      const ab = findArtboardForScene(useSceneStore.getState().artboards, sid);
-      if (ab?.graph && ab.rootId) continue;
-      await autoLoadScene(sid, scene.name, scene.size, scene.slug);
-    }
-  }, [autoLoadScene]);
-
-  // Poll session scenes
+  // Poll session scenes (list only — no auto-spawn of tabs per scene).
   const fetchScenes = useCallback(async () => {
     try {
       const url = useProjectStore.getState().mcpUrl;
@@ -198,26 +198,48 @@ export function ProjectPanel() {
       if (resp.ok) {
         const scenes = await resp.json();
         useProjectStore.getState().setSessionScenes(scenes);
-        void syncMissingSessionScenes();
       }
     } catch (_) {}
-  }, [syncMissingSessionScenes]);
+  }, []);
 
   useEffect(() => {
     if (!connected) return;
     mcpPullFailedRef.current.clear();
     fetchScenes();
-    const interval = setInterval(fetchScenes, 3000);
+    const interval = setInterval(fetchScenes, 8000);
     return () => clearInterval(interval);
   }, [connected, fetchScenes]);
 
-  // Catch-up for SSE-driven list updates (no HTTP poll yet) without aborting mid-loop.
+  const remoteSessionScene = useProjectStore(s => s.remoteSessionScene);
+
   useEffect(() => {
-    if (!connected) return;
-    void syncMissingSessionScenes();
-    const id = setInterval(() => void syncMissingSessionScenes(), 700);
-    return () => clearInterval(id);
-  }, [connected, syncMissingSessionScenes]);
+    if (!remoteSessionScene || !connected) return;
+    const sid = String(remoteSessionScene.sceneId).trim();
+    const st = useSceneStore.getState();
+    const ab = findArtboardForScene(st.artboards, sid);
+    useProjectStore.getState().clearRemoteSessionScene();
+    if (!ab?.id) return;
+
+    const dirty = useProjectStore.getState().dirty.has(ab.id);
+    const last = ab.lastKnownMcpRevision ?? 0;
+    if (dirty && remoteSessionScene.revision > last) {
+      useSceneStore.getState().raiseSyncConflict(
+        ab.id,
+        sid,
+        remoteSessionScene.revision,
+        `MCP updated ${sid} (rev ${remoteSessionScene.revision}) while you have local edits. Pull loads the server version and discards local changes on this artboard.`,
+      );
+      return;
+    }
+
+    const url = useProjectStore.getState().mcpUrl;
+    const meta = useProjectStore
+      .getState()
+      .sessionScenes.find(s => String(s.id).trim().toLowerCase() === sid.toLowerCase());
+    void enqueueStudioMcpPull(() =>
+      pullMcpSceneIntoArtboard(url, sid, ab.id, meta?.slug, meta?.name),
+    );
+  }, [remoteSessionScene, connected]);
 
   // When user switches to an MCP-linked artboard tab, load tree if still empty (fixes “No scene loaded”).
   useEffect(() => {
@@ -237,7 +259,9 @@ export function ProjectPanel() {
         const meta = useProjectStore
           .getState()
           .sessionScenes.find(s => String(s.id).trim().toLowerCase() === sidKey);
-        const ok = await enqueueStudioMcpPull(() => pullMcpSceneIntoArtboard(url, sid, targetId, meta?.slug));
+        const ok = await enqueueStudioMcpPull(() =>
+          pullMcpSceneIntoArtboard(url, sid, targetId, meta?.slug, meta?.name),
+        );
         if (ok) mcpPullFailedRef.current.delete(sidKey);
         else mcpPullFailedRef.current.add(sidKey);
       } catch (e) {
@@ -252,30 +276,58 @@ export function ProjectPanel() {
     try {
       const url = useProjectStore.getState().mcpUrl;
       const getStore = () => useSceneStore.getState();
-      let existing = findArtboardForScene(getStore().artboards, rawId);
+      mcpPullFailedRef.current.delete(rawId.toLowerCase());
 
-      if (!existing) {
-        addArtboard(`${sceneName} (${rawId})`, undefined, undefined, rawId);
-        existing = findArtboardForScene(getStore().artboards, rawId);
-      }
-      if (!existing) {
+      const targetArtboardId = getMcpTargetArtboardId();
+      if (!getStore().artboards.some(ab => ab.id === targetArtboardId)) {
         setLoadingId(null);
         return;
       }
-      const targetArtboardId = existing.id;
-      if (existing.id !== getStore().activeArtboardId) {
-        switchArtboard(existing.id);
+      getStore().setMcpSessionArtboardId(targetArtboardId);
+
+      const current = getStore().artboards.find(ab => ab.id === targetArtboardId);
+      const currentSid = current?.mcpSceneId?.trim();
+      const dirty = useProjectStore.getState().dirty.has(targetArtboardId);
+      if (dirty && currentSid && currentSid.toLowerCase() !== rawId.toLowerCase()) {
+        if (
+          !window.confirm(
+            'Discard unsaved changes on the MCP workspace and open this scene?',
+          )
+        ) {
+          setLoadingId(null);
+          return;
+        }
       }
 
-      mcpPullFailedRef.current.delete(rawId.toLowerCase());
-      await enqueueStudioMcpPull(() => pullMcpSceneIntoArtboard(url, rawId, targetArtboardId, slug));
-      setLoadingId(null);
-      return;
+      if (getStore().activeArtboardId !== targetArtboardId) {
+        switchArtboard(targetArtboardId);
+      }
+
+      await enqueueStudioMcpPull(() =>
+        pullMcpSceneIntoArtboard(url, rawId, targetArtboardId, slug, sceneName),
+      );
     } catch (e) {
       console.error('handleLoadScene:', e);
     }
     setLoadingId(null);
-  }, [addArtboard, switchArtboard]);
+  }, [switchArtboard]);
+
+  const syncConflict = useSceneStore(s => s.syncConflict);
+  const clearSyncConflict = useSceneStore(s => s.clearSyncConflict);
+
+  const handleConflictPull = useCallback(() => {
+    const c = useSceneStore.getState().syncConflict;
+    if (!c) return;
+    const url = useProjectStore.getState().mcpUrl;
+    const sidKey = String(c.mcpSceneId).trim().toLowerCase();
+    const meta = useProjectStore.getState().sessionScenes.find(
+      s => String(s.id).trim().toLowerCase() === sidKey,
+    );
+    clearSyncConflict();
+    void enqueueStudioMcpPull(() =>
+      pullMcpSceneIntoArtboard(url, c.mcpSceneId, c.artboardId, meta?.slug, meta?.name),
+    );
+  }, [clearSyncConflict]);
 
   const handleRemoveScene = useCallback(async (e: React.MouseEvent, sceneId: string) => {
     e.preventDefault();
@@ -321,7 +373,6 @@ export function ProjectPanel() {
         proj.sessionScenes.filter(s => s.id !== sceneId && (!slug || s.slug !== slug) && s.slug !== sceneId),
       );
 
-      loadedScenes.current.delete(sceneId);
       const store = useSceneStore.getState();
       const ab = findArtboardForScene(store.artboards, sceneId);
       if (ab) {
@@ -336,11 +387,44 @@ export function ProjectPanel() {
 
   return (
     <div className="project-panel">
+      {syncConflict && (
+        <div
+          className="project-panel__conflict"
+          style={{
+            padding: '8px 10px',
+            marginBottom: 8,
+            background: 'rgba(180, 120, 40, 0.2)',
+            borderRadius: 6,
+            fontSize: 11,
+            lineHeight: 1.35,
+          }}
+        >
+          <div style={{ marginBottom: 6 }}>{syncConflict.message}</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" className="project-panel__connect" onClick={handleConflictPull}>
+              Pull server version
+            </button>
+            <button type="button" className="project-panel__connect" onClick={clearSyncConflict}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
       {/* MCP status header */}
       <div className="project-panel__header">
-        <div className="project-panel__status">
-          <span className={`project-panel__dot ${connected ? 'project-panel__dot--on' : ''}`} />
-          <span>{connected ? 'MCP' : 'MCP'}</span>
+        <div
+          className="project-panel__status"
+          title={
+            connected
+              ? 'MCP connected — reframe HTTP server, agent tools & scene sync'
+              : 'MCP disconnected — Connect to sync with the agent'
+          }
+        >
+          <span
+            className={`project-panel__dot ${connected ? 'project-panel__dot--on' : 'project-panel__dot--off'}`}
+            aria-hidden
+          />
+          <span className="project-panel__status-mcp">MCP</span>
         </div>
         {connected ? (
           <span className="project-panel__meta">
@@ -376,26 +460,19 @@ export function ProjectPanel() {
                 : null;
             const metaSize = live?.size ?? scene.size;
             const metaNodes = live?.nodes ?? scene.nodes;
+            const detailTitle = `${metaSize} · ${metaNodes} nodes`;
             return (
             <div key={scene.id} className="project-panel__scene-card">
               <button
                 type="button"
                 className="project-panel__scene-open"
+                title={detailTitle}
                 onClick={() => handleLoadScene(scene.id, scene.name, scene.slug)}
                 disabled={loadingId === String(scene.id).trim()}
               >
                 <div className="project-panel__scene-info">
                   <span className="project-panel__scene-name">{scene.name}</span>
-                  <span
-                    className="project-panel__scene-meta"
-                    title={
-                      live
-                        ? 'Size and node count from the artboard loaded in Studio (MCP list is a compile-time snapshot and may differ).'
-                        : 'Snapshot from MCP when the scene was stored (storeScene).'
-                    }
-                  >
-                    {scene.id} · {metaSize} · {metaNodes}n
-                  </span>
+                  <span className="project-panel__scene-meta">{sid}</span>
                 </div>
               </button>
               <button
@@ -415,7 +492,7 @@ export function ProjectPanel() {
       )}
 
       {error && !connected && (
-        <div style={{ padding: '6px 16px 10px', color: 'var(--error)', fontSize: 10 }}>{error}</div>
+        <div className="project-panel__error">{error}</div>
       )}
     </div>
   );

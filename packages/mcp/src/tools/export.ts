@@ -9,25 +9,22 @@ import { z } from 'zod';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { exportToHtml } from '../../../core/src/exporters/html.js';
-import { exportToSvg } from '../../../core/src/exporters/svg.js';
 import { exportToReact } from '../../../core/src/exporters/react.js';
 import { exportToAnimatedHtml } from '../../../core/src/exporters/animated-html.js';
 import { exportToLottie } from '../../../core/src/exporters/lottie.js';
 import { exportSite } from '../../../core/src/exporters/site.js';
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
-import { setHost } from '../../../core/src/host/context.js';
+import { runWithHostAsync } from '../../../core/src/host/context.js';
 import { validateTimeline, computeDuration } from '../../../core/src/animation/timeline.js';
 import { presets, stagger as staggerFn, listPresets } from '../../../core/src/animation/presets.js';
 import type { ITimeline, INodeAnimation } from '../../../core/src/animation/types.js';
-import { exportScene } from '../engine.js';
-import { resolveScene, getScene, listScenes } from '../store.js';
+import { exportSvgFromGraph } from '../engine.js';
+import { resolveScene, getScene, listScenes, getExportsBaseDir } from '../store.js';
 import { getSession } from '../session.js';
 import type { SceneGraph } from '../../../core/src/engine/scene-graph.js';
-
-// ─── Constants ────────────────────────────────────────────────
-
-const MAX_INLINE_BYTES = 50_000; // 50KB — larger exports get size-only summary
+import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
+import { makeToolJsonErrorResult } from '../tool-result.js';
 
 // ─── Schema ───────────────────────────────────────────────────
 
@@ -43,6 +40,8 @@ export const exportInputSchema = {
 
   // SVG options
   xmlDeclaration: z.boolean().optional().default(true),
+  svgIncludeNames: z.boolean().optional().default(false).describe('Include node names as data attributes in SVG'),
+  svgBackground: z.string().optional().describe('Optional background color (e.g. white, #fff)'),
 
   // React options
   componentName: z.string().optional(),
@@ -174,6 +173,8 @@ export async function handleExport(input: {
   dataAttributes?: boolean;
   cssClasses?: boolean;
   xmlDeclaration?: boolean;
+  svgIncludeNames?: boolean;
+  svgBackground?: string;
   componentName?: string;
   typescript?: boolean;
   scale?: number;
@@ -186,7 +187,6 @@ export async function handleExport(input: {
   controls?: boolean;
 }) {
   const { format, sceneId } = input;
-  const sections: string[] = [];
 
   // ─── 1. Resolve scene ───────────────────────────────────────
   let graph: SceneGraph;
@@ -198,12 +198,10 @@ export async function handleExport(input: {
     return { content: [{ type: 'text' as const, text: err.message }] };
   }
 
-  try {
-    const { computeAllLayouts } = await import('../../../core/src/engine/layout.js');
-    computeAllLayouts(graph, rootId);
-  } catch {
-    /* layout optional for degenerate trees */
-  }
+  ensureSceneLayout(graph, rootId);
+
+  return runWithHostAsync(new StandaloneHost(graph), async () => {
+  const sections: string[] = [];
 
   // ─── 2. Session tracking ────────────────────────────────────
   const session = getSession();
@@ -266,13 +264,15 @@ export async function handleExport(input: {
       }
 
       case 'svg': {
-        const sceneData = { root: exportScene(graph, rootId) };
-        content = exportToSvg(sceneData as any);
+        content = exportSvgFromGraph(graph, rootId, {
+          xmlDeclaration: input.xmlDeclaration ?? true,
+          includeNames: input.svgIncludeNames ?? false,
+          background: input.svgBackground,
+        });
         break;
       }
 
       case 'react': {
-        setHost(new StandaloneHost(graph));
         const wrappedRoot = new StandaloneNode(graph, graph.getNode(rootId)!);
         content = exportToReact(wrappedRoot);
         break;
@@ -331,9 +331,8 @@ export async function handleExport(input: {
         };
     }
   } catch (err: any) {
-    return {
-      content: [{ type: 'text' as const, text: `Export error (${format}): ${err.message}` }],
-    };
+    const message = `Export error (${format}): ${err.message}`;
+    return makeToolJsonErrorResult(message, 'export.failed', { format, cause: err.message });
   }
 
   // ─── 5. Auto-save to file + return result ──────────────────
@@ -342,11 +341,11 @@ export async function handleExport(input: {
 
   // Auto-save exported file to .reframe/exports/
   const extMap: Record<string, string> = {
-    html: 'html', svg: 'svg', react: 'tsx', animated_html: 'html',
-    lottie: 'json', site: 'html', png: 'png',
+    html: 'html', svg: 'svg', react: 'tsx', animated_html: 'animated.html',
+    lottie: 'lottie.json', site: 'html', png: 'png',
   };
   const ext = extMap[format] ?? format;
-  const exportDir = join(process.cwd(), '.reframe', 'exports');
+  const exportDir = getExportsBaseDir();
   if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
   const fileName = format === 'site' ? `site.${ext}` : `${slug}.${ext}`;
   const filePath = join(exportDir, fileName);
@@ -355,15 +354,11 @@ export async function handleExport(input: {
   } catch {}
 
   const absPath = filePath.replace(/\\/g, '/');
-  sections.push(`Exported **${format === 'site' ? 'site' : slug}** → [${fileName}](${absPath}) (${(content.length / 1024).toFixed(1)}KB)`);
-  if (format === 'site') {
-    sections.push(`Open [site.html](${absPath}) in browser — clickable multi-page app with navigation.`);
-    sections.push(`Or: http://localhost:4100/site`);
-  } else {
-    sections.push(`Preview: [open file](${absPath}) or http://localhost:4100/preview/${sceneId}`);
-  }
+  const previewUrl = format === 'site' ? 'http://localhost:4100/site' : `http://localhost:4100/preview/${sceneId}`;
+  sections.push(`Exported **${format === 'site' ? 'site' : slug}**  ${previewUrl} → [${fileName}](${absPath}) (${(content.length / 1024).toFixed(1)}KB)`);
 
   return {
     content: [{ type: 'text' as const, text: sections.join('\n') }],
   };
+  });
 }

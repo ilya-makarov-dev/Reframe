@@ -15,7 +15,7 @@
  */
 
 // ── Host abstraction ──
-export { setHost, getHost, resetHost } from './host/context';
+export { setHost, getHost, resetHost, runWithHost, runWithHostAsync } from './host/context';
 export {
   NodeType,
   MIXED,
@@ -167,6 +167,8 @@ export {
   noHiddenNodes, noEmptyText, noZeroSize,
   fontWeightCompliance, borderRadiusCompliance,
   spacingGridCompliance, fontSizeRoleMatch,
+  fontFeaturesCompliance, spacingScaleCompliance,
+  componentSpecCompliance, stateCompleteness,
   visualHierarchy, contentDensity, visualBalance, ctaVisibility,
   exportFidelity,
   type AuditIssue,
@@ -175,6 +177,10 @@ export {
   type AuditContext,
   type Severity,
 } from './audit';
+export {
+  buildInspectAuditRules,
+  type InspectAuditRuleOptions,
+} from './inspect-audit-rules';
 
 // ── Semantic Layer ──
 export {
@@ -252,20 +258,37 @@ export {
   type TempCapture,
 } from './resize/orchestration';
 
+// -- Deserialize errors (HTTP / tools) --
+export {
+  REFRAME_DESERIALIZE_KIND,
+  deserializeErrorHttpJson,
+} from './deserialize-error';
+export type { DeserializeErrorBody, DeserializeErrorCode } from './deserialize-error';
+
+// -- Scene envelope (canonical doc; types re-exported from serialize) --
+export type { SceneEnvelope } from './spec/scene-envelope';
+export { SCENE_NODE_CHANGE_CHECKLIST } from './spec/scene-envelope';
+
 // -- Serialize --
 export {
   serializeNode, serializeToString, deserializeNode, deserializeFromString,
   serializeSceneNode, serializeGraph, serializeGraphToString,
-  deserializeToGraph, deserializeScene,
+  deserializeToGraph, deserializeScene, hydrateSceneImagesBase64,
   serializeTimeline, deserializeTimeline,
   migrateScene, migrateSceneJSON,
   SERIALIZE_VERSION,
+  normalizeImportFills,
+  normalizeImportStrokes,
+  normalizeImportEffects,
+  normalizeImportStyleRuns,
+  applyImportedNodeLayoutProps,
+  importSceneNodeFallback,
 } from './serialize';
 export type { INodeJSON, SceneJSON, SerializeOptions } from './serialize';
 
 // -- Diff --
 export { diffTrees, formatDiff } from './diff';
-export type { DiffEntry, DiffResult, DiffOptions, DiffType, PropertyChange } from './diff';
+export type { DiffEntry, DiffResult, DiffOptions, DiffType, PropertyChange, FormatDiffOptions } from './diff';
 
 // -- React Export --
 export { exportToReact } from './exporters/react';

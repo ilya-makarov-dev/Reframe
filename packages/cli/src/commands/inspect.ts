@@ -3,17 +3,14 @@
  */
 
 import type { CliArgs } from '../args';
-import { loadScene, importScene } from '../scene-io';
-import { SceneGraph } from '../engine-bridge';
+import { loadScene, graphFromSceneEnvelope } from '../scene-io';
 
 export function inspect(args: CliArgs): void {
   const inputPath = args._[1];
   if (!inputPath) throw new Error('Missing input file. Usage: reframe inspect <scene.json>');
 
   const scene = loadScene(inputPath);
-  const graph = new SceneGraph();
-  const page = graph.addPage('Source');
-  const rootId = importScene(graph, page.id, scene.root);
+  const { graph, rootId } = graphFromSceneEnvelope(scene);
 
   const root = graph.getNode(rootId)!;
 

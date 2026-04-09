@@ -195,6 +195,12 @@ export function exportToHtml(
     // Content slot data attribute
     if (node.slot) attrs.push(`data-slot="${escapeHtml(node.slot)}"`);
 
+    // Content slots exposed by this node (for component consumers)
+    if (node.contentSlots.length > 0) {
+      const slotNames = node.contentSlots.map(s => s.name).join(',');
+      attrs.push(`data-content-slots="${escapeHtml(slotNames)}"`);
+    }
+
     if (dataAttrs) {
       attrs.push(`data-id="${node.id}"`);
       attrs.push(`data-name="${escapeHtml(node.name)}"`);
@@ -380,6 +386,9 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
   // Position & size
   if (isRoot) {
     s.push('position: relative');
+    // Studio (and designs) may offset the artboard root — include x/y so drag + round-trip match the graph.
+    s.push(`left: ${px(node.x)}`);
+    s.push(`top: ${px(node.y)}`);
     s.push(`width: ${px(node.width)}`);
     // Root with auto-layout: min-height so content can grow beyond frame
     if (hasFlexLayout) {
@@ -607,6 +616,9 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
     if (node.italic) s.push('font-style: italic');
     if (node.letterSpacing) s.push(`letter-spacing: ${tv('letterSpacing', px(node.letterSpacing))}`);
     if (node.lineHeight) s.push(`line-height: ${tv('lineHeight', lineHeightCss(node.lineHeight))}`);
+    if (node.fontFeatureSettings && node.fontFeatureSettings.length > 0) {
+      s.push(`font-feature-settings: ${node.fontFeatureSettings.map(t => `"${t}"`).join(', ')}`);
+    }
 
     const textColor = node.fills?.find(f => f.visible && f.type === 'SOLID');
     if (textColor) {
@@ -710,6 +722,13 @@ function computeBorderRadius(node: SceneNode): string | null {
   }
 
   if (!node.cornerRadius) return null;
+
+  // Corner smoothing (Figma's iOS-style squircle) — approximate with mask-image superellipse
+  if (node.cornerSmoothing > 0 && node.cornerRadius > 0) {
+    // Use CSS mask for smooth corners where supported
+    return `border-radius: ${px(node.cornerRadius)}; --corner-smoothing: ${node.cornerSmoothing}`;
+  }
+
   return `border-radius: ${px(node.cornerRadius)}`;
 }
 

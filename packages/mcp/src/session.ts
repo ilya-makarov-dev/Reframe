@@ -492,6 +492,11 @@ class SessionContext {
     if (this.designSystems.size > 0) caches.push(`${this.designSystems.size} design system(s)`);
     if (this.semantics.size > 0) caches.push(`${this.semantics.size} semantic map(s)`);
     if (caches.length > 0) lines.push(`Cached: ${caches.join(', ')}`);
+    if (this.designSystems.size > 0) {
+      lines.push(
+        'Note: If a scene graph was replaced externally (e.g. Studio/HTTP PUT), run defineTokens again so token-bound nodes stay aligned with DESIGN.md.',
+      );
+    }
 
     // Scene lifecycle summary
     const scenes = [...this.sceneLifecycles.values()];

@@ -11,7 +11,7 @@ import type { ITimeline } from '../animation/types.js';
 import {
   serializeNode, deserializeNode,
   serializeSceneNode, serializeGraph, serializeGraphToString,
-  deserializeToGraph, deserializeScene,
+  deserializeToGraph, deserializeScene, importSceneNodeFallback,
   serializeTimeline, deserializeTimeline,
   SERIALIZE_VERSION,
 } from '../serialize.js';
@@ -133,6 +133,101 @@ section('Layout properties roundtrip');
   assert(c2.layoutPositioning === 'ABSOLUTE', 'child layoutPositioning');
   assert(c2.layoutGrow === 1, 'child layoutGrow');
   assert(c2.layoutAlignSelf === 'CENTER', 'child layoutAlignSelf');
+}
+
+// ─── 2b. Hex string fills import (PUT / loose JSON)
+
+section('Hex string fills normalize on import');
+{
+  const loose = {
+    id: 'r1',
+    name: 'Loose',
+    type: 'RECTANGLE',
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 10,
+    fills: ['#ff0000', '#00ff0080'],
+  };
+
+  const { graph, rootId } = deserializeToGraph(loose as any);
+  const n = graph.getNode(rootId)!;
+  assert(n.fills.length === 2, 'two fills');
+  assert(n.fills[0].type === 'SOLID', 'first solid');
+  assert(Math.abs(n.fills[0].color.r - 1) < 0.01, 'red');
+  assert(n.fills[1].opacity < 1, 'second opacity from 8-digit hex');
+}
+
+section('Hex string strokes normalize on import');
+{
+  const loose = {
+    id: 'r1',
+    name: 'StrokeLoose',
+    type: 'RECTANGLE',
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 10,
+    strokes: ['#0000ff', { color: '#ff000080', weight: 2, align: 'CENTER' as const }],
+  };
+
+  const { graph, rootId } = deserializeToGraph(loose as any);
+  const n = graph.getNode(rootId)!;
+  assert(n.strokes.length === 2, 'two strokes');
+  assert(n.strokes[0].weight === 1, 'shorthand stroke weight');
+  assert(n.strokes[1].weight === 2, 'object stroke weight');
+  assert(n.strokes[1].align === 'CENTER', 'align preserved');
+  assert(n.strokes[1].color.r > 0.9, 'red from hex color string');
+}
+
+section('Effects + styleRuns hex normalize on import');
+{
+  const loose = {
+    id: 't1',
+    name: 'Fx',
+    type: 'TEXT',
+    x: 0,
+    y: 0,
+    width: 40,
+    height: 20,
+    text: 'Hi',
+    effects: [
+      {
+        type: 'DROP_SHADOW',
+        color: '#00000080',
+        offset: { x: 0, y: 2 },
+        radius: 4,
+        spread: 0,
+        visible: true,
+      },
+    ],
+    styleRuns: [{ start: 0, length: 2, style: { fillColor: '#00ff00' } }],
+  };
+  const { graph, rootId } = deserializeToGraph(loose as any);
+  const n = graph.getNode(rootId)!;
+  assert(n.effects.length === 1, 'one effect');
+  assert(n.effects[0].color.a < 1, 'shadow color alpha from hex');
+  assert(n.styleRuns.length === 1 && n.styleRuns[0].style.fillColor !== undefined, 'styleRun');
+  const fc = n.styleRuns[0].style.fillColor!;
+  assert(
+    typeof fc === 'object' && 'r' in fc && 'g' in fc && (fc as { r: number; g: number }).g > 0.9,
+    'fillColor rgb',
+  );
+}
+
+section('importSceneNodeFallback matches normalizer for shallow node');
+{
+  const g = new SceneGraph();
+  const page = g.addPage('P');
+  const id = importSceneNodeFallback(g, page.id, {
+    type: 'RECTANGLE',
+    name: 'R',
+    width: 5,
+    height: 5,
+    fills: ['#abc'],
+  } as any);
+  const n = g.getNode(id)!;
+  assert(n.fills.length === 1 && n.fills[0].type === 'SOLID', 'fallback normalizes fills');
 }
 
 // ─── 3. Visual Properties ─────────────────────────────────────

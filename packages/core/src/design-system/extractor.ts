@@ -106,42 +106,128 @@ function deriveColors(colorMap: Map<string, ColorFreq>): DesignSystemColors {
   const background = bgCandidate?.hex;
   if (background) { roles.set('background', background); used.add(background); }
 
-  // Text color = most frequent text-context color
-  const textCandidates = sorted.filter(c => c.contexts.has('text')).sort((a, b) => b.count - a.count);
+  // Text color = most frequent text-context color that CONTRASTS with background.
+  // In dark themes, text must be light; in light themes, text must be dark.
+  const bgIsDark = background ? hexLuminance(background) < 0.4 : false;
+  const textCandidates = sorted
+    .filter(c => c.contexts.has('text'))
+    .filter(c => {
+      // Text must contrast with background
+      if (!background) return true;
+      const textLight = hexLuminance(c.hex) > 0.4;
+      return bgIsDark ? textLight : !textLight;
+    })
+    .sort((a, b) => b.count - a.count);
   const text = textCandidates[0]?.hex;
   if (text) { roles.set('text', text); used.add(text); }
 
-  // Primary = most saturated shape color (brand colors are vivid)
-  // This is better than just "most area" — brand colors stand out by saturation
+  // Primary = most saturated shape color (brand colors are vivid, saturation > 0.15)
   const shapeCandidates = sorted
-    .filter(c => c.contexts.has('shape') && !used.has(c.hex))
+    .filter(c => c.contexts.has('shape') && !used.has(c.hex) && hexSaturation(c.hex) > 0.25)
     .sort((a, b) => hexSaturation(b.hex) - hexSaturation(a.hex));
 
   const primary = shapeCandidates[0]?.hex;
   if (primary) { roles.set('primary', primary); used.add(primary); }
 
-  // Accent = second most saturated shape color
-  const accent = shapeCandidates[1]?.hex ?? primary;
-  if (accent && accent !== primary) { roles.set('accent', accent); used.add(accent); }
+  // Accent = second vivid shape color (saturation > 0.15, different hue from primary)
+  const accent = shapeCandidates.find(c => c.hex !== primary && hexSaturation(c.hex) > 0.25)?.hex;
+  if (accent) { roles.set('accent', accent); used.add(accent); }
 
-  // Surface = second largest area color (often cards, containers)
-  const surfaceCandidate = sorted.find(c => !used.has(c.hex) && c.totalArea > 0.02);
+  // Surface = card/container background — a desaturated color close in luminance to background
+  // but distinctly different (slightly elevated). Not text, not vivid.
+  const bgLum = background ? hexLuminance(background) : 0.5;
+  const surfaceCandidate = sorted.find(c => {
+    if (used.has(c.hex)) return false;
+    if (c.hex === background) return false;
+    if (c.totalArea < 0.005) return false;
+    // Must be desaturated (not a brand color)
+    if (hexSaturation(c.hex) > 0.25) return false;
+    // Must be on the same luminance side as background
+    const cLum = hexLuminance(c.hex);
+    if (bgIsDark && cLum > 0.5) return false;  // too light for dark theme surface
+    if (!bgIsDark && cLum < 0.3) return false;  // too dark for light theme surface
+    // Must be different from background (not the same color)
+    const lumDiff = Math.abs(cLum - bgLum);
+    return lumDiff > 0.01 && lumDiff < 0.3;
+  });
   if (surfaceCandidate) { roles.set('surface', surfaceCandidate.hex); used.add(surfaceCandidate.hex); }
+  // Fallback surface: derive from background
+  if (!roles.has('surface') && background) {
+    roles.set('surface', bgIsDark ? lighten(background, 0.08) : darken(background, 0.04));
+  }
 
-  // Muted = low-saturation text-like color (secondary text, placeholders)
-  const mutedCandidate = textCandidates.find(c => !used.has(c.hex));
-  if (mutedCandidate) { roles.set('muted', mutedCandidate.hex); }
+  // Muted = desaturated secondary text. Must be different from primary text,
+  // lower contrast, and preferably a gray (low saturation).
+  const mutedCandidates = sorted
+    .filter(c => c.contexts.has('text') && !used.has(c.hex))
+    .map(c => {
+      const sat = hexSaturation(c.hex);
+      const lum = hexLuminance(c.hex);
+      const contrastToBg = Math.abs(lum - bgLum);
+      // Score: low saturation is good, moderate contrast is good (not too high, not too low)
+      // Penalize very high luminance (>0.9 = near-white) and very low (<0.1 = near-black)
+      const extremePenalty = (lum > 0.9 || lum < 0.1) ? 1 : 0;
+      const score = sat + extremePenalty - contrastToBg * 0.3;
+      return { c, score };
+    })
+    .sort((a, b) => a.score - b.score);
+  if (mutedCandidates.length > 0) { roles.set('muted', mutedCandidates[0].c.hex); }
 
-  // Add all unique colors as named roles for completeness
+  // Border = stroke color, or desaturated color between background and surface
+  const borderCandidate = sorted.find(c =>
+    c.contexts.has('stroke') && !used.has(c.hex) && hexSaturation(c.hex) < 0.15
+  );
+  if (borderCandidate) {
+    roles.set('border', borderCandidate.hex);
+  } else if (background) {
+    // Derive: slightly visible against background
+    roles.set('border', bgIsDark ? lighten(background, 0.12) : darken(background, 0.08));
+  }
+
+  // Add remaining unique colors as numbered roles (skip desaturated near-duplicates)
   let colorIdx = 1;
   for (const c of sorted) {
-    if (!used.has(c.hex) && colorIdx <= 10) {
+    if (!used.has(c.hex) && !roles.has(c.hex) && colorIdx <= 5) {
+      // Skip colors that are too close to already-assigned roles
+      const isDuplicate = [...roles.values()].some(existing => {
+        const lumDiff = Math.abs(hexLuminance(c.hex) - hexLuminance(existing));
+        const satDiff = Math.abs(hexSaturation(c.hex) - hexSaturation(existing));
+        return lumDiff < 0.05 && satDiff < 0.05;
+      });
+      if (isDuplicate) continue;
       roles.set(`color-${colorIdx}`, c.hex);
       colorIdx++;
     }
   }
 
   return { primary, background, text, accent, roles };
+}
+
+/** Get relative luminance from hex (0-1). Used for contrast-aware role assignment. */
+function hexLuminance(hex: string): number {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+/** Lighten a hex color by amount (0-1). */
+function lighten(hex: string, amount: number): string {
+  const h = hex.replace('#', '');
+  const r = Math.min(255, Math.round(parseInt(h.slice(0, 2), 16) + 255 * amount));
+  const g = Math.min(255, Math.round(parseInt(h.slice(2, 4), 16) + 255 * amount));
+  const b = Math.min(255, Math.round(parseInt(h.slice(4, 6), 16) + 255 * amount));
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+/** Darken a hex color by amount (0-1). */
+function darken(hex: string, amount: number): string {
+  const h = hex.replace('#', '');
+  const r = Math.max(0, Math.round(parseInt(h.slice(0, 2), 16) * (1 - amount)));
+  const g = Math.max(0, Math.round(parseInt(h.slice(2, 4), 16) * (1 - amount)));
+  const b = Math.max(0, Math.round(parseInt(h.slice(4, 6), 16) * (1 - amount)));
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 
 /** Get HSL saturation from hex (0-1). Used to identify vivid brand colors. */
@@ -236,9 +322,20 @@ function assignTypographyRoles(metrics: TextMetrics[]): TypographyRule[] {
   // Sort by fontSize descending
   const sorted = [...metrics].sort((a, b) => b.fontSize - a.fontSize);
 
-  // Group by similar fontSize (±15%)
-  const groups: TextMetrics[][] = [];
+  // Classify each text by context BEFORE grouping
   for (const m of sorted) {
+    (m as any)._isButton = isButtonText(m);
+    (m as any)._isLabel = m.characters.length <= 15 && m.fontWeight >= 500 && m.fontSize <= 14;
+  }
+
+  // Separate button/label text from content text
+  const buttonTexts = sorted.filter(m => (m as any)._isButton);
+  const labelTexts = sorted.filter(m => (m as any)._isLabel && !(m as any)._isButton);
+  const contentTexts = sorted.filter(m => !(m as any)._isButton && !(m as any)._isLabel);
+
+  // Group content text by similar fontSize (±15%)
+  const groups: TextMetrics[][] = [];
+  for (const m of contentTexts) {
     const existing = groups.find(g => {
       const ref = g[0].fontSize;
       return Math.abs(m.fontSize - ref) / ref < 0.15;
@@ -247,64 +344,74 @@ function assignTypographyRoles(metrics: TextMetrics[]): TypographyRule[] {
     else groups.push([m]);
   }
 
-  // Assign roles by size order
-  const roleSequence: TypographyRole[] = ['hero', 'title', 'subtitle', 'body', 'caption', 'disclaimer'];
   const rules: TypographyRule[] = [];
 
-  // Special case: if only 1-2 groups, use title + body
+  // Assign content roles by size (largest = display, then heading, subhead, body, caption)
+  const contentRoles: TypographyRole[] = ['hero', 'title', 'subtitle', 'body', 'caption', 'disclaimer'];
+
+  // Special case: if only 1-2 content groups
   if (groups.length <= 2) {
-    const simple: TypographyRole[] = ['title', 'body'];
+    // If largest text is >= 40px, it's a hero/display, not just a title
+    const isHeroSize = groups[0] && groups[0][0].fontSize >= 40;
+    const simple: TypographyRole[] = groups.length === 1
+      ? [isHeroSize ? 'hero' : 'title']
+      : [isHeroSize ? 'hero' : 'title', 'body'];
     for (let i = 0; i < Math.min(groups.length, simple.length); i++) {
-      const rep = groups[i][0]; // representative
-      rules.push({
-        role: simple[i],
-        fontFamily: rep.fontFamily || undefined,
-        fontSize: rep.fontSize,
-        fontWeight: rep.fontWeight,
-        lineHeight: rep.lineHeight,
-        letterSpacing: rep.letterSpacing,
-      });
+      const rep = groups[i][0];
+      rules.push(makeRule(simple[i], rep));
     }
-    return rules;
+  } else {
+    for (let i = 0; i < Math.min(groups.length, contentRoles.length); i++) {
+      const rep = groups[i][0];
+      let role = contentRoles[i];
+      // Hero only if significantly larger than next (≥1.5x)
+      if (i === 0 && groups.length >= 3) {
+        const ratio = groups[0][0].fontSize / groups[1][0].fontSize;
+        if (ratio < 1.5) role = 'title';
+      }
+      rules.push(makeRule(role, rep));
+    }
   }
 
-  // Map groups to roles
-  for (let i = 0; i < Math.min(groups.length, roleSequence.length); i++) {
-    const rep = groups[i][0];
+  // Add button role from detected button text
+  if (buttonTexts.length > 0) {
+    const rep = buttonTexts[0];
+    rules.push(makeRule('button', rep));
+  }
 
-    // Skip hero if the biggest text isn't significantly larger
-    let role = roleSequence[i];
-    if (i === 0 && groups.length >= 3) {
-      const ratio = groups[0][0].fontSize / groups[1][0].fontSize;
-      if (ratio < 1.3) role = 'title'; // Not big enough for hero
-    }
-
-    // Detect button text: short, inside a frame/component, lower half
-    if (rep.characters.length < 20 && rep.y > 0.4 && rep.fontSize < groups[0][0].fontSize * 0.6) {
-      if (!rules.some(r => r.role === 'button')) {
-        rules.push({
-          role: 'button',
-          fontFamily: rep.fontFamily || undefined,
-          fontSize: rep.fontSize,
-          fontWeight: rep.fontWeight,
-          lineHeight: rep.lineHeight,
-          letterSpacing: rep.letterSpacing,
-        });
-        continue;
-      }
-    }
-
-    rules.push({
-      role,
-      fontFamily: rep.fontFamily || undefined,
-      fontSize: rep.fontSize,
-      fontWeight: rep.fontWeight,
-      lineHeight: rep.lineHeight,
-      letterSpacing: rep.letterSpacing,
-    });
+  // Add caption from label text if not already assigned
+  if (labelTexts.length > 0 && !rules.some(r => r.role === 'caption')) {
+    const rep = labelTexts[0];
+    rules.push(makeRule('caption', rep));
   }
 
   return rules;
+}
+
+/** Detect button text: short text with high weight, small font, typically in UI controls. */
+function isButtonText(m: TextMetrics): boolean {
+  // Button text is SMALL (never hero-sized), short, and bold
+  if (m.fontSize > 20) return false;    // hero/heading text is NOT a button
+  if (m.characters.length > 25) return false;
+  if (m.fontWeight < 500) return false;
+  // Check for common button words (only for small text)
+  const lower = m.characters.toLowerCase().trim();
+  const buttonWords = /^(get started|sign up|subscribe|buy|shop|learn more|try free|start|join|download|install|contact|book|order|add to|checkout|register|launch|log in|sign in|cancel|delete|save|send|share|confirm|submit|apply)/;
+  if (buttonWords.test(lower)) return true;
+  // Short + bold + small = likely button
+  if (m.characters.length <= 15 && m.fontWeight >= 600 && m.fontSize <= 16) return true;
+  return false;
+}
+
+function makeRule(role: TypographyRole, m: TextMetrics): TypographyRule {
+  return {
+    role,
+    fontFamily: m.fontFamily || undefined,
+    fontSize: m.fontSize,
+    fontWeight: m.fontWeight,
+    lineHeight: m.lineHeight,
+    letterSpacing: m.letterSpacing,
+  };
 }
 
 // ---------------------------------------------------------------------------

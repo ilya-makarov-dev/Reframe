@@ -16,7 +16,7 @@ import type { SceneNode } from '../../../core/src/engine/types.js';
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
 import { setHost } from '../../../core/src/host/context.js';
-import { storeScene, getScene, resolveScene, setTokenIndex, getTokenIndex, findSessionId } from '../store.js';
+import { storeScene, getScene, resolveScene, setTokenIndex, getTokenIndex, findSessionId, bumpSceneSessionRevision } from '../store.js';
 import { exportScene, inspectScene } from '../engine.js';
 import { getSession } from '../session.js';
 import { parseDesignMd } from '../../../core/src/design-system/index.js';
@@ -31,17 +31,11 @@ import { ComponentRegistry } from '../../../core/src/engine/component-registry.j
 import { resolveBlueprint } from '../../../core/src/ui/blueprint.js';
 import { fromDesignMd } from '../../../core/src/ui/theme.js';
 import { build as buildBlueprint } from '../../../core/src/builder.js';
-import { computeAllLayouts } from '../../../core/src/engine/layout.js';
+import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
 import { runAutoFixLoop } from './_auto-fix.js';
-import {
-  audit,
-  textOverflow, minFontSize as minFontSizeRule, noEmptyText, noZeroSize,
-  contrastMinimum, fontInPalette, colorInPalette, fontWeightCompliance,
-  fontSizeRoleMatch, borderRadiusCompliance, spacingGridCompliance,
-  visualHierarchy, contentDensity, visualBalance, ctaVisibility,
-  exportFidelity,
-  type AuditRule,
-} from '../../../core/src/audit.js';
+import { audit } from '../../../core/src/audit.js';
+import { buildInspectAuditRules } from '../../../core/src/inspect-audit-rules.js';
+import { MCP_LIMITS } from '../limits.js';
 
 // ─── Color helper ────────────────────────────────────────────
 
@@ -323,11 +317,14 @@ const operationSchema = z.discriminatedUnion('op', [
 ]);
 
 export const editInputSchema = {
-  operations: z.array(operationSchema).describe(
-    'Array of operations to execute. Operations run in sequence. ' +
-    'Types: create (new scene), add (node to scene), update (node props), ' +
-    'delete (node), clone (scene), resize (scene root), move (reparent node).'
-  ),
+  operations: z
+    .array(operationSchema)
+    .max(MCP_LIMITS.editOperationsMax)
+    .describe(
+      'Array of operations to execute. Operations run in sequence. ' +
+        'Types: create (new scene), add (node to scene), update (node props), ' +
+        'delete (node), clone (scene), resize (scene root), move (reparent node).'
+    ),
 
   designMd: z.string().optional().describe('DESIGN.md for brand compliance audit after operations'),
 
@@ -336,6 +333,8 @@ export const editInputSchema = {
     z.object({
       autoFix: z.boolean().optional().default(true),
       maxPasses: z.number().optional().default(3),
+      minFontSize: z.number().optional().default(8),
+      minContrast: z.number().optional().default(3),
     }),
   ]).optional().default(true).describe('Auto-audit after operations. true = audit+fix, false = skip.'),
 };
@@ -627,7 +626,7 @@ function buildNodeIntoGraph(
 export async function handleEdit(input: {
   operations: any[];
   designMd?: string;
-  audit?: boolean | { autoFix?: boolean; maxPasses?: number };
+  audit?: boolean | { autoFix?: boolean; maxPasses?: number; minFontSize?: number; minContrast?: number };
 }) {
   const session = getSession();
   session.recordToolCall('edit');
@@ -675,7 +674,7 @@ export async function handleEdit(input: {
           const graph = built.graph;
           const rootId = built.root.id;
           setHost(new StandaloneHost(graph));
-          try { computeAllLayouts(graph, rootId); } catch (_) {}
+          ensureSceneLayout(graph, rootId);
 
           const root = graph.getNode(rootId)!;
           const sceneName = op.name ?? root.name ?? 'Scene';
@@ -903,8 +902,8 @@ export async function handleEdit(input: {
         if (!stored) { results.push(`DEFINE_TOKENS ERROR: scene "${sceneId}" not found`); break; }
 
         // Parse DESIGN.md (use op-level or input-level)
-        const designMdStr = op.designMd ?? input.designMd;
-        if (!designMdStr) { results.push('DEFINE_TOKENS ERROR: designMd required'); break; }
+        const designMdStr = op.designMd ?? input.designMd ?? session.activeDesignMd;
+        if (!designMdStr) { results.push('DEFINE_TOKENS ERROR: designMd required (load with reframe_design first)'); break; }
 
         const parsedDs = session.getOrParseDesignMd(designMdStr, parseDesignMd);
         const tokenIndex = tokenizeDesignSystem(stored.graph, parsedDs, { darkMode: op.darkMode ?? false });
@@ -1036,11 +1035,7 @@ export async function handleEdit(input: {
   for (const sceneId of touchedScenes) {
     const stored = getScene(sceneId);
     if (!stored) continue;
-    try {
-      computeAllLayouts(stored.graph, stored.rootId);
-    } catch {
-      /* layout may throw on exotic trees; export/audit still proceed */
-    }
+    ensureSceneLayout(stored.graph, stored.rootId);
   }
 
   // ── Auto-audit touched scenes ──────────────────────────────
@@ -1054,14 +1049,9 @@ export async function handleEdit(input: {
       const stored = getScene(sceneId);
       if (!stored) continue;
 
-      const rules: AuditRule[] = [
-        textOverflow(), minFontSizeRule(8), noEmptyText(), noZeroSize(),
-        contrastMinimum(3), fontWeightCompliance(), fontSizeRoleMatch(),
-        borderRadiusCompliance(), spacingGridCompliance(),
-        visualHierarchy(), contentDensity(), visualBalance(), ctaVisibility(),
-        exportFidelity(),
-      ];
-      if (ds) { rules.push(fontInPalette(), colorInPalette()); }
+      const minFS = opts.minFontSize ?? 8;
+      const minCR = opts.minContrast ?? 3;
+      const rules = buildInspectAuditRules(ds as any, { minFontSize: minFS, minContrast: minCR });
 
       const { finalIssues, allFixed, passCount } = runAutoFixLoop(
         stored.graph, stored.rootId,
@@ -1112,6 +1102,10 @@ export async function handleEdit(input: {
     }
   }
 
+  for (const sceneId of touchedScenes) {
+    bumpSceneSessionRevision(sceneId);
+  }
+
   // ── Build response with context ────────────────────────────
   const lines: string[] = [];
 
@@ -1139,7 +1133,7 @@ export async function handleEdit(input: {
   }
 
   if (lastSceneId) {
-    lines.push(`Next: reframe_inspect({ sceneId: "${lastSceneId}" }) to review audit and tree.`);
+    lines.push(`Next: reframe_inspect({ sceneId: "${lastSceneId}" })`);
   }
 
   return { content: [{ type: 'text' as const, text: lines.join('\n') }] };

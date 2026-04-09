@@ -1,8 +1,5 @@
 /**
- * Scene Store — multi-artboard, SceneGraph state, selection, undo/redo, audit, animation.
- *
- * The single source of truth for the entire studio.
- * Supports multiple artboards — each with its own graph, timeline, audit state.
+ * Scene Store — multi-artboard SceneGraph state (single source: artboards[] only).
  */
 
 import { create } from 'zustand';
@@ -16,58 +13,46 @@ import { exportToReact } from '@reframe/core/exporters/react';
 import { exportToAnimatedHtml } from '@reframe/core/exporters/animated-html';
 import { exportToLottie } from '@reframe/core/exporters/lottie';
 import { importFromHtml } from '@reframe/core/importers/html';
-import {
-  audit, textOverflow, minFontSize, contrastMinimum, noEmptyText, noZeroSize,
-  fontInPalette, colorInPalette, fontWeightCompliance, borderRadiusCompliance,
-  spacingGridCompliance, fontSizeRoleMatch,
-  visualHierarchy, contentDensity, visualBalance, ctaVisibility,
-  nodeOverflow, noHiddenNodes, exportFidelity,
-} from '@reframe/core/audit';
-import type { AuditIssue, AuditRule } from '@reframe/core/audit';
+import { ensureSceneLayout } from '@reframe/core/engine/layout';
+import { audit } from '@reframe/core/audit';
+import type { AuditIssue } from '@reframe/core/audit';
+import { buildInspectAuditRules } from '@reframe/core/inspect-audit-rules';
 import { parseDesignMd } from '@reframe/core/design-system';
 import type { DesignSystem } from '@reframe/core/design-system';
-import type { SceneNode } from '@reframe/core/engine/types';
+import type { SceneNode, Fill } from '@reframe/core/engine/types';
 import type { ITimeline } from '@reframe/core/animation/types';
-import { serializeSceneNode, migrateScene, deserializeToGraph } from '@reframe/core/serialize';
+import {
+  serializeSceneNode,
+  serializeGraph,
+  migrateScene,
+  deserializeToGraph,
+  deserializeScene,
+  migrateSceneJSON,
+  hydrateSceneImagesBase64,
+  deserializeTimeline,
+  SERIALIZE_VERSION,
+  importSceneNodeFallback,
+} from '@reframe/core/serialize';
 import type { INode } from '@reframe/core/host/types';
-import type { Fill } from '@reframe/core/engine/types';
 import { artboardSizePatch } from '../lib/scene-stats';
+import { bindStudioGraphPreview, cancelPendingStudioGraphPreview, disposeStudioGraphPreview } from '../document/graph-controller';
+import { useProjectStore } from './project';
 
-// ─── Helpers — INode fill normalization ────────────────────────
-// INode fills may be hex strings ('#FF0000') or IPaint objects.
-// SceneGraph expects Fill[] with { type, color: {r,g,b,a}, opacity, visible }.
-
-function hexToColor(hex: string): { r: number; g: number; b: number; a: number } {
-  const h = hex.replace('#', '');
-  const r = parseInt(h.slice(0, 2), 16) / 255;
-  const g = parseInt(h.slice(2, 4), 16) / 255;
-  const b = parseInt(h.slice(4, 6), 16) / 255;
-  const a = h.length >= 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
-  return { r: r || 0, g: g || 0, b: b || 0, a };
+function markLocalDirty(artboardId: string) {
+  useProjectStore.getState().markDirty(artboardId);
 }
 
-function normalizeFills(fills: any[]): Fill[] {
-  if (!Array.isArray(fills)) return [];
-  return fills.map((f): Fill | null => {
-    if (!f) return null;
-    // Hex string
-    if (typeof f === 'string' && f.startsWith('#')) {
-      const c = hexToColor(f);
-      return { type: 'SOLID', color: { r: c.r, g: c.g, b: c.b, a: 1 }, opacity: c.a, visible: true } as Fill;
-    }
-    // IPaint / Fill object
-    if (typeof f === 'object') {
-      const type = (f.type || 'SOLID') as Fill['type'];
-      const color = f.color && typeof f.color === 'object' && 'r' in f.color
-        ? { r: f.color.r ?? 0, g: f.color.g ?? 0, b: f.color.b ?? 0, a: f.color.a ?? 1 }
-        : { r: 0, g: 0, b: 0, a: 1 };
-      return { type, color, opacity: f.opacity ?? 1, visible: f.visible ?? true } as Fill;
-    }
-    return null;
-  }).filter((f): f is Fill => f !== null);
-}
+const AUDIT_DEBOUNCE_MS = 280;
+let auditDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-// ─── Types ─────────────────────────────────────────────────────
+/** Coalesce rapid mutations into a single audit pass (Inspector still uses runAudit() directly). */
+function scheduleDebouncedAudit(getScene: () => SceneStore) {
+  if (auditDebounceTimer) clearTimeout(auditDebounceTimer);
+  auditDebounceTimer = setTimeout(() => {
+    auditDebounceTimer = null;
+    getScene().runAudit();
+  }, AUDIT_DEBOUNCE_MS);
+}
 
 export interface HistoryEntry {
   label: string;
@@ -77,7 +62,6 @@ export interface HistoryEntry {
 export interface Artboard {
   id: string;
   name: string;
-  /** When this artboard mirrors an MCP session scene (s1, s2, …), stable lookup key. */
   mcpSceneId?: string;
   graph: SceneGraph | null;
   rootId: string | null;
@@ -88,52 +72,59 @@ export interface Artboard {
   auditIssues: AuditIssue[];
   history: HistoryEntry[];
   historyIndex: number;
+  /** Last MCP session revision we pulled from GET /scenes/:id?format=json */
+  lastKnownMcpRevision?: number;
 }
 
-/** Bottom toolbox tools — drives canvas placement + selection behavior */
 export type CanvasTool = 'select' | 'frame' | 'rect' | 'pen' | 'text' | 'image';
 
 export interface SceneStore {
-  // Multi-artboard
   artboards: Artboard[];
   activeArtboardId: string;
 
-  // Active artboard accessors (derived from active artboard)
-  graph: SceneGraph | null;
-  rootId: string | null;
-  renderedHtml: string;
-
-  /** Floating bottom toolbox (Figma-style) */
   canvasTool: CanvasTool;
   setCanvasTool: (tool: CanvasTool) => void;
-  /** Add a primitive on the artboard root at design-space coordinates (centered on x,y) */
   addCanvasShape: (kind: 'frame' | 'rect' | 'text', x: number, y: number) => void;
-
-  /**
-   * While set, `updateNode` for this id is ignored unless `options.dragInternal` is true.
-   * Prevents full HTML re-export mid-drag (would wipe CSS transform preview and teleport the node).
-   */
   canvasPointerDragNodeId: string | null;
+  /** After drag-to-move, suppress one click (ghost click). Cleared when picking a canvas tool. */
+  canvasSuppressNextClick: boolean;
+  /** Studio canvas: after add shape, fit view to this node (one-shot; Canvas clears). */
+  canvasFitNodeId: string | null;
 
-  // Selection (global — not per-artboard)
   selectedIds: string[];
   hoveredId: string | null;
 
-  // Intelligence (global)
-  auditIssues: AuditIssue[];
   designSystem: DesignSystem | null;
   designMd: string;
 
-  // Animation (from active artboard)
-  timeline: ITimeline | null;
   animPlaying: boolean;
   animTime: number;
 
-  // History (from active artboard)
-  history: HistoryEntry[];
-  historyIndex: number;
+  /** Agent changed the scene on MCP while the tab had local edits — user must pull or keep. */
+  syncConflict: {
+    artboardId: string;
+    mcpSceneId: string;
+    incomingRevision: number;
+    message: string;
+  } | null;
+  clearSyncConflict: () => void;
+  raiseSyncConflict: (
+    artboardId: string,
+    mcpSceneId: string,
+    incomingRevision: number,
+    message: string,
+  ) => void;
 
-  // Artboard actions
+  setLastKnownMcpRevision: (artboardId: string, revision: number) => void;
+
+  /**
+   * Which Documents tab receives MCP session scenes (s1, s2, …) when you pick one from the list.
+   * Only one tab is bound so the canvas is not duplicated per scene.
+   */
+  mcpSessionArtboardId: string | null;
+  setMcpSessionArtboardId: (id: string | null) => void;
+  bindArtboardMcpSession: (artboardId: string, sessionSceneId: string, sceneLabel: string) => void;
+
   addArtboard: (
     name?: string,
     width?: number,
@@ -144,12 +135,10 @@ export interface SceneStore {
   removeArtboard: (id: string) => void;
   switchArtboard: (id: string) => void;
   renameArtboard: (id: string, name: string) => void;
-  /** Clear graph/HTML for an artboard (e.g. MCP scene removed while it is the only tab). */
   clearArtboardGraph: (id: string) => void;
 
-  // Scene actions
-  importHtml: (html: string, targetArtboardId?: string) => Promise<boolean>;
-  loadSceneJson: (json: any, targetArtboardId?: string) => boolean;
+  importHtml: (html: string, targetArtboardId?: string, opts?: { fromMcp?: boolean }) => Promise<boolean>;
+  loadSceneJson: (json: any, targetArtboardId?: string, opts?: { fromMcp?: boolean }) => boolean;
   select: (ids: string[]) => void;
   hover: (id: string | null) => void;
   updateNode: (
@@ -157,7 +146,6 @@ export interface SceneStore {
     changes: Partial<SceneNode>,
     options?: { recordHistory?: boolean; dragInternal?: boolean },
   ) => void;
-  /** One undo step after a gesture that used updateNode(..., { recordHistory: false }) (e.g. drag). */
   commitHistoryFrame: (label?: string) => void;
   deleteNode: (id: string) => void;
   runAudit: () => void;
@@ -179,8 +167,6 @@ export interface SceneStore {
   exportLottieJson: () => string;
   rerender: () => void;
 }
-
-// ─── Helpers ───────────────────────────────────────────────────
 
 let nextArtboardNum = 1;
 
@@ -205,66 +191,95 @@ function createEmptyArtboard(name?: string, width?: number, height?: number, mcp
   };
 }
 
-function importSceneNode(graph: SceneGraph, parentId: string, json: any): string {
-  const migrated = migrateScene(json);
-  const overrides: Record<string, any> = {};
-  const skip = new Set(['type', 'children', 'name', 'id', 'version', 'timeline', 'strokeWeight']);
-  for (const [key, value] of Object.entries(migrated)) {
-    if (skip.has(key) || value === undefined) continue;
-    overrides[key] = value;
-  }
-  // Normalize INode fills (hex strings / IPaint) → SceneNode Fill[]
-  if (overrides.fills) {
-    overrides.fills = normalizeFills(overrides.fills);
-  }
-  // Normalize constraints → engine fields
-  if (migrated.constraints) {
-    overrides.horizontalConstraint = migrated.constraints.horizontal;
-    overrides.verticalConstraint = migrated.constraints.vertical;
-    delete overrides.constraints;
-  }
-  // Normalize characters → text
-  if ('characters' in overrides && !('text' in overrides)) {
-    overrides.text = overrides.characters;
-    delete overrides.characters;
-  }
-  const node = graph.createNode(migrated.type ?? 'FRAME', parentId, {
-    name: migrated.name ?? migrated.type ?? 'Node',
-    ...overrides,
-  });
-  if (migrated.children) {
-    for (const child of migrated.children) {
-      importSceneNode(graph, node.id, child);
+/** Canonical path: deserializeToGraph; fallback: core `importSceneNodeFallback` — see core `src/spec/scene-envelope.ts`. */
+function buildGraphFromSceneRootJson(root: unknown): { graph: SceneGraph; rootId: string } | null {
+  if (!root || typeof root !== 'object' || Array.isArray(root)) return null;
+  const migratedRoot = migrateScene(root);
+  try {
+    const { graph, rootId } = deserializeToGraph(migratedRoot);
+    setHost(new StandaloneHost(graph));
+    return { graph, rootId };
+  } catch {
+    try {
+      const graph = new SceneGraph();
+      setHost(new StandaloneHost(graph));
+      const page = graph.addPage('Design');
+      const rootId = importSceneNodeFallback(graph, page.id, migratedRoot);
+      return { graph, rootId };
+    } catch (e2) {
+      console.error('buildGraphFromSceneRootJson: deserialize and importSceneNode both failed', e2);
+      return null;
     }
   }
-  return node.id;
 }
 
 function exportSceneJson(graph: SceneGraph, nodeId: string): any {
   return serializeSceneNode(graph, nodeId, { compact: true });
 }
 
-function renderHtml(graph: SceneGraph | null, rootId: string | null): string {
+/** Full scene envelope for undo/redo (root + images + timeline when present). */
+function historySnapshot(graph: SceneGraph, rootId: string, timeline: ITimeline | null | undefined) {
+  return serializeGraph(graph, rootId, {
+    compact: true,
+    timeline: timeline ?? undefined,
+  });
+}
+
+/** Full envelope: @reframe/core `spec/scene-envelope` — `deserializeScene` then `importSceneNodeFallback` + hydrate on failure. */
+function deserializeStudioSceneJson(json: {
+  root?: unknown;
+  version?: number;
+  images?: unknown;
+  timeline?: unknown;
+}): { graph: SceneGraph; rootId: string; timeline: ITimeline | null } | null {
+  if (!json?.root || typeof json.root !== 'object' || Array.isArray(json.root)) return null;
+  const envelope: Record<string, unknown> = {
+    version: typeof json.version === 'number' ? json.version : SERIALIZE_VERSION,
+    root: json.root,
+  };
+  if (json.images != null && typeof json.images === 'object' && !Array.isArray(json.images)) {
+    envelope.images = json.images;
+  }
+  if ('timeline' in json) {
+    if (json.timeline === null) {
+      envelope.timeline = null;
+    } else if (typeof json.timeline === 'object' && !Array.isArray(json.timeline)) {
+      envelope.timeline = json.timeline;
+    }
+  }
+  let graph: SceneGraph;
+  let rootId: string;
+  let timelineOut: ITimeline | null = null;
+  try {
+    const r = deserializeScene(migrateSceneJSON(envelope as any));
+    graph = r.graph;
+    rootId = r.rootId;
+    timelineOut = r.timeline ?? null;
+    setHost(new StandaloneHost(graph));
+  } catch {
+    const built = buildGraphFromSceneRootJson(json.root);
+    if (!built) return null;
+    graph = built.graph;
+    rootId = built.rootId;
+    hydrateSceneImagesBase64(graph, json.images as Record<string, unknown> | null | undefined);
+    if ('timeline' in json && json.timeline === null) {
+      timelineOut = null;
+    } else if (json.timeline != null && typeof json.timeline === 'object' && !Array.isArray(json.timeline)) {
+      try {
+        timelineOut = deserializeTimeline(json.timeline as any);
+      } catch {
+        timelineOut = null;
+      }
+    }
+  }
+  return { graph, rootId, timeline: timelineOut };
+}
+
+export function renderSceneHtml(graph: SceneGraph | null, rootId: string | null): string {
   if (!graph || !rootId) return '';
   try {
     return exportToHtml(graph, rootId, { fullDocument: false, dataAttributes: true });
   } catch { return ''; }
-}
-
-function getDefaultRules(ds?: DesignSystem): AuditRule[] {
-  const rules: AuditRule[] = [
-    textOverflow(), nodeOverflow(), minFontSize(10),
-    contrastMinimum(4.5), noEmptyText(), noZeroSize(), noHiddenNodes(),
-  ];
-  if (ds) {
-    rules.push(
-      fontInPalette(), colorInPalette(), fontWeightCompliance(),
-      borderRadiusCompliance(), spacingGridCompliance(), fontSizeRoleMatch(),
-    );
-  }
-  rules.push(visualHierarchy(), contentDensity(), visualBalance(), ctaVisibility());
-  rules.push(exportFidelity());
-  return rules;
 }
 
 function wrapINode(graph: SceneGraph, id: string): INode | null {
@@ -273,76 +288,108 @@ function wrapINode(graph: SceneGraph, id: string): INode | null {
   return new StandaloneNode(graph, raw);
 }
 
-/** Update the active artboard in the artboards array */
 function updateActiveArtboard(artboards: Artboard[], activeId: string, patch: Partial<Artboard>): Artboard[] {
   return artboards.map(ab => ab.id === activeId ? { ...ab, ...patch } : ab);
 }
 
-/** Get current active artboard */
-function getActiveArtboard(state: { artboards: Artboard[]; activeArtboardId: string }): Artboard | undefined {
+export function getActiveArtboard(
+  state: Pick<SceneStore, 'artboards' | 'activeArtboardId'>,
+): Artboard | undefined {
   return state.artboards.find(ab => ab.id === state.activeArtboardId);
 }
 
-/**
- * Effective document for the active tab. Prefer the artboard row — it can be ahead of duplicated
- * top-level fields after async MCP loads (fixes “No scene loaded” while s4 graph exists on the tab).
- */
-function activeDocSlice(state: {
-  artboards: Artboard[];
-  activeArtboardId: string;
-  graph: SceneGraph | null;
-  rootId: string | null;
-  renderedHtml: string;
-  history: HistoryEntry[];
-  historyIndex: number;
-  timeline: ITimeline | null;
-  auditIssues: AuditIssue[];
-}) {
-  const ab = state.artboards.find(a => a.id === state.activeArtboardId);
+/** Document fields for the active tab (no mirrored root state). */
+export function activeDocSlice(state: Pick<SceneStore, 'artboards' | 'activeArtboardId'>) {
+  const ab = getActiveArtboard(state);
   return {
-    graph: ab?.graph ?? state.graph,
-    rootId: ab?.rootId ?? state.rootId,
-    renderedHtml: (ab?.graph && ab?.rootId)
-      ? (ab.renderedHtml ?? state.renderedHtml)
-      : state.renderedHtml,
-    history: ab?.history ?? state.history,
-    historyIndex: ab?.historyIndex ?? state.historyIndex,
-    timeline: ab?.timeline !== undefined ? ab.timeline : state.timeline,
-    auditIssues: ab?.auditIssues ?? state.auditIssues,
+    graph: ab?.graph ?? null,
+    rootId: ab?.rootId ?? null,
+    renderedHtml: ab?.renderedHtml ?? '',
+    history: ab?.history ?? [],
+    historyIndex: ab?.historyIndex ?? -1,
+    timeline: ab?.timeline ?? null,
+    auditIssues: ab?.auditIssues ?? [],
   };
 }
 
-// ─── Store ─────────────────────────────────────────────────────
+function persistCurrentArtboardSize(state: SceneStore): Artboard[] {
+  const cur = getActiveArtboard(state);
+  if (!cur) return state.artboards;
+  const sz = artboardSizePatch(cur.graph, cur.rootId);
+  return updateActiveArtboard(state.artboards, state.activeArtboardId, { ...cur, ...(sz ?? {}) });
+}
 
-const initialArtboard = createEmptyArtboard('Artboard 1');
+function rebindGraphPreview(get: () => SceneStore, set: (fn: any) => void) {
+  const st = get();
+  const ab = getActiveArtboard(st);
+  bindStudioGraphPreview(ab?.graph ?? null, () => {
+    const s = get();
+    if (s.canvasPointerDragNodeId) return;
+    const row = getActiveArtboard(s);
+    if (!row?.graph || !row.rootId) return;
+    const html = renderSceneHtml(row.graph, row.rootId);
+    const sz = artboardSizePatch(row.graph, row.rootId);
+    set({
+      artboards: updateActiveArtboard(s.artboards, s.activeArtboardId, {
+        renderedHtml: html,
+        ...(sz ?? {}),
+      }),
+    });
+  });
+}
+
+function applyLayoutBestEffort(graph: SceneGraph, rootId: string) {
+  ensureSceneLayout(graph, rootId);
+}
+
+const initialArtboard = createEmptyArtboard('Untitled');
 
 export const useSceneStore = create<SceneStore>((set, get) => ({
   artboards: [initialArtboard],
   activeArtboardId: initialArtboard.id,
+  mcpSessionArtboardId: null,
 
-  graph: null,
-  rootId: null,
-  renderedHtml: '',
   selectedIds: [],
   canvasTool: 'select',
   canvasPointerDragNodeId: null,
-  auditIssues: [],
+  canvasSuppressNextClick: false,
+  canvasFitNodeId: null,
   hoveredId: null,
   designSystem: null,
   designMd: '',
-  timeline: null,
   animPlaying: false,
   animTime: 0,
-  history: [],
-  historyIndex: -1,
+  syncConflict: null,
 
-  // ─── Artboard actions ──────────────────────────────────────
+  clearSyncConflict: () => set({ syncConflict: null }),
+
+  raiseSyncConflict: (artboardId, mcpSceneId, incomingRevision, message) =>
+    set({ syncConflict: { artboardId, mcpSceneId, incomingRevision, message } }),
+
+  setLastKnownMcpRevision: (artboardId, revision) => {
+    set(state => ({
+      artboards: state.artboards.map(ab =>
+        ab.id === artboardId ? { ...ab, lastKnownMcpRevision: revision } : ab,
+      ),
+    }));
+  },
+
+  setMcpSessionArtboardId: (id) => set({ mcpSessionArtboardId: id }),
+
+  bindArtboardMcpSession: (artboardId, sessionSceneId, sceneLabel) => {
+    const sid = String(sessionSceneId).trim();
+    const label = (sceneLabel || sid).trim();
+    set(state => ({
+      artboards: state.artboards.map(ab =>
+        ab.id === artboardId ? { ...ab, mcpSceneId: sid, name: `${label} (${sid})` } : ab,
+      ),
+    }));
+  },
 
   addArtboard: (name?: string, width?: number, height?: number, mcpSceneId?: string, options?: { activate?: boolean }) => {
     const activate = options?.activate !== false;
     const ab = createEmptyArtboard(name, width, height, mcpSceneId);
 
-    // If width/height specified, create a scene with an empty frame
     if (width && height) {
       const graph = new SceneGraph();
       const host = new StandaloneHost(graph);
@@ -353,49 +400,35 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
         width, height,
         fills: [{ type: 'SOLID' as const, color: { r: 0.1, g: 0.1, b: 0.1, a: 1 }, opacity: 1, visible: true }],
       });
+      applyLayoutBestEffort(graph, root.id);
       ab.graph = graph;
       ab.rootId = root.id;
-      ab.renderedHtml = renderHtml(graph, root.id);
+      ab.renderedHtml = renderSceneHtml(graph, root.id);
       ab.width = width;
       ab.height = height;
-      const sceneJson = exportSceneJson(graph, root.id);
-      ab.history = [{ label: 'Create artboard', sceneJson: { root: sceneJson } }];
+      ab.history = [{ label: 'Create artboard', sceneJson: historySnapshot(graph, root.id, null) }];
       ab.historyIndex = 0;
     }
 
     set(state => {
-      const sizePatch = artboardSizePatch(state.graph, state.rootId);
-      // Save current artboard state before switching
-      const savedArtboards = updateActiveArtboard(state.artboards, state.activeArtboardId, {
-        graph: state.graph,
-        rootId: state.rootId,
-        renderedHtml: state.renderedHtml,
-        timeline: state.timeline,
-        auditIssues: state.auditIssues,
-        history: state.history,
-        historyIndex: state.historyIndex,
-        ...(sizePatch ?? {}),
-      });
-
-      const nextBoards = [...savedArtboards, ab];
+      const boards = persistCurrentArtboardSize(state);
+      const nextBoards = [...boards, ab];
       if (!activate) {
         return { artboards: nextBoards };
       }
-
       return {
         artboards: nextBoards,
         activeArtboardId: ab.id,
-        graph: ab.graph,
-        rootId: ab.rootId,
-        renderedHtml: ab.renderedHtml,
-        timeline: ab.timeline,
-        auditIssues: ab.auditIssues,
-        history: ab.history,
-        historyIndex: ab.historyIndex,
         selectedIds: [],
         hoveredId: null,
       };
     });
+    if (activate) {
+      const st = get();
+      const added = st.artboards.find(b => b.id === ab.id);
+      if (added?.graph) setHost(new StandaloneHost(added.graph));
+      rebindGraphPreview(get, set);
+    }
   },
 
   removeArtboard: (id: string) => {
@@ -403,64 +436,41 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
     if (state.artboards.length <= 1) return;
     const remaining = state.artboards.filter(ab => ab.id !== id);
     const newActiveId = id === state.activeArtboardId ? remaining[0].id : state.activeArtboardId;
-    const active = remaining.find(ab => ab.id === newActiveId)!;
-
     set({
       artboards: remaining,
       activeArtboardId: newActiveId,
-      graph: active.graph,
-      rootId: active.rootId,
-      renderedHtml: active.renderedHtml,
-      timeline: active.timeline,
-      auditIssues: active.auditIssues,
-      history: active.history,
-      historyIndex: active.historyIndex,
       selectedIds: [],
       hoveredId: null,
+      ...(state.mcpSessionArtboardId === id ? { mcpSessionArtboardId: null } : {}),
     });
+    const active = getActiveArtboard(get());
+    if (active?.graph) setHost(new StandaloneHost(active.graph));
+    else disposeStudioGraphPreview();
+    rebindGraphPreview(get, set);
   },
 
   switchArtboard: (id: string) => {
     const state = get();
     if (id === state.activeArtboardId) return;
-
-    const sizePatch = artboardSizePatch(state.graph, state.rootId);
-    // Save current state to current artboard
-    const updatedArtboards = updateActiveArtboard(state.artboards, state.activeArtboardId, {
-      graph: state.graph,
-      rootId: state.rootId,
-      renderedHtml: state.renderedHtml,
-      timeline: state.timeline,
-      auditIssues: state.auditIssues,
-      history: state.history,
-      historyIndex: state.historyIndex,
-      ...(sizePatch ?? {}),
-    });
-
-    const target = updatedArtboards.find(ab => ab.id === id);
+    const boards = persistCurrentArtboardSize(state);
+    const target = boards.find(ab => ab.id === id);
     if (!target) return;
 
-    // Restore host context if graph exists
     if (target.graph) {
-      const host = new StandaloneHost(target.graph);
-      setHost(host);
+      setHost(new StandaloneHost(target.graph));
+    } else {
+      setHost(new StandaloneHost(new SceneGraph()));
     }
 
     set({
-      artboards: updatedArtboards,
+      artboards: boards,
       activeArtboardId: id,
-      graph: target.graph,
-      rootId: target.rootId,
-      renderedHtml: target.renderedHtml,
-      timeline: target.timeline,
-      auditIssues: target.auditIssues,
-      history: target.history,
-      historyIndex: target.historyIndex,
       selectedIds: [],
       hoveredId: null,
       animPlaying: false,
       animTime: 0,
     });
+    rebindGraphPreview(get, set);
   },
 
   renameArtboard: (id: string, name: string) => {
@@ -481,6 +491,7 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
         historyIndex: -1,
         auditIssues: [] as AuditIssue[],
         timeline: null as ITimeline | null,
+        lastKnownMcpRevision: undefined as number | undefined,
       };
       const artboards = state.artboards.map(ab => (ab.id === id ? { ...ab, ...blank } : ab));
       const isActive = state.activeArtboardId === id;
@@ -488,7 +499,6 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
         artboards,
         ...(isActive
           ? {
-              ...blank,
               selectedIds: [],
               hoveredId: null,
               animPlaying: false,
@@ -497,38 +507,31 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
           : {}),
       };
     });
+    if (get().activeArtboardId === id) {
+      disposeStudioGraphPreview();
+    }
   },
 
-  // ─── Scene actions ─────────────────────────────────────────
-
-  importHtml: (html: string, targetArtboardIdArg?: string): Promise<boolean> => {
-    // Capture target artboard ID now — by the time the promise resolves
-      // the user may have switched to a different artboard.
-      const targetArtboardId = targetArtboardIdArg ?? get().activeArtboardId;
+  importHtml: (html: string, targetArtboardIdArg?: string, opts?: { fromMcp?: boolean }): Promise<boolean> => {
+    const targetArtboardId = targetArtboardIdArg ?? get().activeArtboardId;
+    const fromMcp = opts?.fromMcp === true;
     return importFromHtml(html)
       .then((result) => {
         const { graph, rootId } = result;
         const host = new StandaloneHost(graph);
         setHost(host);
-        const renderedHtml = renderHtml(graph, rootId);
-        const sceneJson = exportSceneJson(graph, rootId);
+        applyLayoutBestEffort(graph, rootId);
+        const renderedHtml = renderSceneHtml(graph, rootId);
         const root = graph.getNode(rootId);
+        const snap = historySnapshot(graph, rootId, null);
 
         set(state => {
-          const isStillActive = state.activeArtboardId === targetArtboardId;
           const targetAb = state.artboards.find(ab => ab.id === targetArtboardId);
-          const prevHistory = isStillActive ? state.history : (targetAb?.history ?? []);
-          const prevHistoryIndex = isStillActive ? state.historyIndex : (targetAb?.historyIndex ?? -1);
-          const newHistory = [...prevHistory.slice(0, prevHistoryIndex + 1), { label: 'Import HTML', sceneJson: { root: sceneJson } }];
+          const prevHistory = targetAb?.history ?? [];
+          const prevHistoryIndex = targetAb?.historyIndex ?? -1;
+          const newHistory = [...prevHistory.slice(0, prevHistoryIndex + 1), { label: 'Import HTML', sceneJson: snap }];
           const newHistoryIndex = prevHistoryIndex + 1;
           return {
-            // Only update top-level props when this artboard is still active
-            ...(isStillActive ? {
-              graph, rootId, renderedHtml,
-              selectedIds: [], hoveredId: null, auditIssues: [],
-              history: newHistory,
-              historyIndex: newHistoryIndex,
-            } : {}),
             artboards: updateActiveArtboard(state.artboards, targetArtboardId, {
               graph, rootId, renderedHtml,
               width: root?.width ?? 0,
@@ -537,13 +540,17 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
               history: newHistory,
               historyIndex: newHistoryIndex,
             }),
+            ...(state.activeArtboardId === targetArtboardId
+              ? { selectedIds: [], hoveredId: null }
+              : {}),
           };
         });
-        const vis = activeDocSlice(get());
-        if (vis.graph) setHost(new StandaloneHost(vis.graph));
-        // Auto-audit only when still active
+        if (!fromMcp) markLocalDirty(targetArtboardId);
+        const vis = getActiveArtboard(get());
+        if (vis?.graph) setHost(new StandaloneHost(vis.graph));
+        rebindGraphPreview(get, set);
         if (get().activeArtboardId === targetArtboardId) {
-          setTimeout(() => get().runAudit(), 50);
+          scheduleDebouncedAudit(get);
         }
         return true;
       })
@@ -553,7 +560,8 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
       });
   },
 
-  loadSceneJson: (json: any, targetArtboardId?: string): boolean => {
+  loadSceneJson: (json: any, targetArtboardId?: string, opts?: { fromMcp?: boolean }): boolean => {
+    const fromMcp = opts?.fromMcp === true;
     if (!json?.root || typeof json.root !== 'object' || Array.isArray(json.root)) {
       console.error('loadSceneJson: missing or invalid json.root');
       return false;
@@ -563,93 +571,56 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
       console.error('loadSceneJson: artboard not in store', rowId);
       return false;
     }
-    let graph: SceneGraph;
-    let rootId: string;
-    try {
-      graph = new SceneGraph();
-      const host = new StandaloneHost(graph);
-      setHost(host);
-      const page = graph.addPage('Design');
-      rootId = importSceneNode(graph, page.id, json.root);
-    } catch (e1) {
-      console.warn('loadSceneJson: importSceneNode failed, trying deserializeToGraph', e1);
-      try {
-        ({ graph, rootId } = deserializeToGraph(json.root));
-        const host = new StandaloneHost(graph);
-        setHost(host);
-      } catch (e2) {
-        console.error('loadSceneJson: failed to build graph', e2);
-        return false;
-      }
+    const decoded = deserializeStudioSceneJson(json);
+    if (!decoded) {
+      console.error('loadSceneJson: envelope deserialize and importSceneNode both failed');
+      return false;
     }
-    const renderedHtml = renderHtml(graph, rootId);
+    const { graph, rootId, timeline: timelineOut } = decoded;
+    applyLayoutBestEffort(graph, rootId);
+    const renderedHtml = renderSceneHtml(graph, rootId);
     const root = graph.getNode(rootId);
-    const sceneJsonRoot = exportSceneJson(graph, rootId);
 
     set(state => {
       const tid = targetArtboardId ?? state.activeArtboardId;
-      const isStillActive = state.activeArtboardId === tid;
       const targetAb = state.artboards.find(ab => ab.id === tid);
-      const prevHistory = isStillActive ? state.history : (targetAb?.history ?? []);
-      const prevHistoryIndex = isStillActive ? state.historyIndex : (targetAb?.historyIndex ?? -1);
+      const prevHistory = targetAb?.history ?? [];
+      const prevHistoryIndex = targetAb?.historyIndex ?? -1;
       const newHistory = [
         ...prevHistory.slice(0, prevHistoryIndex + 1),
-        { label: 'Load scene', sceneJson: { root: sceneJsonRoot } },
+        { label: 'Load scene', sceneJson: historySnapshot(graph, rootId, timelineOut) },
       ];
       const newHistoryIndex = prevHistoryIndex + 1;
       return {
-        ...(isStillActive
-          ? {
-              graph,
-              rootId,
-              renderedHtml,
-              selectedIds: [],
-              hoveredId: null,
-              history: newHistory,
-              historyIndex: newHistoryIndex,
-            }
-          : {}),
         artboards: updateActiveArtboard(state.artboards, tid, {
           graph,
           rootId,
           renderedHtml,
           width: root?.width ?? 0,
           height: root?.height ?? 0,
+          timeline: timelineOut,
           history: newHistory,
           historyIndex: newHistoryIndex,
         }),
+        ...(state.activeArtboardId === tid ? { selectedIds: [], hoveredId: null } : {}),
       };
     });
 
-    const st = get();
-    const tidFinal = targetArtboardId ?? st.activeArtboardId;
-    if (st.activeArtboardId === tidFinal) {
-      const ab = st.artboards.find(a => a.id === tidFinal);
-      if (ab?.graph && ab.rootId && (st.graph !== ab.graph || st.rootId !== ab.rootId)) {
-        set({
-          graph: ab.graph,
-          rootId: ab.rootId,
-          renderedHtml: ab.renderedHtml,
-          history: ab.history,
-          historyIndex: ab.historyIndex,
-        });
-      }
+    const ab = getActiveArtboard(get());
+    if (ab?.graph) setHost(new StandaloneHost(ab.graph));
+    rebindGraphPreview(get, set);
+
+    if (!targetArtboardId || get().activeArtboardId === targetArtboardId) {
+      scheduleDebouncedAudit(get);
     }
-
-    const vis = activeDocSlice(get());
-    if (vis.graph) setHost(new StandaloneHost(vis.graph));
-
-    setTimeout(() => {
-      const s = get();
-      if (!targetArtboardId || s.activeArtboardId === targetArtboardId) s.runAudit();
-    }, 50);
+    if (!fromMcp) markLocalDirty(rowId);
     return true;
   },
 
   select: (ids) => set({ selectedIds: ids }),
   hover: (id) => set({ hoveredId: id }),
 
-  setCanvasTool: (canvasTool) => set({ canvasTool }),
+  setCanvasTool: (canvasTool) => set({ canvasTool, canvasSuppressNextClick: false }),
 
   addCanvasShape: (kind, atX, atY) => {
     const { graph, rootId } = activeDocSlice(get());
@@ -709,29 +680,32 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
       });
     }
 
-    const renderedHtml = renderHtml(graph, rootId);
-    const sceneJson = exportSceneJson(graph, rootId);
+    cancelPendingStudioGraphPreview();
+    const tl = getActiveArtboard(get())?.timeline ?? null;
+    const snap = historySnapshot(graph, rootId, tl);
+    const renderedHtml = renderSceneHtml(graph, rootId);
     const sz = artboardSizePatch(graph, rootId);
+    const aid = get().activeArtboardId;
     set(state => {
-      const newHistory = [
-        ...state.history.slice(0, state.historyIndex + 1),
-        { label: `Add ${kind}`, sceneJson: { root: sceneJson } },
-      ];
-      const newHistoryIndex = state.historyIndex + 1;
+      const row = getActiveArtboard(state);
+      const h0 = row?.history ?? [];
+      const hi = row?.historyIndex ?? -1;
+      const newHistory = [...h0.slice(0, hi + 1), { label: `Add ${kind}`, sceneJson: snap }];
+      const newHistoryIndex = hi + 1;
       return {
-        renderedHtml,
         selectedIds: [node.id],
-        history: newHistory,
-        historyIndex: newHistoryIndex,
+        canvasTool: 'select',
+        canvasFitNodeId: node.id,
         artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
+          ...sz,
           renderedHtml,
           history: newHistory,
           historyIndex: newHistoryIndex,
-          ...(sz ?? {}),
         }),
       };
     });
-    setTimeout(() => get().runAudit(), 50);
+    markLocalDirty(aid);
+    scheduleDebouncedAudit(get);
   },
 
   updateNode: (id, changes, options) => {
@@ -740,82 +714,104 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
       return;
     }
     const recordHistory = options?.recordHistory !== false;
-    const { graph, rootId } = activeDocSlice(get());
+    const { graph, rootId, history, historyIndex } = activeDocSlice(get());
     if (!graph || !rootId) return;
     graph.updateNode(id, changes);
-    const renderedHtml = renderHtml(graph, rootId);
     const sz = artboardSizePatch(graph, rootId);
+    const aid = get().activeArtboardId;
+
     if (recordHistory) {
-      const sceneJson = exportSceneJson(graph, rootId);
+      cancelPendingStudioGraphPreview();
+      const tl = getActiveArtboard(get())?.timeline ?? null;
+      const snap = historySnapshot(graph, rootId, tl);
+      const renderedHtml = renderSceneHtml(graph, rootId);
       set(state => {
-        const newHistory = [...state.history.slice(0, state.historyIndex + 1), { label: `Update ${id}`, sceneJson: { root: sceneJson } }];
-        const newHistoryIndex = state.historyIndex + 1;
+        const h0 = getActiveArtboard(state)?.history ?? history;
+        const hi = getActiveArtboard(state)?.historyIndex ?? historyIndex;
+        const newHistory = [...h0.slice(0, hi + 1), { label: `Update ${id}`, sceneJson: snap }];
+        const newHistoryIndex = hi + 1;
         return {
-          renderedHtml,
-          history: newHistory,
-          historyIndex: newHistoryIndex,
           artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
+            ...sz,
             renderedHtml,
             history: newHistory,
             historyIndex: newHistoryIndex,
-            ...(sz ?? {}),
           }),
         };
       });
     } else {
       set(state => ({
-        renderedHtml,
         artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
-          renderedHtml,
-          ...(sz ?? {}),
+          ...sz,
         }),
       }));
     }
+    markLocalDirty(aid);
+    scheduleDebouncedAudit(get);
   },
 
   commitHistoryFrame: (label) => {
-    const { graph, rootId } = activeDocSlice(get());
+    const { graph, rootId, history, historyIndex } = activeDocSlice(get());
     if (!graph || !rootId) return;
-    const sceneJson = exportSceneJson(graph, rootId);
+    const tl = getActiveArtboard(get())?.timeline ?? null;
+    const snap = historySnapshot(graph, rootId, tl);
+    const aid = get().activeArtboardId;
     set(state => {
+      const h0 = getActiveArtboard(state)?.history ?? history;
+      const hi = getActiveArtboard(state)?.historyIndex ?? historyIndex;
       const newHistory = [
-        ...state.history.slice(0, state.historyIndex + 1),
-        { label: label ?? 'Edit', sceneJson: { root: sceneJson } },
+        ...h0.slice(0, hi + 1),
+        { label: label ?? 'Edit', sceneJson: snap },
       ];
-      const newHistoryIndex = state.historyIndex + 1;
+      const newHistoryIndex = hi + 1;
       return {
-        history: newHistory,
-        historyIndex: newHistoryIndex,
         artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
           history: newHistory,
           historyIndex: newHistoryIndex,
         }),
       };
     });
+    markLocalDirty(aid);
+    cancelPendingStudioGraphPreview();
+    const row = getActiveArtboard(get());
+    if (row?.graph && row.rootId) {
+      const renderedHtml = renderSceneHtml(row.graph, row.rootId);
+      set(state => ({
+        artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
+          renderedHtml,
+        }),
+      }));
+    }
+    scheduleDebouncedAudit(get);
   },
 
   deleteNode: (id) => {
-    const { graph, rootId } = activeDocSlice(get());
+    const { graph, rootId, history, historyIndex } = activeDocSlice(get());
     if (!graph || !rootId || id === rootId) return;
     graph.deleteNode(id);
-    const renderedHtml = renderHtml(graph, rootId);
-    const sceneJson = exportSceneJson(graph, rootId);
+    cancelPendingStudioGraphPreview();
+    const tl = getActiveArtboard(get())?.timeline ?? null;
+    const snap = historySnapshot(graph, rootId, tl);
+    const renderedHtml = renderSceneHtml(graph, rootId);
     const sz = artboardSizePatch(graph, rootId);
+    const aid = get().activeArtboardId;
     set(state => {
-      const newHistory = [...state.history.slice(0, state.historyIndex + 1), { label: `Delete ${id}`, sceneJson: { root: sceneJson } }];
-      const newHistoryIndex = state.historyIndex + 1;
+      const h0 = getActiveArtboard(state)?.history ?? history;
+      const hi = getActiveArtboard(state)?.historyIndex ?? historyIndex;
+      const newHistory = [...h0.slice(0, hi + 1), { label: `Delete ${id}`, sceneJson: snap }];
+      const newHistoryIndex = hi + 1;
       return {
-        renderedHtml, selectedIds: state.selectedIds.filter(s => s !== id),
-        history: newHistory,
-        historyIndex: newHistoryIndex,
+        selectedIds: state.selectedIds.filter(s => s !== id),
         artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
+          ...sz,
           renderedHtml,
           history: newHistory,
           historyIndex: newHistoryIndex,
-          ...(sz ?? {}),
         }),
       };
     });
+    markLocalDirty(aid);
+    scheduleDebouncedAudit(get);
   },
 
   runAudit: () => {
@@ -823,12 +819,15 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
     const { designSystem } = get();
     if (!graph || !rootId) return;
     try {
+      applyLayoutBestEffort(graph, rootId);
       const rootINode = wrapINode(graph, rootId);
       if (!rootINode) return;
-      const rules = getDefaultRules(designSystem ?? undefined);
+      const rules = buildInspectAuditRules(designSystem ?? undefined, {
+        minFontSize: 8,
+        minContrast: 3,
+      });
       const issues = audit(rootINode, rules, designSystem ?? undefined);
       set(state => ({
-        auditIssues: issues,
         artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, { auditIssues: issues }),
       }));
     } catch (e) {
@@ -840,7 +839,7 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
     try {
       const ds = parseDesignMd(md);
       set({ designMd: md, designSystem: ds });
-      setTimeout(() => get().runAudit(), 50);
+      scheduleDebouncedAudit(get);
     } catch (e) {
       console.error('Failed to parse DESIGN.md:', e);
     }
@@ -850,7 +849,6 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
 
   setTimeline: (timeline) => {
     set(state => ({
-      timeline,
       artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, { timeline }),
     }));
   },
@@ -863,20 +861,23 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
     if (historyIndex <= 0) return;
     const newIndex = historyIndex - 1;
     const entry = history[newIndex];
-    const graph = new SceneGraph();
-    const host = new StandaloneHost(graph);
-    setHost(host);
-    const page = graph.addPage('Design');
-    const rootId = importSceneNode(graph, page.id, entry.sceneJson.root);
-    const renderedHtml = renderHtml(graph, rootId);
+    const decoded = deserializeStudioSceneJson(entry.sceneJson);
+    if (!decoded) return;
+    const { graph, rootId, timeline: timelineOut } = decoded;
+    applyLayoutBestEffort(graph, rootId);
+    const renderedHtml = renderSceneHtml(graph, rootId);
     const sz = artboardSizePatch(graph, rootId);
+    const aid = get().activeArtboardId;
     set(state => ({
-      graph, rootId, renderedHtml, historyIndex: newIndex, selectedIds: [],
+      selectedIds: [],
       artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
-        graph, rootId, renderedHtml, historyIndex: newIndex,
+        graph, rootId, renderedHtml, historyIndex: newIndex, timeline: timelineOut,
         ...(sz ?? {}),
       }),
     }));
+    markLocalDirty(aid);
+    rebindGraphPreview(get, set);
+    scheduleDebouncedAudit(get);
   },
 
   redo: () => {
@@ -884,20 +885,23 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
     if (historyIndex >= history.length - 1) return;
     const newIndex = historyIndex + 1;
     const entry = history[newIndex];
-    const graph = new SceneGraph();
-    const host = new StandaloneHost(graph);
-    setHost(host);
-    const page = graph.addPage('Design');
-    const rootId = importSceneNode(graph, page.id, entry.sceneJson.root);
-    const renderedHtml = renderHtml(graph, rootId);
+    const decoded = deserializeStudioSceneJson(entry.sceneJson);
+    if (!decoded) return;
+    const { graph, rootId, timeline: timelineOut } = decoded;
+    applyLayoutBestEffort(graph, rootId);
+    const renderedHtml = renderSceneHtml(graph, rootId);
     const sz = artboardSizePatch(graph, rootId);
+    const aid = get().activeArtboardId;
     set(state => ({
-      graph, rootId, renderedHtml, historyIndex: newIndex, selectedIds: [],
+      selectedIds: [],
       artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
-        graph, rootId, renderedHtml, historyIndex: newIndex,
+        graph, rootId, renderedHtml, historyIndex: newIndex, timeline: timelineOut,
         ...(sz ?? {}),
       }),
     }));
+    markLocalDirty(aid);
+    rebindGraphPreview(get, set);
+    scheduleDebouncedAudit(get);
   },
 
   getNode: (id) => activeDocSlice(get()).graph?.getNode(id) ?? null,
@@ -955,10 +959,12 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
     const { graph, rootId } = activeDocSlice(get());
     const sz = artboardSizePatch(graph, rootId);
     set(state => ({
-      renderedHtml: renderHtml(graph, rootId),
-      ...(sz
-        ? { artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, sz) }
-        : {}),
+      artboards: updateActiveArtboard(state.artboards, state.activeArtboardId, {
+        renderedHtml: renderSceneHtml(graph, rootId),
+        ...(sz ?? {}),
+      }),
     }));
   },
 }));
+
+rebindGraphPreview(() => useSceneStore.getState(), useSceneStore.setState);

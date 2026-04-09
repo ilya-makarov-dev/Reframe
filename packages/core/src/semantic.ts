@@ -53,6 +53,11 @@ export function detectSemanticRole(
     if (node.fontSize >= 24) return { role: 'heading', confidence: 0.7 };
     // Caption: small text
     if (node.fontSize <= 12) return { role: 'caption', confidence: 0.7 };
+    // Link: text named "link" or with href
+    const textName = node.name.toLowerCase();
+    if (textName.includes('link') || textName.includes('href') || node.href) {
+      return { role: 'link', confidence: 0.8 };
+    }
     // Default text
     return { role: 'paragraph', confidence: 0.5 };
   }
@@ -113,6 +118,100 @@ export function detectSemanticRole(
     }
   }
 
+  // ── Icon ─────────────────────────────────────
+  if ((node.type === 'VECTOR' || node.type === 'STAR' || node.type === 'POLYGON') &&
+      node.width <= 48 && node.height <= 48 && Math.abs(node.width - node.height) < 8) {
+    return { role: 'icon', confidence: 0.8 };
+  }
+  // Small frame with no text and near-square aspect → likely icon container
+  if (isContainerType(node) && node.width <= 48 && node.height <= 48 &&
+      Math.abs(node.width - node.height) < 8 && children.length <= 2 &&
+      !children.some(c => c.type === 'TEXT') &&
+      (node.name.toLowerCase().includes('icon') || node.type === 'COMPONENT' || node.type === 'INSTANCE')) {
+    return { role: 'icon', confidence: 0.7 };
+  }
+
+  // ── Logo ────────────────────────────────────
+  if (isContainerType(node) && node.width <= 200 && node.height <= 80 && root) {
+    const name = node.name.toLowerCase();
+    if (name.includes('logo') || name.includes('brand')) {
+      return { role: 'logo', confidence: 0.9 };
+    }
+    // First child of nav-like parent, near top-left
+    if (parent && parent.layoutMode === 'HORIZONTAL' && parent.y < (root.height * 0.15)) {
+      const siblings = graph.getChildren(parent.id);
+      if (siblings.length >= 2 && siblings[0].id === nodeId) {
+        return { role: 'logo', confidence: 0.5 };
+      }
+    }
+  }
+
+  // ── Input ───────────────────────────────────
+  if (isContainerType(node) && children.length <= 2 && node.height >= 32 && node.height <= 56 &&
+      node.width >= 100 && node.strokes.length > 0 && node.cornerRadius > 0 && node.cornerRadius < 20) {
+    const name = node.name.toLowerCase();
+    if (name.includes('input') || name.includes('field') || name.includes('search')) {
+      return { role: 'input', confidence: 0.9 };
+    }
+    // Stroke border + small radius + reasonable size → likely input
+    const hasPlaceholderText = children.some(c => c.type === 'TEXT' && c.opacity < 1);
+    if (hasPlaceholderText) return { role: 'input', confidence: 0.7 };
+  }
+
+  // ── Checkbox / Radio ────────────────────────
+  if (isContainerType(node) && node.width <= 28 && node.height <= 28 &&
+      Math.abs(node.width - node.height) < 4) {
+    const name = node.name.toLowerCase();
+    if (name.includes('check')) return { role: 'checkbox', confidence: 0.9 };
+    if (name.includes('radio')) return { role: 'radio', confidence: 0.9 };
+    // Square with border → checkbox, circle → radio
+    if (node.strokes.length > 0 || node.fills.length > 0) {
+      if (node.cornerRadius >= node.width * 0.45) {
+        return { role: 'radio', confidence: 0.6 };
+      }
+      return { role: 'checkbox', confidence: 0.6 };
+    }
+  }
+
+  // ── Select / Dropdown ───────────────────────
+  if (isContainerType(node) && node.height >= 32 && node.height <= 56 &&
+      node.width >= 100 && children.length >= 2) {
+    const name = node.name.toLowerCase();
+    if (name.includes('select') || name.includes('dropdown') || name.includes('picker')) {
+      return { role: 'select', confidence: 0.9 };
+    }
+    // Has text + small triangle/chevron-like child
+    const hasText = children.some(c => c.type === 'TEXT');
+    const hasIcon = children.some(c => (c.type === 'VECTOR' || c.type === 'POLYGON') && c.width <= 16);
+    if (hasText && hasIcon && node.strokes.length > 0) {
+      return { role: 'select', confidence: 0.6 };
+    }
+  }
+
+  // ── Tag (similar to badge but in content context) ──
+  if (isContainerType(node) && node.width <= 150 && node.height <= 36 &&
+      node.cornerRadius >= 4 && children.length <= 2) {
+    const name = node.name.toLowerCase();
+    if (name.includes('tag') || name.includes('chip') || name.includes('pill')) {
+      return { role: 'tag', confidence: 0.8 };
+    }
+  }
+
+  // ── Toast ───────────────────────────────────
+  if (isContainerType(node) && node.width >= 200 && node.width <= 500 &&
+      node.height >= 40 && node.height <= 100 && node.cornerRadius > 0 &&
+      node.effects.some(e => e.type === 'DROP_SHADOW')) {
+    const name = node.name.toLowerCase();
+    if (name.includes('toast') || name.includes('snackbar') || name.includes('notification')) {
+      return { role: 'toast', confidence: 0.9 };
+    }
+  }
+
+  // ── Image ───────────────────────────────────
+  if (node.type === 'RECTANGLE' && node.fills.some(f => f.type === 'IMAGE')) {
+    return { role: 'image', confidence: 0.9 };
+  }
+
   // ── Section ─────────────────────────────────
   if (isContainerType(node) && children.length >= 2 && node.layoutMode !== 'NONE') {
     return { role: 'section', confidence: 0.4 };
@@ -159,6 +258,9 @@ const ROLE_TO_TAG: Record<string, string> = {
   cta: 'button',
   link: 'a',
   input: 'input',
+  select: 'select',
+  checkbox: 'input',
+  radio: 'input',
   heading: 'h2',
   paragraph: 'p',
   label: 'span',
@@ -172,15 +274,25 @@ const ROLE_TO_TAG: Record<string, string> = {
   list: 'ul',
   listItem: 'li',
   image: 'img',
+  icon: 'span',
+  logo: 'div',
+  tag: 'span',
 };
 
 const ROLE_TO_ARIA: Record<string, string> = {
   card: 'article',
   badge: 'status',
+  tag: 'status',
   toast: 'alert',
   modal: 'dialog',
   tooltip: 'tooltip',
   dropdown: 'menu',
+  select: 'listbox',
+  checkbox: 'checkbox',
+  radio: 'radio',
+  input: 'textbox',
+  icon: 'img',
+  logo: 'img',
   cta: 'button',
   hero: 'banner',
   nav: 'navigation',

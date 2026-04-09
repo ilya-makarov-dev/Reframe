@@ -7,7 +7,7 @@
 
 import * as fs from 'fs';
 import type { CliArgs } from '../args';
-import { loadScene } from '../scene-io';
+import { loadScene, graphFromSceneEnvelope, exportScene } from '../scene-io';
 import { exportToSvg } from '../../../core/src/exporters/svg';
 
 export function exportSvg(args: CliArgs): void {
@@ -21,8 +21,9 @@ export function exportSvg(args: CliArgs): void {
   }
 
   const scene = loadScene(inputPath);
+  const { graph, rootId } = graphFromSceneEnvelope(scene);
 
-  const svg = exportToSvg(scene as any, {
+  const svg = exportToSvg({ root: exportScene(graph, rootId) } as any, {
     includeNames: args.names === true,
     background: typeof args.bg === 'string' ? args.bg : undefined,
   });

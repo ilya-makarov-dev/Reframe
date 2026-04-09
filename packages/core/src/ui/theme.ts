@@ -420,10 +420,8 @@ export async function reframe(config: ReframeConfig): Promise<string> {
       const { graph, root: builtRoot } = build(blueprint);
       setHost(new StandaloneHost(graph));
 
-      try {
-        const { computeAllLayouts } = await import('../engine/layout.js');
-        computeAllLayouts(graph, builtRoot.id);
-      } catch (_) {}
+      const { ensureSceneLayout } = await import('../engine/layout.js');
+      ensureSceneLayout(graph, builtRoot.id);
 
       // Inject href into nav items and footer links pointing to other pages
       injectPageLinks(graph, builtRoot.id, pageNames, pageDef.name);

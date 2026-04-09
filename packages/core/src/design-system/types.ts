@@ -23,6 +23,14 @@ export interface TypographyRule {
   lineHeight: number;         // multiplier (1.0 = 100%)
   letterSpacing: number;      // px (negative = tight)
   textTransform?: 'uppercase' | 'lowercase' | 'capitalize' | 'none';
+  fontFeatures?: string[];    // OpenType features: ['ss01', 'tnum', 'cv01', 'salt', 'lnum']
+}
+
+/** OpenType font feature with scope info. */
+export interface FontFeature {
+  tag: string;                // e.g. 'ss01', 'tnum', 'cv01'
+  scope: 'global' | 'heading' | 'body' | 'code'; // where it applies
+  description?: string;       // e.g. 'alternate lowercase a'
 }
 
 /** Typography at a specific breakpoint (responsive scaling). */
@@ -51,6 +59,8 @@ export interface DesignSystemColors {
   accent?: string;
   /** Full semantic color map: role name → hex. */
   roles: Map<string, string>;
+  /** Gradient definitions: name → CSS gradient string. */
+  gradients?: Map<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,21 +69,86 @@ export interface DesignSystemColors {
 
 export type ButtonStyle = 'pill' | 'rounded' | 'square';
 
+export interface InteractiveState {
+  background?: string;        // hex or rgba
+  color?: string;             // text color
+  opacity?: number;
+  scale?: number;             // e.g. 1.02 for hover lift
+  borderColor?: string;
+  shadow?: string;            // CSS box-shadow shorthand
+}
+
+export interface ButtonVariant {
+  name: string;               // 'primary', 'secondary', 'ghost', 'outline', 'pill', 'icon', 'destructive'
+  background?: string;
+  color?: string;
+  borderRadius?: number;
+  borderColor?: string;
+  fontWeight?: number;
+  fontSize?: number;
+  textTransform?: 'uppercase' | 'none';
+  minHeight?: number;         // px (accessibility: ≥44)
+  paddingX?: number;          // horizontal padding
+  paddingY?: number;          // vertical padding
+  hover?: InteractiveState;
+  active?: InteractiveState;
+  focus?: InteractiveState;
+  disabled?: InteractiveState;
+}
+
 export interface ButtonSpec {
   borderRadius: number;       // px (9999 = pill)
   style: ButtonStyle;
   fontWeight?: number;
   textTransform?: 'uppercase' | 'none';
+  variants?: ButtonVariant[];
 }
 
 export interface CardSpec {
   borderRadius: number;
   shadowLayers?: number;
+  background?: string;
+  borderColor?: string;
+  padding?: number;
+  hover?: InteractiveState;
+}
+
+export interface BadgeSpec {
+  borderRadius: number;
+  fontSize?: number;
+  fontWeight?: number;
+  paddingX?: number;
+  paddingY?: number;
+  background?: string;
+  color?: string;
+}
+
+export interface InputSpec {
+  borderRadius: number;
+  borderColor?: string;
+  fontSize?: number;
+  height?: number;
+  paddingX?: number;
+  background?: string;
+  focusBorderColor?: string;
+  focus?: InteractiveState;
+}
+
+export interface NavSpec {
+  height?: number;
+  background?: string;
+  borderBottom?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  activeIndicator?: 'underline' | 'background' | 'bold' | 'dot';
 }
 
 export interface DesignSystemComponents {
   button?: ButtonSpec;
   card?: CardSpec;
+  badge?: BadgeSpec;
+  input?: InputSpec;
+  nav?: NavSpec;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +157,7 @@ export interface DesignSystemComponents {
 
 export interface DesignSystemLayout {
   spacingUnit: number;        // base grid (e.g. 8)
+  spacingScale?: number[];    // full scale: [2, 4, 8, 12, 16, 24, 32, 48, 64]
   maxWidth?: number;          // content container max-width
   sectionSpacing?: number;    // vertical gap between sections
   borderRadiusScale: number[];// e.g. [0, 2, 4, 8, 12, 16, 9999]
@@ -112,6 +188,7 @@ export interface ShadowLayer {
   blur: number;
   spread: number;
   color: string;              // rgba string or hex
+  inset?: boolean;            // inset shadow (recessed/sunken effect)
 }
 
 export interface DesignSystemDepth {
@@ -129,6 +206,9 @@ export interface DesignSystem {
   colors: DesignSystemColors;
   typography: {
     hierarchy: TypographyRule[];
+    fontFeatures?: FontFeature[];     // global OpenType features
+    primaryFont?: string;             // primary font family name
+    secondaryFont?: string;           // secondary/accent font
   };
   components: DesignSystemComponents;
   layout: DesignSystemLayout;

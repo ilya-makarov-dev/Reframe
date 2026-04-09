@@ -20,9 +20,42 @@ import {
 } from '../../../core/src/project/io.js';
 import type { ProjectManifest, SceneEntry } from '../../../core/src/project/types.js';
 import { serializeGraph } from '../../../core/src/serialize.js';
-import { getScene, storeScene, resaveScene, listScenes as listSessionScenes } from '../store.js';
+import {
+  getScene,
+  storeScene,
+  resaveScene,
+  listScenes as listSessionScenes,
+  setProjectDir as setStoreProjectDir,
+} from '../store.js';
 import { getSession } from '../session.js';
 import { emitProjectEvent } from '../events.js';
+import { resolve, normalize, relative } from 'path';
+
+/**
+ * Resolve and optionally constrain project dir to cwd (set REFRAME_PROJECT_ALLOW_ABSOLUTE=1 to skip).
+ */
+export function normalizeTrustedProjectDir(raw: string): string {
+  if (typeof raw !== 'string' || raw.includes('\0')) {
+    throw new Error('Invalid project directory path');
+  }
+  const dir = resolve(normalize(raw.trim()));
+  if (!dir || dir.length > 4096) {
+    throw new Error('Invalid project directory path');
+  }
+  const allowAbsolute =
+    process.env.REFRAME_PROJECT_ALLOW_ABSOLUTE === '1' ||
+    process.env.REFRAME_PROJECT_ALLOW_ABSOLUTE === 'true';
+  if (!allowAbsolute) {
+    const cwd = resolve(process.cwd());
+    const rel = relative(cwd, dir);
+    if (rel.startsWith('..') || rel === '..') {
+      throw new Error(
+        'Project dir must be under the current working directory (set REFRAME_PROJECT_ALLOW_ABSOLUTE=1 to allow other paths).',
+      );
+    }
+  }
+  return dir;
+}
 
 // ─── Session project state ───────────────────────────────────
 
@@ -32,10 +65,10 @@ export function getProjectDir(): string | null {
   return _projectDir;
 }
 
+/** Canonical workspace root for session store + `reframe_project` (always use this from scripts/tools). */
 export function setProjectDir(dir: string | null): void {
   _projectDir = dir;
-  // Sync with store for auto-persistence
-  import('../store.js').then(m => m.setProjectDir(dir)).catch(() => {});
+  setStoreProjectDir(dir);
 }
 
 // ─── Auto-save helper (called from produce/workflow after mutation) ───
@@ -100,17 +133,24 @@ function doInit(input: { dir?: string; name?: string }) {
   if (!input.dir) return err('dir is required for init');
   const name = input.name ?? 'Untitled Project';
 
-  if (projectExists(input.dir)) {
-    return err(`Project already exists at ${input.dir}. Use "open" instead.`);
+  let projectDir: string;
+  try {
+    projectDir = normalizeTrustedProjectDir(input.dir);
+  } catch (e: any) {
+    return err(e.message);
   }
 
-  const manifest = initProject(input.dir, name);
-  _projectDir = input.dir;
+  if (projectExists(projectDir)) {
+    return err(`Project already exists at ${projectDir}. Use "open" instead.`);
+  }
+
+  const manifest = initProject(projectDir, name);
+  setProjectDir(projectDir);
 
   emitProjectEvent({ type: 'project:opened', manifest });
 
   return ok([
-    `Project "${name}" created at ${input.dir}/.reframe/`,
+    `Project "${name}" created at ${projectDir}/.reframe/`,
     `Scenes will auto-save to this project.`,
     '',
     `Manifest: ${JSON.stringify(manifest, null, 2)}`,
@@ -120,8 +160,15 @@ function doInit(input: { dir?: string; name?: string }) {
 function doOpen(input: { dir?: string }) {
   if (!input.dir) return err('dir is required for open');
 
-  const manifest = loadProject(input.dir);
-  _projectDir = input.dir;
+  let projectDir: string;
+  try {
+    projectDir = normalizeTrustedProjectDir(input.dir);
+  } catch (e: any) {
+    return err(e.message);
+  }
+
+  const manifest = loadProject(projectDir);
+  setProjectDir(projectDir);
 
   emitProjectEvent({ type: 'project:opened', manifest });
 
@@ -152,6 +199,8 @@ function doSave(input: { sceneId?: string; tags?: string[] }) {
     nodes: stored.nodeCount,
     tags: input.tags,
     timeline: stored.timeline,
+    group: (stored as any).group,
+    source: (stored as any).sourceFile,
   });
 
   emitProjectEvent({ type: 'scene:saved', sceneId: input.sceneId, entry });
@@ -186,11 +235,25 @@ function doList() {
     return ok('No scenes in project. Use reframe_compile or save a scene.');
   }
 
-  const lines = scenes.map(s =>
-    `  ${s.id} — "${s.name}" ${s.width}×${s.height}${s.tags?.length ? ` [${s.tags.join(', ')}]` : ''} (updated ${s.updated})`
-  );
+  // Group scenes for display
+  const grouped = new Map<string, typeof scenes>();
+  for (const s of scenes) {
+    const group = s.group ?? '';
+    if (!grouped.has(group)) grouped.set(group, []);
+    grouped.get(group)!.push(s);
+  }
 
-  return ok([`${scenes.length} scene(s):`, ...lines].join('\n'));
+  const lines: string[] = [`${scenes.length} scene(s):`];
+  for (const [group, groupScenes] of grouped) {
+    if (group) lines.push(`\n  [${group}]`);
+    for (const s of groupScenes) {
+      const prefix = group ? '    ' : '  ';
+      const source = s.source ? ` ← ${s.source}` : '';
+      lines.push(`${prefix}${s.id} — "${s.name}" ${s.width}×${s.height}${s.tags?.length ? ` [${s.tags.join(', ')}]` : ''}${source}`);
+    }
+  }
+
+  return ok(lines.join('\n'));
 }
 
 function doStatus() {
@@ -199,7 +262,8 @@ function doStatus() {
   if (_projectDir) {
     const manifest = loadProject(_projectDir);
     lines.push(`Project: "${manifest.name}" at ${_projectDir}`);
-    lines.push(`Scenes on disk: ${manifest.scenes.length}`);
+    const diskScenes = listScenes(_projectDir);
+    lines.push(`Scenes on disk: ${diskScenes.length}`);
     lines.push(`Design system: ${manifest.designSystem ?? 'none'}`);
     lines.push(`Last updated: ${manifest.updated}`);
   } else {

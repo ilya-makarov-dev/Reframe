@@ -95,6 +95,7 @@ export function createDefaultNode(type: NodeType, id: string): SceneNode {
     styleRuns: [],
     textTruncation: 'DISABLED',
     textPicture: null,
+    fontFeatureSettings: [],
 
     horizontalConstraint: 'MIN',
     verticalConstraint: 'MIN',

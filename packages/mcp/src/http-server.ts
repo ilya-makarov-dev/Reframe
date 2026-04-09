@@ -11,6 +11,21 @@
  *   GET  /mcp    — SSE stream for MCP server-initiated messages
  *   GET  /events — SSE stream for real-time project events
  *   GET  /health — Health check
+ *
+ * Scenes (Studio sync), same session store as MCP tools:
+ *   GET  /scenes              — list session scenes
+ *   GET  /scenes/:id          — HTML preview fragment (layout ensured)
+ *   GET  /scenes/:id?format=json — full SceneJSON envelope (version, root, images?, timeline?, revision);
+ *       serializeGraph with explicitTimelineKey so `timeline` is always present (object or null).
+ *   PUT  /scenes/:id          — replace live graph for that session id (must exist).
+ *       Body: at minimum `{ root }` (migrated node tree). Rebuilds SceneGraph from root — without `images`,
+ *       embedded rasters are not rehydrated (empty graph.images). For round-trip fidelity use the same shape as
+ *       GET ?format=json: `serializeGraph` from Studio/core (`root`, `images`, `timeline`, `version`).
+ *       `timeline`: omit key → keep previous session timeline; `null` → clear; object → replace (after deserialize).
+ *   DELETE /scenes/:id, POST /scenes/remove — drop scene from session (+ project file when open)
+ *
+ * **Конверт сцены:** см. [packages/core/src/spec/scene-envelope.ts](../../core/src/spec/scene-envelope.ts).
+ * Ошибки десериализации PUT: тело JSON с `error`, `kind: "reframe.deserialize"`, `code`.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
@@ -22,7 +37,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 
 import { onProjectEvent } from './events.js';
 import { VERSION } from './version.js';
+import { getReframeInstructions } from './instructions.js';
 import type { ProjectEvent } from '../../core/src/project/types.js';
+import type { INodeJSON, SceneJSON } from '../../core/src/serialize.js';
+import { SERIALIZE_VERSION } from '../../core/src/serialize.js';
+import { deserializeErrorHttpJson } from '../../core/src/deserialize-error.js';
 
 // ─── Port management ────────────────────────────────────────
 
@@ -47,22 +66,17 @@ async function killPort(port: number): Promise<void> {
   }
 }
 
-// ─── Tool registration (5 tools + project) ─────────────────
+import { registerReframeMcpTools } from './register-tools.js';
 
-import { designInputSchema, handleDesign } from './tools/design.js';
-import { compileInputSchema, handleCompile } from './tools/compile.js';
-import { editInputSchema, handleEdit } from './tools/edit.js';
-import { exportInputSchema, handleExport } from './tools/export.js';
-import { inspectInputSchema, handleInspect } from './tools/inspect.js';
-import { projectInputSchema, handleProject } from './tools/project.js';
-
-function registerTools(server: McpServer): void {
-  server.tool('reframe_design', 'Extract brand DESIGN.md from HTML, or generate AI prompt. 54 pre-built brands available.', designInputSchema, handleDesign);
-  server.tool('reframe_compile', 'Build designs from blueprint (120 UI components), content template, or HTML import. Pass designMd for brand theming.', compileInputSchema, handleCompile);
-  server.tool('reframe_edit', 'Edit INode scenes: create/add/update/delete/clone/resize/move/adapt/component/tokens.', editInputSchema, handleEdit);
-  server.tool('reframe_export', 'Export scene to html/svg/png/react/animated_html/lottie.', exportInputSchema, handleExport);
-  server.tool('reframe_inspect', 'Feedback loop: tree + 19-rule audit + assertions + diff. See issues, fix, re-inspect.', inspectInputSchema, handleInspect);
-  server.tool('reframe_project', 'Project management: init/open/save/load/list.', projectInputSchema, handleProject);
+/** Bind address: REFRAME_BIND_LOCAL=1 → 127.0.0.1; else REFRAME_HTTP_HOST or 0.0.0.0 */
+function httpListenHost(): string {
+  const bindLocal =
+    process.env.REFRAME_BIND_LOCAL === '1' ||
+    process.env.REFRAME_BIND_LOCAL === 'true';
+  if (bindLocal) return '127.0.0.1';
+  const h = process.env.REFRAME_HTTP_HOST?.trim();
+  if (h) return h;
+  return '0.0.0.0';
 }
 
 // ─── CORS ────────────────────────────────────────────────────
@@ -141,7 +155,12 @@ function broadcastEvent(event: ProjectEvent): void {
 // ─── Shared: broadcast scene store changes via SSE ───────────
 // When stdio MCP creates/updates scenes, push to Studio
 
-import { listScenes as listSessionScenes, getScene, deleteScene as deleteSessionScene } from './store.js';
+import {
+  listScenes as listSessionScenes,
+  getScene,
+  deleteScene as deleteSessionScene,
+  replaceSessionSceneGraph,
+} from './store.js';
 
 /** Broadcast current scene list to all SSE clients. */
 function broadcastSceneList(): void {
@@ -159,6 +178,8 @@ let sidecarPort = 4100;
 
 /** Ensure sidecar is running. Safe to call multiple times — no-op after first. */
 export function ensureHttpSidecar(port?: number): void {
+  const skip = process.env.REFRAME_SKIP_HTTP_SIDECAR;
+  if (skip === '1' || skip === 'true') return;
   if (sidecarStarted) return;
   startHttpSidecar(port ?? sidecarPort);
 }
@@ -170,8 +191,10 @@ export function startHttpSidecar(port = 4100): void {
   const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
 
   function createSession(): { server: McpServer; transport: StreamableHTTPServerTransport } {
-    const mcpServer = new McpServer({ name: 'reframe', version: VERSION });
-    registerTools(mcpServer);
+    const mcpServer = new McpServer({ name: 'reframe', version: VERSION }, {
+      instructions: getReframeInstructions(),
+    });
+    registerReframeMcpTools(mcpServer);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
     });
@@ -182,7 +205,11 @@ export function startHttpSidecar(port = 4100): void {
   onProjectEvent((event) => {
     broadcastEvent(event);
     // Also broadcast updated scene list after any scene change
-    if (event.type === 'scene:saved' || event.type === 'scene:deleted') {
+    if (
+      event.type === 'scene:saved'
+      || event.type === 'scene:deleted'
+      || event.type === 'scene:session-changed'
+    ) {
       broadcastSceneList();
     }
   });
@@ -239,12 +266,12 @@ export function startHttpSidecar(port = 4100): void {
         return;
       }
       const { exportSite } = await import('../../core/src/exporters/site.js');
-      const { computeAllLayouts } = await import('../../core/src/engine/layout.js');
+      const { ensureSceneLayout } = await import('../../core/src/engine/layout.js');
       const sitePages = [];
       for (const s of scenes) {
         const stored = getScene(s.id);
         if (!stored) continue;
-        try { computeAllLayouts(stored.graph, stored.rootId); } catch {}
+        ensureSceneLayout(stored.graph, stored.rootId);
         sitePages.push({ slug: stored.slug, name: s.name || stored.slug, graph: stored.graph, rootId: stored.rootId });
       }
       const html = exportSite(sitePages, { title: 'reframe site preview', transition: 'fadeSlideUp' });
@@ -261,8 +288,8 @@ export function startHttpSidecar(port = 4100): void {
         res.end('<h1>Scene not found</h1>');
         return;
       }
-      const { computeAllLayouts } = await import('../../core/src/engine/layout.js');
-      try { computeAllLayouts(stored.graph, stored.rootId); } catch {}
+      const { ensureSceneLayout } = await import('../../core/src/engine/layout.js');
+      ensureSceneLayout(stored.graph, stored.rootId);
       const { exportToHtml } = await import('../../core/src/exporters/html.js');
       const html = exportToHtml(stored.graph, stored.rootId, { fullDocument: true });
       res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -329,7 +356,80 @@ export function startHttpSidecar(port = 4100): void {
       return;
     }
 
-    // Scene export API — HTML fragment (Studio preview) or ?format=json (full INode tree, no HTML round-trip)
+    // PUT /scenes/:id — see file header for body contract (root + optional images, timeline).
+    if (url.pathname.startsWith('/scenes/') && req.method === 'PUT') {
+      const sceneId = sceneIdFromPath(url.pathname);
+      if (!sceneId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(deserializeErrorHttpJson('Scene id required in path /scenes/:id', 'SCENE_ID_REQUIRED')));
+        return;
+      }
+      const existing = getScene(sceneId);
+      if (!existing) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(deserializeErrorHttpJson(`Scene ${sceneId} not found`, 'SCENE_NOT_FOUND')));
+        return;
+      }
+      const body = await readJsonBody(req);
+      const root = body?.root;
+      if (!root || typeof root !== 'object' || Array.isArray(root)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(deserializeErrorHttpJson('JSON body must include root (object)', 'ROOT_MISSING')));
+        return;
+      }
+      const { deserializeScene, deserializeTimeline } = await import('../../core/src/serialize.js');
+      const envelope: SceneJSON = {
+        version: typeof body.version === 'number' ? body.version : SERIALIZE_VERSION,
+        root: root as INodeJSON,
+      };
+      const imgs = body?.images;
+      if (imgs !== null && imgs !== undefined && typeof imgs === 'object' && !Array.isArray(imgs)) {
+        envelope.images = imgs as Record<string, string>;
+      }
+      let graph: import('../../core/src/engine/scene-graph.js').SceneGraph;
+      let rootId: string;
+      try {
+        ({ graph, rootId } = deserializeScene(envelope));
+      } catch (e: any) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify(
+            deserializeErrorHttpJson(e?.message ?? 'deserialize failed', 'DESERIALIZE_FAILED'),
+          ),
+        );
+        return;
+      }
+      let updateTimeline = false;
+      let timeline: import('../../core/src/animation/types.js').ITimeline | null | undefined;
+      if ('timeline' in body) {
+        updateTimeline = true;
+        if (body.timeline === null) {
+          timeline = undefined;
+        } else if (body.timeline && typeof body.timeline === 'object' && !Array.isArray(body.timeline)) {
+          timeline = deserializeTimeline(body.timeline as any);
+        } else {
+          timeline = undefined;
+        }
+      }
+      const out = replaceSessionSceneGraph(sceneId, graph, rootId, timeline, { updateTimeline });
+      if (!out) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify(
+            deserializeErrorHttpJson('replaceSessionSceneGraph failed', 'REPLACE_GRAPH_FAILED'),
+          ),
+        );
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ ok: true, sessionId: out.sessionId, revision: out.revision }));
+      return;
+    }
+
+    // Scene export API — HTML fragment (Studio preview) or ?format=json (SceneJSON envelope: root, images?, timeline?, version + revision)
     if (url.pathname.startsWith('/scenes/') && req.method === 'GET') {
       const sceneId = sceneIdFromPath(url.pathname);
       const stored = getScene(sceneId);
@@ -342,23 +442,25 @@ export function startHttpSidecar(port = 4100): void {
         res.end(JSON.stringify({ error: `Scene ${sceneId} not found` }));
         return;
       }
-      const { computeAllLayouts } = await import('../../core/src/engine/layout.js');
-      try {
-        computeAllLayouts(stored.graph, stored.rootId);
-      } catch {
-        /* best-effort */
-      }
+      const { ensureSceneLayout } = await import('../../core/src/engine/layout.js');
+      ensureSceneLayout(stored.graph, stored.rootId);
 
       if (url.searchParams.get('format') === 'json') {
-        const { serializeSceneNode, SERIALIZE_VERSION } = await import('../../core/src/serialize.js');
-        const root = serializeSceneNode(stored.graph, stored.rootId, { compact: true });
-        (root as { version?: number }).version = SERIALIZE_VERSION;
+        const { serializeGraph } = await import('../../core/src/serialize.js');
+        const payload = serializeGraph(stored.graph, stored.rootId, {
+          compact: true,
+          timeline: stored.timeline,
+          explicitTimelineKey: true,
+        });
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Cache-Control': 'no-store, no-cache, must-revalidate',
           'Pragma': 'no-cache',
         });
-        res.end(JSON.stringify({ root }));
+        res.end(JSON.stringify({
+          ...payload,
+          revision: stored.sessionRevision ?? 1,
+        }));
         return;
       }
 
@@ -418,9 +520,14 @@ export function startHttpSidecar(port = 4100): void {
   let retries = 0;
   const maxRetries = 3;
 
+  const listenHost = httpListenHost();
+  const displayHost = listenHost === '0.0.0.0' ? 'localhost' : listenHost;
+
   function tryListen(): void {
-    httpServer.listen(port, () => {
-      process.stderr.write(`reframe HTTP sidecar on http://localhost:${port} (scenes + events + MCP)\n`);
+    httpServer.listen(port, listenHost, () => {
+      process.stderr.write(
+        `reframe HTTP sidecar on http://${displayHost}:${port} (bind ${listenHost}; scenes + events + MCP)\n`,
+      );
     });
   }
 
@@ -523,7 +630,12 @@ function renderPreviewDashboard(
     es.onmessage = function(e) {
       try {
         var data = JSON.parse(e.data);
-        if (data.type === 'scene:updated' || data.type === 'scene:created' || data.type === 'session:scenes') {
+        if (
+          data.type === 'scene:updated'
+          || data.type === 'scene:created'
+          || data.type === 'session:scenes'
+          || data.type === 'scene:session-changed'
+        ) {
           // Reload sidebar + preview
           setTimeout(function() { location.reload(); }, 300);
         }

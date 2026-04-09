@@ -812,7 +812,8 @@ function convertElement(
       // Estimate text node size when no explicit width/height (flex children)
       if (!overrides.width || !overrides.height) {
         const fontSize = overrides.fontSize ?? 16;
-        const avgCharWidth = fontSize * 0.6;
+        const fontWeight = overrides.fontWeight ?? 400;
+        const avgCharWidth = fontSize * (0.48 + (fontWeight >= 600 ? 0.04 : 0));
         const textLines = textContent.split('\n');
         const longestLine = Math.max(...textLines.map(l => l.length));
         if (!overrides.width) {
@@ -873,7 +874,8 @@ function convertElement(
     const fontSize = textOverrides.fontSize ?? 16;
     const tLines = textContent.split('\n');
     const tLongest = Math.max(...tLines.map(l => l.length));
-    textOverrides.width = Math.max(20, Math.ceil(tLongest * fontSize * 0.6));
+    const tw = textOverrides.fontWeight ?? 400;
+    textOverrides.width = Math.max(20, Math.ceil(tLongest * fontSize * (0.48 + (tw >= 600 ? 0.04 : 0))));
     textOverrides.height = Math.max(fontSize, Math.ceil(tLines.length * (textOverrides.lineHeight ?? fontSize * 1.4)));
     ctx.stats.textNodes++;
     ctx.graph.createNode('TEXT', node.id, textOverrides);
@@ -893,7 +895,7 @@ function convertElement(
     });
     for (const child of sortedChildren) {
       if (child.kind === 'element') {
-        if (child.tag === 'style' || child.tag === 'script') continue;
+        if (child.tag === 'style' || child.tag === 'script' || child.tag === 'br' || child.tag === 'hr' || child.tag === 'wbr') continue;
         convertElement(ctx, node.id, child, styles);
       } else if (child.kind === 'text' && child.value.trim()) {
         // Inline text in a container → create TEXT child node
@@ -924,11 +926,23 @@ function convertElement(
     const isFlex = styles.flex || styles['flex-grow'];
     const updates: any = {};
 
+    // Get parent layout mode for context-aware sizing
+    const parentNode = createdNode.parentId ? ctx.graph.getNode(createdNode.parentId) : null;
+    const parentIsRow = parentNode?.layoutMode === 'HORIZONTAL';
+
     if (noExplicitWidth) {
       if (isFlex || (hasLayout && !styles.width)) {
         // Flex child or layout container without explicit width → let CSS handle it
         updates.primaryAxisSizing = hasLayout ? 'HUG' : 'FILL';
-        updates.counterAxisSizing = 'FILL';
+        // Counter axis sizing depends on layout direction AND parent:
+        // VERTICAL child in VERTICAL parent: counter=width → FILL (CSS block fills parent width)
+        // VERTICAL child in HORIZONTAL parent: counter=width → HUG (flex row controls width)
+        // HORIZONTAL child: counter=height → HUG (CSS doesn't stretch height by default)
+        if (createdNode.layoutMode === 'VERTICAL' && !parentIsRow) {
+          updates.counterAxisSizing = 'FILL';
+        } else {
+          updates.counterAxisSizing = 'HUG';
+        }
         // Set a reasonable default instead of 100
         updates.width = ctx.defaultWidth ?? 1440;
       } else {
@@ -953,8 +967,14 @@ function convertElement(
 
     if (noExplicitHeight) {
       if (hasLayout) {
-        // Layout container without height → HUG content
-        updates.primaryAxisSizing = updates.primaryAxisSizing ?? 'HUG';
+        // Layout container without height → HUG content on the height axis
+        if (createdNode.layoutMode === 'VERTICAL') {
+          // VERTICAL: primary axis = height → HUG
+          updates.primaryAxisSizing = updates.primaryAxisSizing ?? 'HUG';
+        } else {
+          // HORIZONTAL: counter axis = height → HUG
+          updates.counterAxisSizing = updates.counterAxisSizing ?? 'HUG';
+        }
         // Estimate from children
         let maxH = 0, sumH = 0;
         for (const cid of createdNode.childIds) {
@@ -1254,6 +1274,11 @@ function cssToOverrides(
   if (styles.overflow === 'hidden' || styles.overflow === 'clip') {
     o.clipsContent = true;
   }
+  // Flex/grid containers with explicit dimensions clip content like browsers do
+  if (!o.clipsContent && (styles.display === 'flex' || styles.display === 'grid') &&
+      (styles.width || styles['max-width'] || styles.flex)) {
+    o.clipsContent = true;
+  }
 
   // ── Effects (box-shadow) ──
   if (styles['box-shadow'] && styles['box-shadow'] !== 'none') {
@@ -1527,6 +1552,13 @@ function applyTextStyles(o: any, styles: Record<string, string>, tag: string) {
     if (tt === 'uppercase') o.textCase = 'UPPER';
     else if (tt === 'lowercase') o.textCase = 'LOWER';
     else if (tt === 'capitalize') o.textCase = 'TITLE';
+  }
+
+  // font-feature-settings: "ss01", "tnum" → ['ss01', 'tnum']
+  if (styles['font-feature-settings'] && styles['font-feature-settings'] !== 'normal') {
+    const ffs = styles['font-feature-settings'];
+    const tags = [...ffs.matchAll(/["']([a-z]{2,4}\d{0,2})["']/gi)].map(m => m[1].toLowerCase());
+    if (tags.length > 0) o.fontFeatureSettings = tags;
   }
 
   if (styles['text-decoration']) {

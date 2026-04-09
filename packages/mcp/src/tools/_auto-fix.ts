@@ -1,8 +1,10 @@
 /**
- * Auto-fix engine — shared between produce.ts and workflow.ts.
+ * Auto-fix engine — shared by `reframe_compile` and `reframe_edit`.
+ *
+ * Callers should run audit with `buildInspectAuditRules` (same stack as `reframe_inspect` / Studio)
+ * so auto-fix targets align with the 19-rule feedback loop.
  *
  * Maps audit issue fix suggestions to INode property mutations.
- * Supports 13 CSS properties + contrast auto-fix.
  */
 
 import type { SceneGraph } from '../../../core/src/engine/scene-graph.js';
@@ -25,6 +27,15 @@ export function cssPropertyToNodeProperty(cssProp: string): string | null {
     'opacity': 'opacity',
     'line-height': 'lineHeight',
     'letter-spacing': 'letterSpacing',
+    'font-feature-settings': 'fontFeatureSettings',
+    'height': 'height',
+    'min-width': 'minWidth',
+    'min-height': 'minHeight',
+    'gap': 'itemSpacing',
+    'padding-top': 'paddingTop',
+    'padding-right': 'paddingRight',
+    'padding-bottom': 'paddingBottom',
+    'padding-left': 'paddingLeft',
   };
   return map[cssProp] ?? null;
 }
@@ -250,7 +261,6 @@ export interface AutoFixResult {
 
 /**
  * Run the audit → fix → re-audit loop.
- * Shared by produce.ts and workflow.ts.
  */
 export function runAutoFixLoop(
   graph: SceneGraph,

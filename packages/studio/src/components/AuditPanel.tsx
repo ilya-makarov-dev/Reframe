@@ -1,11 +1,11 @@
 /**
  * Audit Panel — shows design issues with severity, auto-fix, click-to-select.
  *
- * Runs 17 rules against the INode tree. Issues link to nodes on canvas.
+ * Runs the same inspect audit rules as MCP `reframe_inspect` (19 + palette when DESIGN.md is loaded).
  */
 
 import { useCallback } from 'react';
-import { useSceneStore } from '../store/scene';
+import { useSceneStore, getActiveArtboard } from '../store/scene';
 
 const SEVERITY_COLORS: Record<string, string> = {
   error: 'var(--error)',
@@ -20,11 +20,12 @@ const SEVERITY_ICONS: Record<string, string> = {
 };
 
 export function AuditPanel() {
-  const auditIssues = useSceneStore(s => s.auditIssues);
+  const ab = useSceneStore(s => getActiveArtboard(s));
+  const auditIssues = ab?.auditIssues ?? [];
   const runAudit = useSceneStore(s => s.runAudit);
   const select = useSceneStore(s => s.select);
-  const graph = useSceneStore(s => s.graph);
-  const rootId = useSceneStore(s => s.rootId);
+  const graph = ab?.graph ?? null;
+  const rootId = ab?.rootId ?? null;
   const designSystem = useSceneStore(s => s.designSystem);
 
   const handleRunAudit = useCallback(() => { runAudit(); }, [runAudit]);
@@ -38,10 +39,10 @@ export function AuditPanel() {
   const infoCount = auditIssues.filter(i => i.severity === 'info').length;
 
   return (
-    <div style={{ borderTop: '1px solid var(--border)' }}>
+    <div className="audit-panel">
       <div className="panel-header">
         <span>
-          Audit
+          Design check
           {auditIssues.length > 0 && (
             <span style={{ marginLeft: 8, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
               {errorCount > 0 && <span style={{ color: 'var(--error)', marginRight: 6 }}>{errorCount} errors</span>}
@@ -49,35 +50,22 @@ export function AuditPanel() {
               {infoCount > 0 && <span style={{ color: 'var(--text-accent)' }}>{infoCount} info</span>}
             </span>
           )}
-          {auditIssues.length === 0 && graph && rootId && (
-            <span style={{ marginLeft: 8, color: 'var(--success)', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
-              Clean
-            </span>
-          )}
         </span>
         <button
-          className="toolbar__btn"
-          style={{ fontSize: 10, padding: '2px 8px' }}
+          type="button"
+          className="toolbar__btn audit-panel__scan"
           onClick={handleRunAudit}
           disabled={!graph || !rootId}
+          title="Same rules as MCP reframe_inspect: contrast, touch targets, type scale, tokens, …"
         >
-          Run
+          Scan
         </button>
       </div>
 
-      <div style={{ maxHeight: 180, overflowY: 'auto' }}>
-        {!graph && (
-          <div style={{ padding: 12, color: 'var(--text-muted)', fontSize: 11 }}>
-            Import a design to audit
-          </div>
-        )}
-
+      <div className="audit-panel__list">
         {designSystem && (
-          <div style={{
-            padding: '4px 12px', fontSize: 10, color: 'var(--success)',
-            borderBottom: '1px solid var(--border-subtle)',
-          }}>
-            Design system loaded — brand compliance rules active
+          <div className="audit-panel__ds-note">
+            DESIGN.md loaded — brand palette rules on
           </div>
         )}
 

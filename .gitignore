@@ -11,10 +11,15 @@ logs/
 *.log
 npm-debug.log*
 
-# Environment
+# Environment & secrets (never commit)
 .env
 .env.*
 !.env.example
+*.pem
+**/service-account*.json
+**/google-credentials.json
+**/credentials.json
+**/*-credentials.json
 
 # IDEs & editors
 .vscode/
@@ -53,5 +58,5 @@ packages/mcp/src/**/*.d.ts.map
 # MCP config (user-specific)
 .mcp.json
 
-# External libraries (not distributed, clone separately)
-awesome-design-md-main/
+# Brand cache (downloaded via npx getdesign at runtime)
+# Already inside .reframe/ which is ignored above

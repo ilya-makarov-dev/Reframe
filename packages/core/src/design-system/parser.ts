@@ -27,7 +27,14 @@ import type {
   TypographyBreakpointOverride,
   Breakpoint,
   ButtonSpec,
+  ButtonVariant,
   ButtonStyle,
+  InteractiveState,
+  CardSpec,
+  BadgeSpec,
+  InputSpec,
+  NavSpec,
+  FontFeature,
   ShadowLayer,
   ColorRole,
 } from './types';
@@ -79,6 +86,24 @@ function extractHexColors(text: string): string[] {
   return [...text.matchAll(HEX_RE)].map(m => m[0]);
 }
 
+function rgbStringToHex(rgb: string): string | null {
+  const m = rgb.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*[\d.]+)?\s*\)/i);
+  if (!m) return null;
+  const r = Math.max(0, Math.min(255, Math.round(parseFloat(m[1]))));
+  const g = Math.max(0, Math.min(255, Math.round(parseFloat(m[2]))));
+  const b = Math.max(0, Math.min(255, Math.round(parseFloat(m[3]))));
+  const toHex = (n: number) => n.toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function extractFirstColor(text: string): string | null {
+  const hex = text.match(HEX_RE)?.[0];
+  if (hex) return hex;
+  const rgb = text.match(RGBA_RE)?.[0];
+  if (!rgb) return null;
+  return rgbStringToHex(rgb);
+}
+
 function parseColors(section: Section | undefined): DesignSystemColors {
   const colors: DesignSystemColors = { roles: new Map() };
   if (!section) return colors;
@@ -88,9 +113,8 @@ function parseColors(section: Section | undefined): DesignSystemColors {
   // First pass: extract all named colors with their hex values
   // Pattern: **Name** (`#hex`): description
   for (const line of lines) {
-    const hexes = extractHexColors(line);
-    if (hexes.length === 0) continue;
-    const hex = hexes[0];
+    const hex = extractFirstColor(line);
+    if (!hex) continue;
 
     // Generic role extraction: "**Role Name** (`#hex`): description"
     const roleMatch = line.match(/\*\*([A-Za-z][\w\s/-]{1,40})\*\*\s*\(?[`(]?#[0-9a-fA-F]{3,8}/);
@@ -108,9 +132,8 @@ function parseColors(section: Section | undefined): DesignSystemColors {
     const cells = line.split('|').map(c => c.trim().toLowerCase()).filter(c => c.length > 0);
     if (cells.length < 2) continue;
     const roleName = cells[0].replace(/[`*]/g, '');
-    const hexes = extractHexColors(line);
-    if (hexes.length === 0) continue;
-    const hex = hexes[0];
+    const hex = extractFirstColor(line);
+    if (!hex) continue;
 
     if (roleName === 'primary' && !colors.primary) { colors.primary = hex; colors.roles.set('primary', hex); }
     if (roleName === 'background' && !colors.background) { colors.background = hex; colors.roles.set('background', hex); }
@@ -119,16 +142,29 @@ function parseColors(section: Section | undefined): DesignSystemColors {
     if (!colors.roles.has(roleName)) colors.roles.set(roleName, hex);
   }
 
+  // Second-pass fallback: list/key-value lines like "- primary: #0071E3" or "fills.primary: #hex"
+  for (const line of lines) {
+    const m = line.match(/^\s*(?:[-*]\s*)?([A-Za-z][\w.\s/-]{1,40})\s*:\s*`?(#[0-9a-fA-F]{3,8})`?\b/);
+    if (!m) continue;
+    // Strip "fills." prefix from etalon format (fills.primary → primary)
+    const roleName = m[1].trim().toLowerCase().replace(/^fills\./, '').replace(/\s+/g, '-');
+    const hex = m[2];
+    if (roleName === 'primary' && !colors.primary) colors.primary = hex;
+    if (roleName === 'background' && !colors.background) colors.background = hex;
+    if (roleName === 'text' && !colors.text) colors.text = hex;
+    if (roleName === 'accent' && !colors.accent) colors.accent = hex;
+    if (!colors.roles.has(roleName)) colors.roles.set(roleName, hex);
+  }
+
   // Third pass: detect semantic roles from context in non-table lines
   // Use stricter matching to avoid false positives like "link text" matching "text"
   for (const line of lines) {
-    const hexes = extractHexColors(line);
-    if (hexes.length === 0) continue;
-    const hex = hexes[0];
+    const hex = extractFirstColor(line);
+    if (!hex) continue;
     const lower = line.toLowerCase();
 
     // Match "Primary brand color" or line starts with "**...Primary..." — but NOT "link text" for text role
-    if (!colors.primary && /\bprimary\s*(?:brand|color|cta|accent)?\b/i.test(lower) && !/\bprimary\s*(?:heading|text|link)\b/i.test(lower)) {
+    if (!colors.primary && /\bprimary\s*(?:brand|color|cta|accent)?\b/i.test(lower) && !/\bprimary\s*(?:heading|text|link|surface|background)\b/i.test(lower)) {
       colors.primary = hex;
       if (!colors.roles.has('primary')) colors.roles.set('primary', hex);
     }
@@ -139,9 +175,9 @@ function parseColors(section: Section | undefined): DesignSystemColors {
       if (!colors.roles.has('background')) colors.roles.set('background', hex);
     }
 
-    // Text: match "heading color", "body text", "primary text" — not just any line with "text" in description
-    if (!colors.text && (/\b(?:heading|body|primary)\s*(?:text\s*)?color\b|\bheading\s*(?:color|solid)\b/i.test(lower) ||
-        /^\s*-\s*\*\*.*(?:navy|heading|foreground|text)\*\*/i.test(lower))) {
+    // Text: match "primary text", "heading color", "body text", or bold names with "text/black/foreground"
+    if (!colors.text && (/\bprimary\s*text\b|\b(?:heading|body)\s*(?:text\s*)?color\b|\bheading\s*(?:color|solid)\b/i.test(lower) ||
+        /^\s*-\s*\*\*.*(?:navy|heading|foreground|black|text)\*\*/i.test(lower))) {
       colors.text = hex;
       if (!colors.roles.has('text')) colors.roles.set('text', hex);
     }
@@ -166,7 +202,104 @@ function parseColors(section: Section | undefined): DesignSystemColors {
     }
   }
 
+  // Fallback: if primary not found, try accent, link, or most saturated named color
+  if (!colors.primary) {
+    const fallbackPrimary = colors.accent
+      ?? colors.roles.get('cta')
+      ?? colors.roles.get('link-blue') ?? colors.roles.get('link')
+      ?? findMostSaturatedRole(colors.roles);
+    if (fallbackPrimary) {
+      colors.primary = fallbackPrimary;
+      if (!colors.roles.has('primary')) colors.roles.set('primary', fallbackPrimary);
+    }
+  }
+
+  // Fallback: if text not found, use darkest named color role
+  if (!colors.text) {
+    let darkest: string | undefined;
+    let darkestLum = 1;
+    for (const [, hex] of colors.roles) {
+      const lum = hexLuminance(hex);
+      if (lum < darkestLum && lum < 0.3) { darkestLum = lum; darkest = hex; }
+    }
+    if (darkest) { colors.text = darkest; colors.roles.set('text', darkest); }
+  }
+
+  // Fallback: if background not found, use lightest named color role
+  if (!colors.background) {
+    let lightest: string | undefined;
+    let lightestLum = 0;
+    for (const [, hex] of colors.roles) {
+      const lum = hexLuminance(hex);
+      if (lum > lightestLum && lum > 0.7) { lightestLum = lum; lightest = hex; }
+    }
+    if (lightest) { colors.background = lightest; colors.roles.set('background', lightest); }
+  }
+
+  // Fallback: if accent not found, try common accent role names or second most saturated
+  if (!colors.accent) {
+    const accentFallback = colors.roles.get('ruby') ?? colors.roles.get('brand') ?? colors.roles.get('brand-dark')
+      ?? colors.roles.get('interactive') ?? colors.roles.get('link');
+    if (accentFallback && accentFallback !== colors.primary) {
+      colors.accent = accentFallback;
+      if (!colors.roles.has('accent')) colors.roles.set('accent', accentFallback);
+    }
+  }
+
+  // Parse gradients: "linear-gradient(...)" or "Name gradient: #hex to #hex"
+  const gradients = new Map<string, string>();
+  for (const line of lines) {
+    // CSS gradient syntax
+    const cssGrad = line.match(/((?:linear|radial)-gradient\([^)]+\))/i);
+    if (cssGrad) {
+      // Try to name it from bold text or context
+      const nameMatch = line.match(/\*\*([^*]+)\*\*/);
+      const name = nameMatch ? nameMatch[1].trim().toLowerCase().replace(/\s+/g, '-') : `gradient-${gradients.size}`;
+      gradients.set(name, cssGrad[1]);
+      continue;
+    }
+    // "Color1 (#hex) to Color2 (#hex)" or "`#hex` to `#hex`" pattern
+    const toGrad = line.match(/`?(#[0-9a-fA-F]{3,8})`?\)?\s+to\s+\(?`?(#[0-9a-fA-F]{3,8})`?\)?/i);
+    if (toGrad) {
+      const nameMatch = line.match(/\*\*([^*]+)\*\*/);
+      const name = nameMatch ? nameMatch[1].trim().toLowerCase().replace(/\s+/g, '-') : `gradient-${gradients.size}`;
+      gradients.set(name, `linear-gradient(135deg, ${toGrad[1]}, ${toGrad[2]})`);
+    }
+  }
+  if (gradients.size > 0) colors.gradients = gradients;
+
   return colors;
+}
+
+function hexLuminance(hex: string): number {
+  const h = hex.replace('#', '');
+  if (h.length < 6) return 0.5;
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+function hexSaturationParser(hex: string): number {
+  const h = hex.replace('#', '');
+  if (h.length < 6) return 0;
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  if (max === min) return 0;
+  const l = (max + min) / 2;
+  return l > 0.5 ? (max - min) / (2 - max - min) : (max - min) / (max + min);
+}
+
+function findMostSaturatedRole(roles: Map<string, string>): string | undefined {
+  let best: string | undefined;
+  let bestSat = 0;
+  for (const [, hex] of roles) {
+    const sat = hexSaturationParser(hex);
+    if (sat > bestSat && sat > 0.3) { bestSat = sat; best = hex; }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,13 +307,14 @@ function parseColors(section: Section | undefined): DesignSystemColors {
 // ---------------------------------------------------------------------------
 
 const TYPO_ROLE_PATTERNS: [RegExp, TypographyRole][] = [
-  [/\bhero\b|display\s*(?:hero|xl)/i, 'hero'],
-  [/\btitle\b|h1\b|display(?!\s*hero|\s*xl)\b|headline|section\s*head/i, 'title'],
-  [/\bh2\b|subtitle|subhead|sub[- ]?heading/i, 'subtitle'],
-  [/\bbody\b|paragraph|base/i, 'body'],
-  [/\bcaption\b|small(?!\s*button)|fine\s*print|overline|micro/i, 'caption'],
-  [/\bdisclaimer\b|legal|footnote|nano/i, 'disclaimer'],
-  [/\bbutton\b(?!\s*small)|cta\b/i, 'button'],
+  // Order matters: more specific patterns first
+  [/\bbutton\b(?!\s*small)|\bcta\b/i, 'button'],
+  [/\bdisclaimer\b|\blegal\b|\bfootnote\b|\bnano\b/i, 'disclaimer'],
+  [/\bcaption\b|\blabel\b|\bsmall\b(?!\s*button)|\bfine\s*print\b|\boverline\b|\bmicro\b|\bmono\b|\blink\b|\bnav\b|\btabular\b/i, 'caption'],
+  [/\bbody\b|\bbodyLarge\b|\bparagraph\b|\bbase\b|\bdescription\b/i, 'body'],
+  [/\bh[2-3]\b|\bheading\s*[2-3]\b|\bsubhead\b|\bsubtitle\b|\bsub[- ]?heading\b|\bsub[- ]?section\b|\bcard[- ]?head\w*\b|\bfeature[- ]?title\b/i, 'subtitle'],
+  [/\btitle\b|\bh1\b|\bheading\s*1\b|\bheading(?!\s*[2-6])\b|\bheadline\b|\bsection[- ]?heading\b|\bsection[- ]?title\b/i, 'title'],
+  [/\bhero\b|\bdisplay\b/i, 'hero'],
 ];
 
 function detectTypoRole(text: string): TypographyRole | null {
@@ -306,6 +440,18 @@ function parseTypographyTable(text: string): TypographyRule[] {
       if (/\buppercase\b/i.test(cell)) textTransform = 'uppercase';
     }
 
+    // Font family from Notes column or any cell mentioning a font name
+    if (!fontFamily) {
+      for (const cell of cellsToScan) {
+        // Match font names like "Universal Sans Display", "Inter Variable", "Airbnb Cereal VF"
+        const fontMatch = cell.match(/([A-Z][a-z]+(?:\s+[A-Za-z]+){1,4})\s*(?:,|$|\.|—)/);
+        if (fontMatch && !/^(?:Primary|Secondary|Hero|Section|Body|Button|Card|Nav|Sub)/i.test(fontMatch[1])) {
+          fontFamily = fontMatch[1].trim();
+          break;
+        }
+      }
+    }
+
     // Deduplicate: keep the first occurrence of each role
     if (!rules.some(r => r.role === role)) {
       rules.push({ role, fontFamily, fontSize, fontWeight, lineHeight, letterSpacing, textTransform });
@@ -377,9 +523,30 @@ function parseTypographyFreeform(text: string): TypographyRule[] {
     const role = detectTypoRole(line);
     if (!role) continue;
 
-    const fsMatch = line.match(/(\d+(?:\.\d+)?)\s*px/);
-    if (!fsMatch) continue;
-    const fontSize = parseNumber(fsMatch[1]);
+    // INode-native format: "display:   fontSize 56  fontWeight 700  lineHeight 1.05  letterSpacing -2"
+    const inodeFs = line.match(/fontSize\s+([\d.]+)/i);
+    if (inodeFs) {
+      const fontSize = parseNumber(inodeFs[1]);
+      if (!fontSize || fontSize < 6 || fontSize > 200) continue;
+      const fontWeight = parseNumber(line.match(/fontWeight\s+([\d]+)/i)?.[1] ?? '') ?? 400;
+      const lineHeight = parseNumber(line.match(/lineHeight\s+([\d.]+)/i)?.[1] ?? '') ?? 1.4;
+      const letterSpacing = parseNumber(line.match(/letterSpacing\s+([-\d.]+)/i)?.[1] ?? '') ?? 0;
+      const fontFamilyMatch = line.match(/fontFamily\s+"([^"]+)"/i);
+      if (!rules.some(r => r.role === role)) {
+        rules.push({
+          role, fontSize, fontWeight, lineHeight, letterSpacing,
+          ...(fontFamilyMatch ? { fontFamily: fontFamilyMatch[1] } : {}),
+        });
+      }
+      continue;
+    }
+
+    // Classic format: "Hero: 72px / 700 / line-height 1.07"
+    const fsMatch = line.match(/(\d+(?:\.\d+)?)\s*px/i);
+    const fallbackSizeMatch = !fsMatch
+      ? line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?[A-Za-z][\w\s/-]{1,30}(?:\*\*)?\s*[:\-]\s*(\d+(?:\.\d+)?)/)
+      : null;
+    const fontSize = parseNumber(fsMatch?.[1] ?? fallbackSizeMatch?.[1] ?? '');
     if (!fontSize || fontSize < 6 || fontSize > 200) continue;
 
     let fontWeight = 400;
@@ -412,21 +579,107 @@ function parseTypographyFreeform(text: string): TypographyRule[] {
   return rules;
 }
 
-function parseTypography(section: Section | undefined): { hierarchy: TypographyRule[] } {
+function parseFontFeatures(text: string): FontFeature[] {
+  const features: FontFeature[] = [];
+  const seen = new Set<string>();
+  // Match OpenType feature tags: "ss01", "tnum", 'cv01', `salt`, "lnum", "locl"
+  const tagRe = /[""`''""]([a-z]{2,4}\d{0,2})[""`''""]|`([a-z]{2,4}\d{0,2})`/gi;
+  // Known OpenType feature tags
+  const KNOWN_OT_TAGS = new Set(['ss01','ss02','ss03','ss04','ss05','ss06','ss07','ss08','ss09','ss10','ss11','ss12',
+    'tnum','lnum','salt','cv01','cv02','cv03','cv04','cv05','locl','kern','liga','calt','onum','pnum','smcp','c2sc',
+    'swsh','frac','ordn','subs','sups','zero','case','cpsp','titl','cswh','rlig','dlig','hlig']);
+
+  for (const m of text.matchAll(tagRe)) {
+    const tag = (m[1] || m[2]).toLowerCase();
+    if (!KNOWN_OT_TAGS.has(tag)) continue;
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+
+    // Determine scope from surrounding context
+    const ctx = text.slice(Math.max(0, m.index! - 100), m.index! + 100).toLowerCase();
+    let scope: FontFeature['scope'] = 'global';
+    if (/\bbody\b|\bparagraph\b/.test(ctx)) scope = 'body';
+    else if (/\bhead\b|\bdisplay\b|\bhero\b|\btitle\b/.test(ctx)) scope = 'heading';
+    else if (/\bcode\b|\bmono\b/.test(ctx)) scope = 'code';
+
+    // Try to extract description
+    const descRe = new RegExp(`[""\`]${tag}[""\`]\\s*(?:\\(([^)]+)\\)|[:\\-—]\\s*([^\\n,]{3,60}))`, 'i');
+    const descMatch = text.match(descRe);
+    const description = descMatch?.[1]?.trim() || descMatch?.[2]?.trim();
+
+    features.push({ tag, scope, description });
+  }
+  return features;
+}
+
+function extractFontFeaturesForLine(line: string): string[] | undefined {
+  const tags: string[] = [];
+  const re = /[""`''""]([a-z]{2,4}\d{0,2})[""`''""]|`([a-z]{2,4}\d{0,2})`/gi;
+  const KNOWN = new Set(['ss01','ss02','ss03','ss04','ss05','ss06','ss07','ss08','ss09','ss10','ss11','ss12',
+    'tnum','lnum','salt','cv01','cv02','cv03','cv04','cv05','locl','kern','liga','calt','onum','pnum','smcp']);
+  for (const m of line.matchAll(re)) {
+    const tag = (m[1] || m[2]).toLowerCase();
+    if (KNOWN.has(tag) && !tags.includes(tag)) tags.push(tag);
+  }
+  return tags.length > 0 ? tags : undefined;
+}
+
+function parseTypography(section: Section | undefined): DesignSystem['typography'] {
   if (!section) return { hierarchy: [] };
 
   // Extract primary font family from "### Font Family" or "**Primary**: fontName" patterns
   let primaryFont: string | undefined;
+  let secondaryFont: string | undefined;
   const fontFamilyMatch = section.body.match(/\*\*Primary\*\*[:\s]*`?([A-Za-z][\w\s-]+?)`?(?:\s*,|\s*with|\s*\n)/i)
     || section.body.match(/Primary[:\s]+`?([A-Za-z][\w\s-]+?)`?\s*(?:,|with|\n)/i);
   if (fontFamilyMatch) {
     primaryFont = fontFamilyMatch[1].trim();
   }
 
+  // Fallback: first bold name in "### Font Family" subsection — e.g. "- **NouvelR**: The sole typeface"
+  if (!primaryFont) {
+    const fontSubsection = section.body.match(/###\s*Font\s*Family\b([\s\S]*?)(?=###|$)/i);
+    if (fontSubsection) {
+      const boldMatch = fontSubsection[1].match(/\*\*([A-Za-z][\w\s-]{1,30})\*\*/);
+      if (boldMatch) primaryFont = boldMatch[1].trim();
+    }
+  }
+
+  // Secondary font: "**Secondary**: fontName" or "**Monospace**: fontName"
+  const secondaryMatch = section.body.match(/\*\*(?:Secondary|Monospace|Code|Accent)\*\*[:\s]*`?([A-Za-z][\w\s-]+?)`?(?:\s*,|\s*with|\s*\n)/i);
+  if (secondaryMatch) {
+    secondaryFont = secondaryMatch[1].trim();
+  }
+  // Fallback: second bold name in Font Family subsection (skip "No secondary", "OpenType", "Primary")
+  if (!secondaryFont) {
+    const fontSubsection = section.body.match(/###\s*Font\s*Family\b([\s\S]*?)(?=###|$)/i);
+    if (fontSubsection) {
+      const boldNames = [...fontSubsection[1].matchAll(/\*\*([A-Za-z][\w\s-]{1,30})\*\*/g)]
+        .map(m => m[1].trim())
+        .filter(n => !/^(?:Primary|No |OpenType|Font)/i.test(n));
+      if (boldNames.length >= 2) secondaryFont = boldNames[1];
+    }
+  }
+
   // Try table format first
   let rules = parseTypographyTable(section.body);
   if (rules.length === 0) {
     rules = parseTypographyFreeform(section.body);
+  }
+
+  // Extract font features per table row — scan the same table rows
+  const tableLines = section.body.split(/\r?\n/).filter(l => l.includes('|') && !l.match(/^\s*\|[\s-|]+\|\s*$/));
+  if (tableLines.length >= 2) {
+    for (let ri = 1; ri < tableLines.length; ri++) {
+      const line = tableLines[ri];
+      const role = detectTypoRole(line);
+      if (!role) continue;
+      const features = extractFontFeaturesForLine(line);
+      if (features) {
+        const rule = rules.find(r => r.role === role);
+        if (rule && !rule.fontFeatures) rule.fontFeatures = features;
+      }
+    }
   }
 
   // Backfill font family from section-level font family if not set in table
@@ -439,16 +692,129 @@ function parseTypography(section: Section | undefined): { hierarchy: TypographyR
   // Sort by fontSize descending (hero → caption)
   rules.sort((a, b) => b.fontSize - a.fontSize);
 
-  return { hierarchy: rules };
+  // Parse global font features
+  const fontFeatures = parseFontFeatures(section.body);
+
+  return {
+    hierarchy: rules,
+    fontFeatures: fontFeatures.length > 0 ? fontFeatures : undefined,
+    primaryFont,
+    secondaryFont,
+  };
 }
 
 // ---------------------------------------------------------------------------
 //  Component parsing
 // ---------------------------------------------------------------------------
 
+// ─── Shared component helpers ────────────────────────────────
+
+function extractColor(line: string): string | undefined {
+  return extractFirstColor(line) ?? undefined;
+}
+
+function extractPadding(text: string): { paddingX?: number; paddingY?: number } {
+  // "Padding: 8px 16px" or "padding: 12px 32px" or "0px 6px"
+  const m = text.match(/padding[:\s]*([\d.]+)\s*px\s+([\d.]+)\s*px/i);
+  if (m) {
+    const py = parseNumber(m[1]);
+    const px = parseNumber(m[2]);
+    return { paddingY: py != null ? py : undefined, paddingX: px != null ? px : undefined };
+  }
+  const single = text.match(/padding[:\s]*([\d.]+)\s*px/i);
+  if (single) { const v = parseNumber(single[1]); return { paddingX: v != null ? v : undefined, paddingY: v != null ? v : undefined }; }
+  return {};
+}
+
+function extractRadius(text: string): number | undefined {
+  const m = text.match(/radius[:\s]*(\d+)\s*(?:px|%)/i);
+  if (m) return parseNumber(m[1]) ?? undefined;
+  if (/\bpill\b/i.test(text)) return 9999;
+  return undefined;
+}
+
+function parseInteractiveState(text: string, prefix: string): InteractiveState | undefined {
+  // "Hover: #4434d4 background" or "hover: background shifts to rgba(...)"
+  const re = new RegExp(`${prefix}[:\\s]*(.+)`, 'im');
+  const m = text.match(re);
+  if (!m) return undefined;
+  const line = m[1];
+  const state: InteractiveState = {};
+  const bg = extractColor(line);
+  if (bg) state.background = bg;
+  const opMatch = line.match(/opacity[:\s]*([\d.]+)/i);
+  if (opMatch) state.opacity = parseNumber(opMatch[1]) ?? undefined;
+  const scaleMatch = line.match(/scale[:\s]*([\d.]+)/i);
+  if (scaleMatch) state.scale = parseNumber(scaleMatch[1]) ?? undefined;
+  if (Object.keys(state).length === 0) return undefined;
+  return state;
+}
+
+// ─── Button parsing ──────────────────────────────────────────
+
+function parseButtonVariants(text: string): ButtonVariant[] {
+  const variants: ButtonVariant[] = [];
+  // Split on bold names: **Primary Purple**, **Ghost / Outlined**, etc.
+  const variantBlocks = text.split(/\n\s*\*\*/).filter(b => b.trim().length > 0);
+
+  for (const block of variantBlocks) {
+    const nameMatch = block.match(/^([^*\n]+)\*\*/);
+    if (!nameMatch) continue;
+    const rawName = nameMatch[1].trim().toLowerCase();
+
+    // Map to canonical variant name
+    let name = 'primary';
+    if (/ghost|outline/i.test(rawName)) name = 'ghost';
+    else if (/secondary/i.test(rawName)) name = 'secondary';
+    else if (/transparent|tertiary|info/i.test(rawName)) name = 'tertiary';
+    else if (/neutral|muted|disabled/i.test(rawName)) name = 'neutral';
+    else if (/destructive|danger|delete/i.test(rawName)) name = 'destructive';
+    else if (/icon/i.test(rawName)) name = 'icon';
+    else if (/pill/i.test(rawName)) name = 'pill';
+    else if (/super/i.test(rawName)) name = 'super';
+
+    if (variants.some(v => v.name === name)) continue;
+
+    const lines = block.split(/\r?\n/);
+    const variant: ButtonVariant = { name };
+
+    for (const line of lines) {
+      const lower = line.toLowerCase();
+      if (/^-\s*background/i.test(line.trim())) variant.background = extractColor(line);
+      if (/^-\s*text/i.test(line.trim()) && !/text-transform/i.test(lower)) variant.color = extractColor(line);
+      if (/^-\s*border/i.test(line.trim())) variant.borderColor = extractColor(line);
+      if (/radius/i.test(lower)) variant.borderRadius = extractRadius(line);
+      if (/font.*weight|weight/i.test(lower)) {
+        const w = line.match(/(\d{3})/);
+        if (w) variant.fontWeight = parseNumber(w[1]) ?? undefined;
+      }
+      if (/font.*(\d+(?:\.\d+)?)\s*px/i.test(line)) {
+        const fs = line.match(/(\d+(?:\.\d+)?)\s*px/i);
+        if (fs) variant.fontSize = parseNumber(fs[1]) ?? undefined;
+      }
+      if (/uppercase/i.test(lower)) variant.textTransform = 'uppercase';
+      if (/min[- ]?height/i.test(lower)) {
+        const mh = line.match(/(\d+)\s*px/);
+        if (mh) variant.minHeight = parseNumber(mh[1]) ?? undefined;
+      }
+    }
+
+    // Padding
+    const padBlock = lines.join('\n');
+    const pad = extractPadding(padBlock);
+    if (pad.paddingX != null) variant.paddingX = pad.paddingX;
+    if (pad.paddingY != null) variant.paddingY = pad.paddingY;
+
+    // Hover state
+    variant.hover = parseInteractiveState(padBlock, 'hover');
+
+    variants.push(variant);
+  }
+
+  return variants;
+}
+
 function parseButtonSpec(text: string): ButtonSpec | undefined {
-  // Focus only on button-related sections (not badges/pills)
-  // Extract the text between "### Button" and the next "###" section
   let buttonText = text;
   const buttonSectionMatch = text.match(/###\s*Buttons?\b([\s\S]*?)(?=###|$)/i);
   if (buttonSectionMatch) {
@@ -457,7 +823,6 @@ function parseButtonSpec(text: string): ButtonSpec | undefined {
 
   const lower = buttonText.toLowerCase();
 
-  // Border radius — look for explicit "Radius: Npx" in button context
   let borderRadius = 8;
   let style: ButtonStyle = 'rounded';
 
@@ -473,22 +838,137 @@ function parseButtonSpec(text: string): ButtonSpec | undefined {
     style = 'square';
   }
 
-  // Font weight
   let fontWeight: number | undefined;
-  const fwMatch = lower.match(/(?:button|cta).*?(?:weight|wt)[:\s]*(\d{3})/i);
+  const fwMatch = lower.match(/(?:button|cta).*?(?:weight|wt)[:\s]*(\d{3})/i)
+    || lower.match(/(?:font[- ]?weight|weight|wt)[:\s]*(\d{3})/i);
   if (fwMatch) fontWeight = parseNumber(fwMatch[1]) ?? undefined;
 
-  // Text transform
   let textTransform: 'uppercase' | 'none' | undefined;
-  if (/button.*uppercase|uppercase.*button/i.test(lower)) textTransform = 'uppercase';
+  if (/text[- ]?transform[:\s]*uppercase|button.*uppercase|uppercase.*button/i.test(lower)) textTransform = 'uppercase';
+  if (/text[- ]?transform[:\s]*none/i.test(lower)) textTransform = 'none';
 
-  return { borderRadius, style, fontWeight, textTransform };
+  // Parse variants
+  const variants = parseButtonVariants(buttonText);
+
+  return { borderRadius, style, fontWeight, textTransform, variants: variants.length > 0 ? variants : undefined };
 }
+
+// ─── Card parsing ────────────────────────────────────────────
+
+function parseCardSpec(text: string): CardSpec | undefined {
+  const cardSection = text.match(/###\s*Cards?\b([\s\S]*?)(?=###|$)/i);
+  if (!cardSection) return undefined;
+  const block = cardSection[1];
+
+  const card: CardSpec = { borderRadius: 8 };
+  const r = extractRadius(block);
+  if (r != null) card.borderRadius = r;
+
+  const bg = block.match(/background[:\s]*`?([^`\n]+)`?/i);
+  if (bg) card.background = extractColor(bg[1]) ?? undefined;
+
+  const border = block.match(/border[:\s]*`?([^`\n]+)`?/i);
+  if (border) card.borderColor = extractColor(border[1]) ?? undefined;
+
+  const pad = extractPadding(block);
+  if (pad.paddingX != null) card.padding = pad.paddingX;
+
+  // Shadow layer count
+  const shadowMatches = block.match(/shadow/gi);
+  if (shadowMatches) card.shadowLayers = Math.min(shadowMatches.length, 5);
+
+  card.hover = parseInteractiveState(block, 'hover');
+
+  return card;
+}
+
+// ─── Badge parsing ───────────────────────────────────────────
+
+function parseBadgeSpec(text: string): BadgeSpec | undefined {
+  const badgeSection = text.match(/###\s*(?:Badges?|Tags?|Pills?)\b([\s\S]*?)(?=###|$)/i);
+  if (!badgeSection) return undefined;
+  const block = badgeSection[1];
+
+  // Take the first variant block
+  const firstVariant = block.match(/\*\*([^*]+)\*\*([\s\S]*?)(?=\*\*|$)/);
+  const varBlock = firstVariant ? firstVariant[2] : block;
+
+  const badge: BadgeSpec = { borderRadius: extractRadius(varBlock) ?? 4 };
+  const bg = varBlock.match(/background[:\s]*`?([^`\n]+)`?/i);
+  if (bg) badge.background = extractColor(bg[1]) ?? undefined;
+  const color = varBlock.match(/^-\s*text[:\s]*`?([^`\n]+)`?/im);
+  if (color) badge.color = extractColor(color[1]) ?? undefined;
+  const font = varBlock.match(/font[:\s]*(\d+)\s*px/i);
+  if (font) badge.fontSize = parseNumber(font[1]) ?? undefined;
+  const fw = varBlock.match(/weight\s*(\d{3})/i);
+  if (fw) badge.fontWeight = parseNumber(fw[1]) ?? undefined;
+  const pad = extractPadding(varBlock);
+  if (pad.paddingX != null) badge.paddingX = pad.paddingX;
+  if (pad.paddingY != null) badge.paddingY = pad.paddingY;
+
+  return badge;
+}
+
+// ─── Input parsing ───────────────────────────────────────────
+
+function parseInputSpec(text: string): InputSpec | undefined {
+  const inputSection = text.match(/###\s*(?:Inputs?|Forms?)\b([\s\S]*?)(?=###|$)/i);
+  if (!inputSection) return undefined;
+  const block = inputSection[1];
+
+  const input: InputSpec = { borderRadius: extractRadius(block) ?? 4 };
+  const border = block.match(/border[:\s]*`?([^`\n]+)`?/i);
+  if (border) input.borderColor = extractColor(border[1]) ?? undefined;
+  const font = block.match(/(?:font|label|text)[:\s]*.*?(\d+)\s*px/i);
+  if (font) input.fontSize = parseNumber(font[1]) ?? undefined;
+  const height = block.match(/height[:\s]*(\d+)\s*px/i);
+  if (height) input.height = parseNumber(height[1]) ?? undefined;
+  const bg = block.match(/background[:\s]*`?([^`\n]+)`?/i);
+  if (bg) input.background = extractColor(bg[1]) ?? undefined;
+
+  // Focus state
+  const focusBorder = block.match(/focus[:\s]*`?([^`\n]+)`?/i);
+  if (focusBorder) input.focusBorderColor = extractColor(focusBorder[1]) ?? undefined;
+  input.focus = parseInteractiveState(block, 'focus');
+
+  return input;
+}
+
+// ─── Nav parsing ─────────────────────────────────────────────
+
+function parseNavSpec(text: string): NavSpec | undefined {
+  const navSection = text.match(/###\s*Navigation\b([\s\S]*?)(?=###|$)/i);
+  if (!navSection) return undefined;
+  const block = navSection[1];
+
+  const nav: NavSpec = {};
+  const height = block.match(/height[:\s]*(\d+)\s*px/i);
+  if (height) nav.height = parseNumber(height[1]) ?? undefined;
+  const bg = block.match(/background[:\s]*`?([^`\n]+)`?/i);
+  if (bg) nav.background = extractColor(bg[1]) ?? undefined;
+  const font = block.match(/(\d+)\s*px/i);
+  if (font) nav.fontSize = parseNumber(font[1]) ?? undefined;
+  const fw = block.match(/weight\s*(\d{3})/i);
+  if (fw) nav.fontWeight = parseNumber(fw[1]) ?? undefined;
+  if (/underline|border-bottom/i.test(block)) nav.activeIndicator = 'underline';
+  else if (/bold|font-weight.*700/i.test(block)) nav.activeIndicator = 'bold';
+  else if (/dot\b/i.test(block)) nav.activeIndicator = 'dot';
+
+  return nav;
+}
+
+// ─── Unified component parser ────────────────────────────────
 
 function parseComponents(section: Section | undefined): DesignSystemComponents {
   if (!section) return {};
-  const button = parseButtonSpec(section.body);
-  return { button };
+  const text = section.body;
+  return {
+    button: parseButtonSpec(text),
+    card: parseCardSpec(text),
+    badge: parseBadgeSpec(text),
+    input: parseInputSpec(text),
+    nav: parseNavSpec(text),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -504,8 +984,8 @@ function parseLayout(section: Section | undefined): DesignSystemLayout {
 
   const text = section.body;
 
-  // Spacing unit
-  const spMatch = text.match(/(?:spacing|grid|base)[:\s]*(\d+)\s*px/i);
+  // Spacing unit: "spacing: 8px" or "unit: 8" (INode-native)
+  const spMatch = text.match(/(?:spacing|grid|base|unit)[:\s]*(\d+)\s*(?:px)?/i);
   if (spMatch) defaults.spacingUnit = parseNumber(spMatch[1]) ?? 8;
 
   // Max width — also matches "approximately 1080px", "~1200px", "around 1200px"
@@ -513,11 +993,38 @@ function parseLayout(section: Section | undefined): DesignSystemLayout {
   if (mwMatch) defaults.maxWidth = parseNumber(mwMatch[1]) ?? undefined;
 
   // Section spacing
-  const ssMatch = text.match(/(?:section[- ]?spacing|section[- ]?gap|vertical[- ]?rhythm)[:\s]*(\d+)\s*px/i);
+  const ssMatch = text.match(/(?:section[- ]?spacing|section[- ]?gap|vertical[- ]?rhythm)[:\s]*(\d+)\s*(?:px)?[+]?/i);
   if (ssMatch) defaults.sectionSpacing = parseNumber(ssMatch[1]) ?? undefined;
 
-  // Border radius scale: "0, 2, 4, 8, 12, 16, 9999" or similar
-  const brScaleMatch = text.match(/(?:border[- ]?radius|radius)[- ]?scale[:\s]*([[\d\s,px]+)/i);
+  // Border radius scale: look for scale within radius context
+  // Match "radius scale: 0 4 8 12" or lines with "button: N  card: N  badge: N"
+  const lines = text.split(/\r?\n/);
+  let inRadiusContext = false;
+  for (const line of lines) {
+    if (/radius/i.test(line)) inRadiusContext = true;
+    if (/spacing|typography|theme/i.test(line)) inRadiusContext = false;
+
+    if (inRadiusContext) {
+      // "scale: 0  4  8  12  16  9999"
+      const scaleMatch = line.match(/^scale[:\s]*([\d\s,]+)/i);
+      if (scaleMatch) {
+        const nums = scaleMatch[1].match(/\d+/g);
+        if (nums && nums.length >= 3) {
+          defaults.borderRadiusScale = nums.map(n => parseInt(n, 10)).filter(n => Number.isFinite(n));
+        }
+      }
+      // "button: 8  card: 12  badge: 9999"
+      const componentRadii = [...line.matchAll(/(?:button|card|badge|input|image)[:\s]*(\d+)/gi)];
+      if (componentRadii.length >= 2) {
+        const vals = new Set(defaults.borderRadiusScale);
+        for (const m of componentRadii) vals.add(parseInt(m[1], 10));
+        defaults.borderRadiusScale = [...vals].sort((a, b) => a - b);
+      }
+    }
+  }
+
+  // Legacy: border-radius-scale: 0, 2, 4, 8
+  const brScaleMatch = text.match(/(?:border[- ]?radius)[- ]?scale[:\s]*([\d\s,px]+)/i);
   if (brScaleMatch) {
     const nums = brScaleMatch[1].match(/\d+/g);
     if (nums && nums.length >= 3) {
@@ -535,17 +1042,38 @@ function parseLayout(section: Section | undefined): DesignSystemLayout {
         if (n) radiusValues.add(parseInt(n[1], 10));
       }
     }
-    // Also extract from "N px" patterns near "radius" keyword in same paragraph
+    // Extract from lines near "radius" keyword — including lines AFTER a radius heading
     const lines = text.split(/\r?\n/);
+    let inRadiusBlock = false;
     for (const line of lines) {
-      if (/radius/i.test(line)) {
-        const pxValues = [...line.matchAll(/(\d+)\s*px/g)].map(m => parseInt(m[1], 10));
-        for (const v of pxValues) if (v <= 100) radiusValues.add(v);
+      if (/radius/i.test(line)) inRadiusBlock = true;
+      else if (/^#{2,3}\s/.test(line) || line.trim() === '') inRadiusBlock = line.trim() === '' ? inRadiusBlock : false;
+
+      if (inRadiusBlock || /radius/i.test(line)) {
+        const pxValues = [...line.matchAll(/(\d+)\s*(?:px|%)/g)].map(m => parseInt(m[1], 10));
+        for (const v of pxValues) if (v <= 100 || v === 9999) radiusValues.add(v);
       }
     }
     if (radiusValues.size > defaults.borderRadiusScale.length) {
       defaults.borderRadiusScale = [...radiusValues].sort((a, b) => a - b);
     }
+  }
+
+  // Spacing scale: "| space-1 | 4px |" or "scale: 4, 8, 12, 16, 24, 32, 48, 64"
+  const spacingScale = new Set<number>();
+  const scaleLineMatch = text.match(/(?:spacing\s*)?scale[:\s]*([\d\s,px]+)/i);
+  if (scaleLineMatch) {
+    const nums = scaleLineMatch[1].match(/\d+/g);
+    if (nums) for (const n of nums) spacingScale.add(parseInt(n, 10));
+  }
+  // Table rows: "| space-N | Npx |" or "| token | value |"
+  for (const line of lines) {
+    if (!line.includes('|')) continue;
+    const spTableMatch = line.match(/space[- ]?\d+\s*\|\s*(\d+)\s*px/i);
+    if (spTableMatch) spacingScale.add(parseInt(spTableMatch[1], 10));
+  }
+  if (spacingScale.size >= 3) {
+    defaults.spacingScale = [...spacingScale].sort((a, b) => a - b);
   }
 
   return defaults;
@@ -662,9 +1190,12 @@ function parseResponsive(section: Section | undefined): DesignSystemResponsive {
 // ---------------------------------------------------------------------------
 
 function parseShadowValue(str: string): ShadowLayer | null {
+  const isInset = /\binset\b/i.test(str);
+  const clean = str.replace(/\binset\b/gi, '').trim();
+
   // CSS box-shadow can be: "rgba(...) 0px 4px 8px 0px" OR "0px 4px 8px 0px rgba(...)"
   // Try color-first format (most common in DESIGN.md files)
-  const colorFirst = str.match(/(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8})\s+([-\d.]+)\s*px?\s+([-\d.]+)\s*px?\s+([-\d.]+)\s*px?(?:\s+([-\d.]+)\s*px?)?/i);
+  const colorFirst = clean.match(/(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8})\s+([-\d.]+)\s*px?\s+([-\d.]+)\s*px?\s+([-\d.]+)\s*px?(?:\s+([-\d.]+)\s*px?)?/i);
   if (colorFirst) {
     return {
       color: colorFirst[1],
@@ -672,10 +1203,11 @@ function parseShadowValue(str: string): ShadowLayer | null {
       offsetY: parseNumber(colorFirst[3]) ?? 0,
       blur: parseNumber(colorFirst[4]) ?? 0,
       spread: parseNumber(colorFirst[5] ?? '0') ?? 0,
+      ...(isInset ? { inset: true } : {}),
     };
   }
   // Try offsets-first format
-  const offsetFirst = str.match(/([-\d.]+)\s*px?\s+([-\d.]+)\s*px?\s+([-\d.]+)\s*px?(?:\s+([-\d.]+)\s*px?)?\s+(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8})/i);
+  const offsetFirst = clean.match(/([-\d.]+)\s*px?\s+([-\d.]+)\s*px?\s+([-\d.]+)\s*px?(?:\s+([-\d.]+)\s*px?)?\s+(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8})/i);
   if (offsetFirst) {
     return {
       offsetX: parseNumber(offsetFirst[1]) ?? 0,
@@ -683,6 +1215,7 @@ function parseShadowValue(str: string): ShadowLayer | null {
       blur: parseNumber(offsetFirst[3]) ?? 0,
       spread: parseNumber(offsetFirst[4] ?? '0') ?? 0,
       color: offsetFirst[5],
+      ...(isInset ? { inset: true } : {}),
     };
   }
   return null;
@@ -754,19 +1287,67 @@ function extractBrand(md: string): string {
 export function parseDesignMd(markdown: string): DesignSystem {
   const sections = splitSections(markdown);
 
-  const colorSection = findSection(sections, 'color', 'palette');
-  const typoSection = findSection(sections, 'typography', 'type', 'font');
-  const componentSection = findSection(sections, 'component', 'styling', 'button', 'element');
-  const layoutSection = findSection(sections, 'layout', 'spacing', 'grid');
+  // Fallback: if standard section headers are missing/unusual, parse from full markdown body.
+  const fallbackSection: Section = { title: 'full-document', body: markdown };
+  // Find color section — careful: "Visual Theme & Atmosphere" is NOT the color section
+  const colorSection = findSection(sections, 'color', 'palette')
+    ?? sections.find(s => s.title.toLowerCase() === 'theme')  // exact "Theme" (our format)
+    ?? fallbackSection;
+  const typoSection = findSection(sections, 'typography', 'type', 'font') ?? fallbackSection;
+  const componentSection = findSection(sections, 'component', 'styling', 'button', 'element') ?? fallbackSection;
+  const layoutSection = findSection(sections, 'layout', 'spacing', 'grid') ?? fallbackSection;
+  const radiusSection = findSection(sections, 'radius', 'corner');
   const depthSection = findSection(sections, 'depth', 'elevation', 'shadow');
   const responsiveSection = findSection(sections, 'responsive', 'breakpoint', 'adaptive');
+  const rulesSection = findSection(sections, 'rules', 'do', 'don');
+
+  // Parse layout, then overlay radius if separate section exists
+  const parsedLayout = parseLayout(layoutSection);
+  if (radiusSection) {
+    const radiusText = radiusSection.body;
+    // "scale: 0  4  8  12  16  9999"
+    const scaleMatch = radiusText.match(/scale[:\s]*([\d\s,]+)/i);
+    if (scaleMatch) {
+      const nums = scaleMatch[1].match(/\d+/g);
+      if (nums && nums.length >= 2) {
+        parsedLayout.borderRadiusScale = nums.map(n => parseInt(n, 10)).filter(n => Number.isFinite(n));
+      }
+    }
+    // "button: 8  card: 12  badge: 9999" — add to scale
+    const componentRadii = [...radiusText.matchAll(/(?:button|card|badge|input|image)[:\s]*(\d+)/gi)];
+    if (componentRadii.length > 0) {
+      const vals = new Set(parsedLayout.borderRadiusScale);
+      for (const m of componentRadii) vals.add(parseInt(m[1], 10));
+      parsedLayout.borderRadiusScale = [...vals].sort((a, b) => a - b);
+    }
+  }
+
+  // Extract section spacing from responsive section if not in layout
+  if (!parsedLayout.sectionSpacing && responsiveSection) {
+    const ssMatch = responsiveSection.body.match(/section[- ]?spacing[:\s]*(\d+)\s*(?:px)?[+]?/i);
+    if (ssMatch) parsedLayout.sectionSpacing = parseNumber(ssMatch[1]) ?? undefined;
+  }
+
+  const parsedColors = parseColors(colorSection);
+
+  // If gradients not found in color section, scan component section and full doc
+  if (!parsedColors.gradients || parsedColors.gradients.size === 0) {
+    for (const fallbackSec of [componentSection, fallbackSection]) {
+      if (!fallbackSec) continue;
+      const gradColors = parseColors(fallbackSec);
+      if (gradColors.gradients && gradColors.gradients.size > 0) {
+        parsedColors.gradients = gradColors.gradients;
+        break;
+      }
+    }
+  }
 
   return {
     brand: extractBrand(markdown),
-    colors: parseColors(colorSection),
+    colors: parsedColors,
     typography: parseTypography(typoSection),
     components: parseComponents(componentSection),
-    layout: parseLayout(layoutSection),
+    layout: parsedLayout,
     responsive: parseResponsive(responsiveSection),
     depth: parseDepth(depthSection),
     rawMarkdown: markdown,

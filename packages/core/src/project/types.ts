@@ -43,8 +43,12 @@ export interface SceneEntry {
   height: number;
   /** Node count */
   nodes?: number;
+  /** Scene group for organization (e.g. "site", "app", "email", "social") */
+  group?: string;
   /** Arbitrary tags for filtering (e.g. "mobile", "dark") */
   tags?: string[];
+  /** Source HTML path relative to .reframe/ (e.g. "src/home.html") */
+  source?: string;
   /** ISO date of creation */
   created: string;
   /** ISO date of last modification */
@@ -57,9 +61,13 @@ export interface SceneEntry {
 export type ProjectEvent =
   | { type: 'scene:saved'; sceneId: string; entry: SceneEntry }
   | { type: 'scene:deleted'; sceneId: string; slug?: string }
+  /** Session graph changed (edit, compile, or Studio push). Studio pulls when the tab matches sceneId. */
+  | { type: 'scene:session-changed'; sceneId: string; revision: number }
   | { type: 'project:opened'; manifest: ProjectManifest }
   | { type: 'project:updated'; manifest: ProjectManifest }
-  | { type: 'design-system:updated'; path: string };
+  | { type: 'design-system:updated'; path: string }
+  /** Snapshot of MCP session list (HTTP sidecar). Not persisted to disk. */
+  | { type: 'session:scenes'; scenes: unknown[] };
 
 // ─── Helpers ─────────────────────────────────────────────────
 

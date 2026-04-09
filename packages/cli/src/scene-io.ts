@@ -8,7 +8,8 @@
 import * as fs from 'fs';
 import { SceneGraph } from '../../core/src/engine/scene-graph.js';
 import {
-  serializeSceneNode, deserializeToGraph,
+  serializeSceneNode,
+  deserializeScene,
   migrateScene, migrateSceneJSON,
   SERIALIZE_VERSION,
   type INodeJSON, type SceneJSON,
@@ -17,6 +18,7 @@ import {
 // Re-export INodeJSON as SceneNodeJson for backward compat
 export type SceneNodeJson = INodeJSON;
 export type SceneJson = SceneJSON;
+export { SERIALIZE_VERSION };
 
 export function loadScene(filePath: string): SceneJSON {
   const raw = fs.readFileSync(filePath, 'utf-8');
@@ -32,6 +34,15 @@ export function saveScene(scene: SceneJSON, filePath: string): void {
   // Ensure version is set
   scene.version = scene.version ?? SERIALIZE_VERSION;
   fs.writeFileSync(filePath, JSON.stringify(scene, null, 2), 'utf-8');
+}
+
+/**
+ * Build a SceneGraph from a migrated SceneJSON envelope (e.g. {@link loadScene}).
+ * Restores embedded images the same way as core deserialize.
+ */
+export function graphFromSceneEnvelope(scene: SceneJSON): { graph: SceneGraph; rootId: string } {
+  const { graph, rootId } = deserializeScene(scene);
+  return { graph, rootId };
 }
 
 /**

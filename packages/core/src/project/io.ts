@@ -6,11 +6,13 @@
  *   .reframe/project.json          — manifest
  *   .reframe/design.md             — optional design system
  *   .reframe/scenes/<id>.scene.json — SceneJSON v2
+ *
+ * Scene JSON contract: {@link ../spec/scene-envelope.ts}
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { serializeGraph, deserializeScene, SERIALIZE_VERSION } from '../serialize.js';
+import { serializeGraph, deserializeScene, migrateSceneJSON, SERIALIZE_VERSION } from '../serialize.js';
 import type { SceneGraph } from '../engine/scene-graph.js';
 import type { ITimeline } from '../animation/types.js';
 import type { SceneJSON } from '../serialize.js';
@@ -91,6 +93,8 @@ export function saveScene(
     name?: string;
     nodes?: number;
     tags?: string[];
+    group?: string;
+    source?: string;
     timeline?: ITimeline;
   },
 ): SceneEntry {
@@ -122,8 +126,12 @@ export function saveScene(
     entry.nodes = options?.nodes;
     entry.updated = new Date().toISOString();
     if (options?.tags) entry.tags = options.tags;
+    if (options?.group) entry.group = options.group;
+    if (options?.source) entry.source = options.source;
   } else {
     entry = createSceneEntry(slug, name, width, height, { nodes: options?.nodes, tags: options?.tags });
+    if (options?.group) entry.group = options.group;
+    if (options?.source) entry.source = options.source;
     manifest.scenes.push(entry);
   }
 
@@ -161,14 +169,15 @@ export function loadSceneFromProject(
   }
 
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as SceneJSON;
-  const { graph, rootId, timeline } = deserializeScene(raw);
+  const migrated = migrateSceneJSON(raw);
+  const { graph, rootId, timeline } = deserializeScene(migrated);
   return { graph, rootId, timeline, entry };
 }
 
-/** List all scenes in the project. */
+/** List all scenes in the project (only those with files on disk). */
 export function listScenes(projectDir: string): SceneEntry[] {
   const manifest = loadProject(projectDir);
-  return manifest.scenes;
+  return manifest.scenes.filter(s => fs.existsSync(sceneFilePath(projectDir, s)));
 }
 
 /** Delete a scene from the project by slug or legacy ID. */
@@ -279,7 +288,8 @@ export function loadAllScenes(projectDir: string): Array<{
       const filePath = sceneFilePath(projectDir, entry);
       if (!fs.existsSync(filePath)) continue;
       const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as SceneJSON;
-      const { graph, rootId, timeline } = deserializeScene(raw);
+      const migrated = migrateSceneJSON(raw);
+      const { graph, rootId, timeline } = deserializeScene(migrated);
       results.push({ graph, rootId, timeline, entry });
     } catch {
       // Skip corrupted scenes

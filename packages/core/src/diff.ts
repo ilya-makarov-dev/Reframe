@@ -40,6 +40,11 @@ export interface DiffResult {
   summary: { added: number; removed: number; modified: number; moved: number };
 }
 
+export interface FormatDiffOptions {
+  /** `summary` = counts only (one line); default full per-entry lines */
+  detail?: 'full' | 'summary';
+}
+
 // ─── Property comparison ──────────────────────────────────────
 
 /** INode properties to compare (value properties, no methods/tree) */
@@ -155,6 +160,11 @@ export function diffTrees(a: INode, b: INode, options?: DiffOptions): DiffResult
   const mapB = flattenTree(b);
   const matches = buildMatches(mapA, mapB, strategy);
 
+  // Force-match roots — they're always the same node even if renamed
+  if (!matches.has(a.id)) {
+    matches.set(a.id, b.id);
+  }
+
   const entries: DiffEntry[] = [];
   const matchedBIds = new Set(matches.values());
 
@@ -189,8 +199,13 @@ export function diffTrees(a: INode, b: INode, options?: DiffOptions): DiffResult
     const flatA = mapA.get(idA)!;
     const flatB = mapB.get(idB)!;
 
-    // Check if moved (parent changed)
-    const moved = flatA.parentId !== null && flatB.parentId !== null && flatA.parentId !== flatB.parentId;
+    // Check if moved (parent changed) — compare via matched pairs, not raw IDs.
+    // If parentA is matched to parentB, the node is NOT moved even though IDs differ.
+    let moved = false;
+    if (flatA.parentId !== null && flatB.parentId !== null) {
+      const matchedParentB = matches.get(flatA.parentId);
+      moved = matchedParentB !== flatB.parentId;
+    }
 
     // Compare properties
     const changes: PropertyChange[] = [];
@@ -247,12 +262,17 @@ function formatValue(val: unknown): string {
 }
 
 /** Format a DiffResult as a human-readable string. */
-export function formatDiff(result: DiffResult): string {
+export function formatDiff(result: DiffResult, options?: FormatDiffOptions): string {
   if (result.entries.length === 0) return 'No differences found.';
 
-  const lines: string[] = [];
   const { summary } = result;
-  lines.push(`${summary.added} added, ${summary.removed} removed, ${summary.modified} modified, ${summary.moved} moved\n`);
+  const head = `${summary.added} added, ${summary.removed} removed, ${summary.modified} modified, ${summary.moved} moved`;
+  if (options?.detail === 'summary') {
+    return `${head}\n(per-entry lines omitted — use diffTextDetail: "full" or diffStructured)`;
+  }
+
+  const lines: string[] = [];
+  lines.push(`${head}\n`);
 
   for (const e of result.entries) {
     switch (e.type) {

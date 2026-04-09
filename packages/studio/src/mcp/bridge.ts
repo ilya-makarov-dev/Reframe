@@ -62,6 +62,9 @@ class McpBridge {
     const store = useProjectStore.getState();
     if (store.connecting) return;
 
+    // Stale mcp-session-id causes POST /mcp → 404 Session not found on a fresh handshake.
+    this.sessionId = null;
+
     store.setConnecting(true);
     store.setError(null);
 
@@ -97,7 +100,7 @@ class McpBridge {
 
       store.setConnected(true);
     } catch (err: any) {
-      store.setError(err.message ?? 'Connection failed');
+      store.setError(friendlyMcpConnectError(err?.message ?? 'Connection failed'));
       store.setConnected(false);
       this.scheduleReconnect();
     } finally {
@@ -198,7 +201,8 @@ class McpBridge {
     if (sid) this.sessionId = sid;
 
     if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      const body = await resp.text();
+      throw new Error(friendlyMcpHttpError(resp.status, body));
     }
 
     const contentType = resp.headers.get('content-type') ?? '';
@@ -259,6 +263,47 @@ class McpBridge {
       this.connect();
     }, this.reconnectDelay);
   }
+}
+
+// ─── User-facing errors (no raw JSON in UI) ────────────────
+
+function friendlyMcpHttpError(status: number, body: string): string {
+  if (status === 404) {
+    try {
+      const j = JSON.parse(body) as { error?: string; code?: number };
+      if (j.code === -32000 || /session not found/i.test(String(j.error ?? ''))) {
+        return 'MCP_SESSION_EXPIRED';
+      }
+    } catch {
+      /* ignore */
+    }
+    return 'HTTP_404';
+  }
+  if (status >= 500) return 'HTTP_5XX';
+  return `HTTP_${status}`;
+}
+
+function friendlyMcpConnectError(message: string): string {
+  const m = message.trim();
+  if (m === 'MCP_SESSION_EXPIRED' || /session not found/i.test(m)) {
+    return 'Session expired — reload the page or tap Connect again.';
+  }
+  if (m === 'HTTP_404' || /^HTTP 404\b/.test(m)) {
+    return 'Nothing answered at this URL. Check the port and that reframe is running.';
+  }
+  if (m === 'HTTP_5XX' || /^HTTP 5\d\d\b/.test(m)) {
+    return 'Server error — try restarting the reframe sidecar.';
+  }
+  if (/^HTTP_\d+/.test(m) || /^HTTP \d{3}/.test(m)) {
+    return 'Could not start an MCP session. Check the sidecar URL.';
+  }
+  if (/failed to fetch|networkerror|network when attempting to fetch|load failed|econnrefused/i.test(m)) {
+    return 'No server — start reframe with HTTP (e.g. port 4100) or adjust the URL in settings.';
+  }
+  if (m.length > 200) {
+    return 'Could not connect to MCP.';
+  }
+  return m;
 }
 
 // ─── Singleton ───────────────────────────────────────────────

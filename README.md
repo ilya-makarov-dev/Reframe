@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/node-%3E%3D18-43853d?style=flat-square" alt="node">
   <img src="https://img.shields.io/badge/MCP-6_tools-ff6b6b?style=flat-square" alt="MCP tools">
-  <img src="https://img.shields.io/badge/audit-19_rules-10b981?style=flat-square" alt="audit rules">
+  <img src="https://img.shields.io/badge/audit-23_rules-10b981?style=flat-square" alt="audit rules">
   <img src="https://img.shields.io/badge/exports-7_formats-f59e0b?style=flat-square" alt="export formats">
   <img src="https://img.shields.io/badge/brand-.md_guides-6366f1?style=flat-square" alt="brand guides">
 </p>
@@ -26,7 +26,7 @@
 
 **🚀 v0.1.0 — Early Public Release**
 
-The core engine is production-tested: HTML import, 19-rule audit with auto-fix, semantic resize, and 7 export formats all work. MCP pipeline powers AI agents in Claude Code, Cursor, and any MCP-compatible client. Studio is experimental. We're actively developing and welcome contributors.
+The core engine is production-tested: HTML import, 23-rule audit with auto-fix, semantic resize, and 7 export formats all work. MCP pipeline powers AI agents in Claude Code, Cursor, and any MCP-compatible client. 60+ brand design systems available via [`getdesign`](https://www.npmjs.com/package/getdesign) npm. Studio is experimental. We're actively developing and welcome contributors.
 
 </td>
 </tr>
@@ -40,42 +40,43 @@ The core engine is production-tested: HTML import, 19-rule audit with auto-fix, 
 |:---:|:---:|:---:|
 | **🎨 Design AST** | **🤖 AI-Native Pipeline** | **⚡ Multi-Target Output** |
 | INode — 80+ properties. Universal format for visual design. Open, portable, version-controlled. | 6 MCP tools. AI writes HTML, Reframe validates, adapts, exports. Works with any AI agent. | One design → HTML, React, SVG, PNG, Lottie, Animated HTML, Multi-page Site. |
-| **✅ 19-Rule Audit** | **🔄 Deterministic Resize** | **👨‍🎨 Studio Editor** |
-| Contrast, accessibility, brand compliance. Auto-fix most issues. Put in CI — bad designs don't ship. | Not scaling — re-layout. Classifies elements, remaps to guide templates. Milliseconds. No AI. | Open what AI created, edit visually — drag, resize, tweak properties. Same INode, same pipeline. |
+| **✅ 23-Rule Audit** | **🔄 Deterministic Resize** | **👨‍🎨 Studio Editor** |
+| Contrast, accessibility, brand compliance, component specs, font features, spacing scale. Auto-fix most issues. Put in CI. | Not scaling — re-layout. Classifies elements, remaps to guide templates. Milliseconds. No AI. | Open what AI created, edit visually — drag, resize, tweak properties. Same INode, same pipeline. |
 
 ---
 
 ## What is Reframe?
 
-Reframe does for design what compilers do for code. An intermediate representation (**INode**), a validation layer (**19 audit rules**), an adaptation engine (**semantic resize**), and multi-target output.
+Reframe does for design what compilers do for code. An intermediate representation (**INode**), a validation layer (**23 audit rules**), an adaptation engine (**semantic resize**), and multi-target output.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                                                             │
-│   IMPORT                                                    │
-│   ──────                                                    │
-│   AI Agent ─────→ HTML/CSS ───────────┐                     │
-│   Designer ─────→ Studio (visual) ────┤                     │
-│   Any App ──────→ adapter / API ──────┤                     │
-│                                      ▼                      │
-│                          ┌────────────────────┐             │
-│                          │                    │             │
-│                          │    INode AST       │             │
-│                          │    SceneGraph      │             │
-│                          │                    │             │
-│                          │    @reframe/ui     │             │
-│                          │    120 functions   │             │
-│                          │    to build INode  │             │
-│                          │    programmatically│             │
-│                          │                    │             │
-│                          └─────────┬──────────┘             │
+│   BRAND                                                     │
+│   ─────                                                     │
+│   getdesign npm ──→ DESIGN.md ────────┐  60+ brands         │
+│   Your own ───────→ DESIGN.md ────────┤  or write yours     │
+│   Extract URL ────→ DESIGN.md ────────┘                     │
+│                         │                                   │
+│                         ▼                                   │
+│               ┌──────────────────┐                          │
+│               │  Design System   │  colors · typography     │
+│               │  Parser + Tokens │  font features · shadows │
+│               │  100+ CSS vars   │  component specs         │
+│               └────────┬─────────┘  spacing scale           │
+│                        │                                    │
+│   IMPORT               │                                    │
+│   ──────               │                                    │
+│   AI Agent ─── HTML ───┤                                    │
+│   Designer ─── Studio ─┤──→ INode AST (SceneGraph)          │
+│   Any App ──── API ────┘    @reframe/ui · 120 functions     │
 │                                    │                        │
 │   ENGINE                           │                        │
 │   ──────               ┌───────────┼───────────┐           │
 │                        ▼           ▼           ▼           │
 │                   ┌─────────┐ ┌─────────┐ ┌─────────┐     │
 │                   │  Audit  │ │ Resize  │ │ Tokens  │     │
-│                   │19 rules │ │semantic │ │ design  │     │
+│                   │23 rules │ │semantic │ │ design  │     │
 │                   │auto-fix │ │re-layout│ │ system  │     │
 │                   └────┬────┘ └────┬────┘ └────┬────┘     │
 │                        └───────────┼───────────┘           │
@@ -105,7 +106,7 @@ Design has no compiler. Code has GCC, ESLint, Prettier, TypeScript — tools tha
 
 ```
   PARSE        any design → structured data (INode AST)
-  VALIDATE     19 rules: contrast, accessibility, brand. Auto-fix.
+  VALIDATE     23 rules: contrast, accessibility, brand, component specs. Auto-fix.
   TRANSFORM    resize, tokens, dark mode, responsive
   OUTPUT       → HTML, React, SVG, PNG, Lottie, Animated, Site
 ```
@@ -118,15 +119,21 @@ Design has no compiler. Code has GCC, ESLint, Prettier, TypeScript — tools tha
 
 ```
   ┌──────────────────────────────────────────────────────────┐
+  │ 0. BRAND                                                 │
+  │    getdesign npm ─→ DESIGN.md (60+ brands)               │
+  │    Custom ────────→ DESIGN.md.example template            │
+  │    Extract URL ───→ reverse-engineer any site             │
+  │                                                          │
   │ 1. IMPORT                                                │
   │    AI Agent ──→ HTML/CSS ───┐                            │
-  │    Designer ──→ Studio ─────┤──→ INode AST              │
-  │    Any App ───→ adapter ────┘    (80+ properties)        │
+  │    Developer ─→ @reframe/ui┤──→ INode AST               │
+  │    Designer ──→ Studio ─────┤    (80+ properties)        │
+  │    Any App ───→ adapter ────┘                            │
   │                                                          │
   │ 2. ENGINE                                                │
-  │    Audit ···· 19 rules, auto-fix                         │
+  │    Audit ···· 23 rules, auto-fix                         │
   │    Resize ··· semantic re-layout                         │
-  │    Tokens ··· DESIGN.md → CSS vars, dark mode            │
+  │    Tokens ··· DESIGN.md → 100+ CSS vars, dark mode       │
   │                                                          │
   │ 3. EXPORT                                                │
   │    .reframe/exports/*.html ······ static pages           │
@@ -160,14 +167,16 @@ Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline):
 **The pipeline:**
 
 ```
-1. reframe_design({ brand: "stripe" })                        → load brand
+1. reframe_design({ action: "list" })                          → browse 60+ brand design systems
+   reframe_design({ action: "extract", brand: "stripe" })      → full DESIGN.md → .reframe/design.md
+   (or url: "https://..." to extract from any website)
 2. reframe_compile({ html: "<div>...</div>" })                 → AI writes HTML → INode
-3. reframe_inspect({ sceneId: "s1" })                          → audit (REQUIRED)
+3. reframe_inspect({ sceneId: "s1" })                          → 23-rule audit (REQUIRED)
 4. reframe_edit({ operations: [{ op: "update", ... }] })       → fix issues
 5. reframe_export({ sceneId: "s1", format: "site" })           → export
 ```
 
-AI writes creative HTML. Reframe handles validation, brand compliance, and multi-format export.
+AI writes creative HTML using brand values from DESIGN.md. Reframe validates against 23 audit rules (colors, typography, font features, component specs, spacing scale, interactive states), auto-fixes issues, and exports to any format.
 
 ### For Developers — @reframe/ui
 
@@ -245,6 +254,7 @@ interface INode {
   fontSize, fontWeight: number;
   fontFamily: string;
   lineHeight, letterSpacing: number;
+  fontFeatureSettings: string[]; // OpenType: ['ss01', 'tnum']
   styleRuns: StyleRun[];       // rich text
 
   // Behavior
@@ -275,12 +285,24 @@ compile → inspect → [edit → inspect]* → export → user reviews
 
 | Tool | Purpose |
 |------|---------|
-| `reframe_design` | Load brand or extract from URL/HTML. Sets session context |
-| `reframe_compile` | AI writes HTML → import to INode. Auto-audit + auto-fix |
-| `reframe_inspect` | Tree + 19-rule audit + **actionable fix suggestions** |
+| `reframe_design` | `list` 60+ brands, `extract` by slug/URL/HTML → DESIGN.md, `prompt` for AI context |
+| `reframe_compile` | AI writes HTML → import to INode. 23-rule audit + auto-fix |
+| `reframe_inspect` | Tree + 23-rule audit + fix hints; `diffWith` diff; `diffTextDetail` / `diffStructuredDetail` can shorten text or 2nd JSON block to summary-only counts |
 | `reframe_edit` | Fix issues — inspect tells you exactly what to change |
 | `reframe_export` | Preview: html, react, svg, lottie, animated_html, site |
 | `reframe_project` | Save/load. Scenes persist to `.reframe/scenes/` |
+
+### CLI vs MCP (quick map)
+
+| Flow | CLI (`reframe` in packages/cli) | MCP (6 tools above) |
+|------|----------------------------------|----------------------|
+| Import / build | `reframe build`, configs | `reframe_compile`, `reframe_edit` |
+| Audit / tree | `reframe test`, export-svg | `reframe_inspect` |
+| Export | `reframe build` outputs | `reframe_export` |
+| Brand / tokens | project + `.reframe/design.md` | `reframe_design`, `defineTokens` in edit |
+| Persistence | `.reframe/` on disk | `reframe_project` + session store |
+
+Same engine (`packages/core`): MCP tools call into compile, audit, serialize, exporters — matching the CLI where they share code paths.
 
 Export is not the final step — it's a **preview**. User sees the result, gives feedback, AI edits, inspects, exports again. The loop continues until the user is happy.
 
@@ -305,42 +327,51 @@ reframe_export({ sceneId: "s1", format: "site" })
 
 ## DESIGN.md — Brand as Code
 
-Not a config file — a **design philosophy** in markdown. Teaches AI agents and humans how to design in your brand.
+Not a config file — a **design philosophy** in prose. Teaches AI agents how to design in your brand. Teaches the 23-rule audit engine what to enforce.
 
-```markdown
-# Stripe
+60+ curated brand design systems are available via [`getdesign`](https://www.npmjs.com/package/getdesign) npm package — load any of them with one MCP call:
 
-## Visual Atmosphere
-Weight 300 at display sizes is Stripe's most distinctive choice.
-The text doesn't need to shout.
-
-## Colors
-| Role | Value |
-|------|-------|
-| primary | #533afd |
-| text | #061b31 |
-
-## Do's and Don'ts
-- DO use weight 300 for headlines — lightness is luxury
-- DON'T use border-radius > 8px — conservative is intentional
-- DO use blue-tinted shadows — rgba(50,50,93,0.25)
+```
+reframe_design({ action: "list" })                    → browse all brands
+reframe_design({ action: "extract", brand: "stripe" }) → full 300-line DESIGN.md
 ```
 
-Pre-built brand guides available. Extract from any website or load by name.
+Each DESIGN.md covers **9 sections**: Visual Atmosphere, Color Palette, Typography Rules (with OpenType features), Component Stylings (button variants, cards, badges, inputs, nav), Layout Principles (spacing scale, radius scale), Depth & Elevation (multi-layer shadows), Do's and Don'ts, Responsive Behavior, Agent Prompt Guide.
 
-Extract from any website: `reframe_design({ url: "https://example.com" })`
+```markdown
+## 3. Typography Rules
+### Font Family
+- **Primary**: `sohne-var`, fallbacks: `SF Pro Display`
+- **OpenType Features**: `"ss01"` on all text; `"tnum"` for tabular numerals
+
+### Hierarchy
+| Role | Size | Weight | Line Height | Letter Spacing | Features |
+|------|------|--------|-------------|----------------|----------|
+| Display Hero | 56px | 300 | 1.03 | -1.4px | ss01 |
+| Body | 16px | 300 | 1.40 | normal | ss01 |
+
+## 4. Component Stylings
+### Buttons
+**Primary** — bg `#533afd`, text `#fff`, radius 4px, hover `#4434d4`
+**Ghost** — transparent, border `#b9b9f9`, hover `rgba(83,58,253,0.05)`
+```
+
+The parser extracts everything: colors, typography with font features, button variants with hover states, card/badge/input/nav specs, spacing scale, gradients, multi-layer shadows. The audit validates the agent's HTML against all of it.
+
+**Create your own:** Copy [`DESIGN.md.example`](DESIGN.md.example), fill in your brand values, and the engine parses it automatically. The template covers all 9 sections — colors, typography (with OpenType features), components (buttons/cards/badges/inputs/nav with hover states), spacing, shadows, responsive behavior, and design rules.
 
 ---
 
 ## Audit Engine
 
-19 rules across 5 categories. Most auto-fix.
+23 rules across 6 categories. Most auto-fix.
 
 | Category | Rules | Auto-fix |
 |----------|-------|:--------:|
 | **Accessibility** | contrast-minimum (WCAG AA), min-touch-target (44px), min-font-size | ✓ |
 | **Structural** | text-overflow, node-overflow, no-empty-text, no-zero-size, no-hidden-nodes | partial |
 | **Brand** | font-in-palette, color-in-palette, font-weight, font-size-role, border-radius, spacing-grid | ✓ |
+| **Component Specs** | component-spec-compliance (button/card/badge/input radius, height), font-features-compliance (OpenType), spacing-scale-compliance, state-completeness (hover states) | ✓ |
 | **Design Quality** | visual-hierarchy, content-density, visual-balance, cta-visibility | — |
 | **Export** | export-fidelity | — |
 
@@ -471,10 +502,10 @@ Reframe is not a replacement for design tools — it's infrastructure that sits 
 | What you get | How |
 |-------------|-----|
 | **Open format** | INode AST — not proprietary, not locked to any editor |
-| **Automated QA** | 19 audit rules with auto-fix. Runs in CI. |
+| **Automated QA** | 23 audit rules with auto-fix. Runs in CI. |
 | **Multi-format export** | One design → 7 formats (HTML, React, SVG, PNG, Lottie, animated, site) |
 | **AI-native pipeline** | MCP tools — any AI agent can design, validate, export |
-| **Brand compliance** | DESIGN.md = brand philosophy. Audit enforces it. |
+| **Brand compliance** | DESIGN.md = brand philosophy. 60+ brands via npm. Audit enforces it. |
 | **Deterministic resize** | Semantic re-layout — no AI, pure computation |
 | **Design as code** | Version-controlled, testable, composable |
 
@@ -489,14 +520,15 @@ packages/
 │
 ├── core/       @reframe/core
 │               INode AST · SceneGraph · layout engine (Yoga WASM)
-│               audit (19 rules) · importers (HTML, Figma)
+│               audit (23 rules) · importers (HTML, Figma)
 │               exporters (HTML, SVG, React, Lottie, animated, site)
 │               @reframe/ui (120 functions) · design system · resize engine
 │               animation (23 presets) · semantic layer · diff · assert
 │
 ├── mcp/        @reframe/mcp
 │               MCP server (6 tools) · HTTP sidecar (port 4100)
-│               session management · brand library · auto-fix engine
+│               session management · DESIGN.md context · auto-fix engine
+│               brand catalog via getdesign npm (60+ brands)
 │
 ├── cli/        @reframe/cli
 │               `reframe build` · `reframe test` · config loader · Figma import
@@ -541,10 +573,16 @@ Active contributors who make significant, sustained contributions may be invited
 
 - **Export targets** — SwiftUI, Flutter, Jetpack Compose, MJML (email)
 - **Audit rules** — new design quality and accessibility checks
-- **Brand guides** — extract and contribute DESIGN.md for popular brands
+- **Brand guides** — contribute DESIGN.md for brands not yet in [`getdesign`](https://www.npmjs.com/package/getdesign)
 - **HTML importer** — CSS property coverage, CSS Grid, complex selectors
 - **Studio** — canvas performance, property editing, undo/redo
 - **Adapters** — Sketch, Penpot, Canva
+
+---
+
+## Acknowledgments
+
+Brand design systems are sourced from [`getdesign`](https://www.npmjs.com/package/getdesign) — an open npm package providing curated DESIGN.md specifications for 60+ brands. Reframe uses it as an optional dependency for the `reframe_design` brand catalog.
 
 ---
 

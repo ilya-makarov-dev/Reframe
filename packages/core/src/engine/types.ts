@@ -306,6 +306,8 @@ export interface SceneNode {
   styleRuns: StyleRun[];
   textTruncation: TextTruncation;
   textPicture: Uint8Array | null;
+  /** OpenType font feature settings: ['ss01', 'tnum', 'cv01'] → font-feature-settings: "ss01", "tnum", "cv01" */
+  fontFeatureSettings: string[];
 
   // Constraints
   horizontalConstraint: ConstraintType;
@@ -386,7 +388,7 @@ export interface SceneNode {
 // ─── Semantic Layer ────────────────────────────────────────────
 
 export type SemanticRole =
-  | 'button' | 'link' | 'input' | 'checkbox' | 'select'    // interactive
+  | 'button' | 'link' | 'input' | 'checkbox' | 'radio' | 'select'  // interactive
   | 'heading' | 'paragraph' | 'label' | 'caption'          // text
   | 'card' | 'badge' | 'tag' | 'avatar' | 'divider'        // components
   | 'nav' | 'header' | 'footer' | 'sidebar' | 'main'       // structure

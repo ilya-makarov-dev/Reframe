@@ -43,7 +43,7 @@ export {
 export {
   setYoga, getYoga,
   setTextMeasurer,
-  computeLayout, computeAllLayouts,
+  computeLayout, computeAllLayouts, ensureSceneLayout,
   type YogaInstance, type YogaNode, type TextMeasurer,
 } from './layout';
 

@@ -110,20 +110,25 @@ export function setTextMeasurer(measurer: TextMeasurer | null): void {
   globalTextMeasurer = measurer;
 }
 
-const GLYPH_WIDTH_FACTOR = 0.6;
+// Average glyph width ratios for proportional fonts (character width / fontSize).
+// Monospace fonts are wider (~0.6), proportional fonts like Inter/Roboto ~0.45-0.5.
+const BASE_GLYPH_FACTOR = 0.48;
+const BOLD_GLYPH_EXTRA = 0.04; // bold text ~8% wider
 
 function estimateTextSize(
   node: SceneNode,
   maxWidth?: number,
 ): { width: number; height: number } {
   const fontSize = node.fontSize || 16;
-  const charWidth = fontSize * GLYPH_WIDTH_FACTOR;
+  const weight = node.fontWeight ?? 400;
+  const glyphFactor = BASE_GLYPH_FACTOR + (weight >= 600 ? BOLD_GLYPH_EXTRA : 0);
+  const charWidth = fontSize * glyphFactor;
   const textLength = (node.text || '').length;
   const naturalWidth = textLength * charWidth;
 
   const constrainedWidth = maxWidth && maxWidth < 1e5 ? maxWidth : naturalWidth;
   const lines = constrainedWidth > 0 ? Math.ceil(naturalWidth / constrainedWidth) : 1;
-  const lineHeight = node.lineHeight ?? fontSize * 1.2;
+  const lineHeight = node.lineHeight ?? fontSize * 1.4;
 
   return {
     width: Math.min(naturalWidth, constrainedWidth),
@@ -485,10 +490,16 @@ function freeYogaTree(node: YogaNode): void {
  * Compute layout for a single frame with layoutMode.
  */
 export function computeLayout(graph: SceneGraph, frameId: string): void {
-  if (!yoga) return;
-
   const frame = graph.getNode(frameId);
   if (!frame || frame.layoutMode === 'NONE') return;
+
+  // Grid layout — compute directly (Yoga doesn't support CSS Grid)
+  if (frame.layoutMode === 'GRID') {
+    computeGridLayout(graph, frame);
+    return;
+  }
+
+  if (!yoga) return;
 
   const y = yoga;
   const yogaRoot = buildYogaTree(y, graph, frame);
@@ -498,31 +509,185 @@ export function computeLayout(graph: SceneGraph, frameId: string): void {
   freeYogaTree(yogaRoot);
 }
 
+// ─── Grid Layout ─────────────────────────────────────���─────────
+
+/**
+ * Compute CSS Grid layout for a GRID container.
+ * Resolves gridTemplateColumns/Rows tracks, positions children by gridPosition
+ * or auto-placement, and updates child x/y/width/height.
+ */
+function computeGridLayout(graph: SceneGraph, frame: SceneNode): void {
+  const children = graph.getChildren(frame.id).filter(c => c.visible && c.layoutPositioning !== 'ABSOLUTE');
+  if (children.length === 0) return;
+
+  const padT = frame.paddingTop;
+  const padR = frame.paddingRight;
+  const padB = frame.paddingBottom;
+  const padL = frame.paddingLeft;
+  const contentW = frame.width - padL - padR;
+  const contentH = frame.height - padT - padB;
+  const colGap = frame.gridColumnGap || 0;
+  const rowGap = frame.gridRowGap || 0;
+
+  // Resolve column tracks
+  const colSizes = resolveGridTracks(frame.gridTemplateColumns, contentW, colGap, children.length);
+  // Resolve row tracks — if not defined, auto-create rows based on column count
+  const numCols = colSizes.length || 1;
+  const numRows = Math.max(
+    frame.gridTemplateRows.length,
+    Math.ceil(children.length / numCols),
+  );
+  const defaultRowTracks: typeof frame.gridTemplateRows = frame.gridTemplateRows.length > 0
+    ? frame.gridTemplateRows
+    : Array.from({ length: numRows }, () => ({ type: 'FR' as const, value: 1 }));
+  const rowSizes = resolveGridTracks(defaultRowTracks, contentH, rowGap, children.length);
+
+  // Compute x offsets for each column
+  const colOffsets: number[] = [0];
+  for (let i = 0; i < colSizes.length - 1; i++) {
+    colOffsets.push(colOffsets[i] + colSizes[i] + colGap);
+  }
+  // Compute y offsets for each row
+  const rowOffsets: number[] = [0];
+  for (let i = 0; i < rowSizes.length - 1; i++) {
+    rowOffsets.push(rowOffsets[i] + rowSizes[i] + rowGap);
+  }
+
+  // Place children
+  let autoCol = 0;
+  let autoRow = 0;
+
+  for (const child of children) {
+    let col: number, row: number, colSpan: number, rowSpan: number;
+
+    if (child.gridPosition) {
+      col = Math.max(0, child.gridPosition.column - 1);
+      row = Math.max(0, child.gridPosition.row - 1);
+      colSpan = child.gridPosition.columnSpan || 1;
+      rowSpan = child.gridPosition.rowSpan || 1;
+    } else {
+      // Auto-placement
+      col = autoCol;
+      row = autoRow;
+      colSpan = 1;
+      rowSpan = 1;
+      autoCol++;
+      if (autoCol >= numCols) {
+        autoCol = 0;
+        autoRow++;
+      }
+    }
+
+    // Clamp to grid bounds
+    col = Math.min(col, colSizes.length - 1);
+    row = Math.min(row, rowSizes.length - 1);
+    const endCol = Math.min(col + colSpan - 1, colSizes.length - 1);
+    const endRow = Math.min(row + rowSpan - 1, rowSizes.length - 1);
+
+    // Calculate position and size
+    const x = padL + (colOffsets[col] ?? 0);
+    const y = padT + (rowOffsets[row] ?? 0);
+    const w = (colOffsets[endCol] ?? 0) + (colSizes[endCol] ?? 0) - (colOffsets[col] ?? 0);
+    const h = (rowOffsets[endRow] ?? 0) + (rowSizes[endRow] ?? 0) - (rowOffsets[row] ?? 0);
+
+    graph.updateNode(child.id, { x, y, width: w, height: h });
+  }
+}
+
+/**
+ * Resolve grid track sizes from FIXED/FR/AUTO definitions.
+ */
+function resolveGridTracks(
+  tracks: ReadonlyArray<{ type: string; value: number }>,
+  available: number,
+  gap: number,
+  childCount: number,
+): number[] {
+  if (tracks.length === 0) {
+    // Default: single column filling available space
+    return [available];
+  }
+
+  const totalGap = gap * Math.max(tracks.length - 1, 0);
+  let remaining = available - totalGap;
+  let totalFr = 0;
+  const sizes: number[] = new Array(tracks.length);
+
+  // First pass: resolve FIXED and AUTO, sum FR
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    if (t.type === 'FIXED') {
+      sizes[i] = t.value;
+      remaining -= t.value;
+    } else if (t.type === 'AUTO') {
+      // AUTO: use a reasonable minimum (will be expanded if space allows)
+      const autoSize = Math.max(50, remaining / tracks.length);
+      sizes[i] = autoSize;
+      remaining -= autoSize;
+    } else {
+      // FR
+      totalFr += t.value;
+      sizes[i] = 0; // placeholder
+    }
+  }
+
+  // Second pass: distribute remaining space to FR tracks
+  if (totalFr > 0 && remaining > 0) {
+    const perFr = remaining / totalFr;
+    for (let i = 0; i < tracks.length; i++) {
+      if (tracks[i].type === 'FR') {
+        sizes[i] = Math.max(0, perFr * tracks[i].value);
+      }
+    }
+  }
+
+  return sizes;
+}
+
 /**
  * Compute layout for all auto-layout frames, bottom-up.
  */
 export function computeAllLayouts(graph: SceneGraph, scopeId?: string): void {
-  if (!yoga) return;
-
   const startId = scopeId ?? graph.rootId;
-  const visited = new Set<string>();
 
-  function computeBottomUp(nodeId: string): void {
-    if (visited.has(nodeId)) return;
-    visited.add(nodeId);
+  // Find top-level layout roots: frames with layoutMode that are NOT children of
+  // another layout frame. Nested layout containers are handled by their parent's
+  // Yoga tree (via configureNestedAutoLayout), so they should NOT be computed independently.
+  const layoutRoots: string[] = [];
 
+  function findLayoutRoots(nodeId: string, parentIsLayout: boolean): void {
     const node = graph.getNode(nodeId);
     if (!node) return;
 
-    // Children first (bottom-up)
-    for (const childId of node.childIds) {
-      computeBottomUp(childId);
+    const isLayout = node.layoutMode !== 'NONE';
+
+    if (isLayout && !parentIsLayout) {
+      // Top-level layout container — compute it (will recursively handle nested)
+      layoutRoots.push(nodeId);
     }
 
-    if (node.layoutMode !== 'NONE') {
-      computeLayout(graph, nodeId);
+    // Recurse into children to find more top-level roots
+    for (const childId of node.childIds) {
+      findLayoutRoots(childId, isLayout || parentIsLayout);
     }
   }
 
-  computeBottomUp(startId);
+  findLayoutRoots(startId, false);
+
+  // Compute each top-level layout root (handles nested containers internally via Yoga)
+  for (const rootId of layoutRoots) {
+    computeLayout(graph, rootId);
+  }
+}
+
+/**
+ * Run {@link computeAllLayouts} and ignore failures — used before audit/export/preview
+ * so exotic or partial trees still produce output.
+ */
+export function ensureSceneLayout(graph: SceneGraph, scopeId?: string): void {
+  try {
+    computeAllLayouts(graph, scopeId);
+  } catch {
+    /* best-effort */
+  }
 }

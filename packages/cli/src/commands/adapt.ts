@@ -5,9 +5,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { CliArgs } from '../args';
-import { loadScene, importScene, exportScene, saveScene } from '../scene-io';
+import { loadScene, exportScene, saveScene, graphFromSceneEnvelope, SERIALIZE_VERSION } from '../scene-io';
 import {
-  SceneGraph, StandaloneHost, setHost,
+  StandaloneHost, setHost,
   parseTarget, adaptScene,
   type TargetSize,
 } from '../engine-bridge';
@@ -37,14 +37,11 @@ export async function adapt(args: CliArgs): Promise<void> {
   const strategy = args.strategy ?? 'smart';
   const format = args.format ?? 'json';
 
-  // Load scene
+  // Load scene (root + images via core deserialize)
   const scene = loadScene(inputPath);
-  const graph = new SceneGraph();
+  const { graph, rootId } = graphFromSceneEnvelope(scene);
   const host = new StandaloneHost(graph);
   setHost(host);
-
-  const page = graph.addPage('Source');
-  const rootId = importScene(graph, page.id, scene.root);
 
   const sourceRoot = graph.getNode(rootId)!;
   console.log(`Loaded: ${sourceRoot.name} (${sourceRoot.width}x${sourceRoot.height})`);
@@ -74,7 +71,7 @@ export async function adapt(args: CliArgs): Promise<void> {
     // Single file output
     const { result } = results[0];
     const sceneJson = {
-      version: 1,
+      version: SERIALIZE_VERSION,
       root: exportScene(result.graph, result.rootId),
     };
     saveScene(sceneJson, args.out);
@@ -89,7 +86,7 @@ export async function adapt(args: CliArgs): Promise<void> {
       const label = `${target.width}x${target.height}`;
       const outPath = path.join(args.outDir, `${label}.json`);
       const sceneJson = {
-        version: 1,
+        version: SERIALIZE_VERSION,
         root: exportScene(result.graph, result.rootId),
       };
       saveScene(sceneJson, outPath);
@@ -108,12 +105,12 @@ export async function adapt(args: CliArgs): Promise<void> {
     // Default: print JSON to stdout
     if (results.length === 1) {
       const { result } = results[0];
-      const sceneJson = { version: 1, root: exportScene(result.graph, result.rootId) };
+      const sceneJson = { version: SERIALIZE_VERSION, root: exportScene(result.graph, result.rootId) };
       console.log(JSON.stringify(sceneJson, null, 2));
     } else {
       const all = results.map(({ target, result }) => ({
         target: `${target.width}x${target.height}`,
-        scene: { version: 1, root: exportScene(result.graph, result.rootId) },
+        scene: { version: SERIALIZE_VERSION, root: exportScene(result.graph, result.rootId) },
       }));
       console.log(JSON.stringify(all, null, 2));
     }

@@ -14,4 +14,4 @@ export {
   type IExportSettings,
 } from './types';
 
-export { setHost, getHost, resetHost } from './context';
+export { setHost, getHost, resetHost, runWithHost, runWithHostAsync } from './context';

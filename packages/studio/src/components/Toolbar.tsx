@@ -3,11 +3,11 @@
  *
  * Left:   logo
  * Center: tool icons (select, frame, shape, pen, text, image)
- * Right:  scene info + Connected + settings + share + export
+ * Right:  Templates, Open (HTML / scene JSON), Share, Export
  */
 
 import { useCallback, useRef, useState, useEffect } from 'react';
-import { useSceneStore, type CanvasTool } from '../store/scene';
+import { useSceneStore, type CanvasTool, getActiveArtboard, activeDocSlice } from '../store/scene';
 import { countSceneNodes } from '../lib/scene-stats';
 import { TemplateGallery } from './TemplateGallery';
 import { ShareDialog } from './ShareDialog';
@@ -48,10 +48,11 @@ const IconImage = () => (
     <path d="M15 12l-3-3-6 6" />
   </svg>
 );
-const IconSettings = () => (
-  <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="9" cy="9" r="2.5" />
-    <path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.2 4.2l1.4 1.4M12.4 12.4l1.4 1.4M13.8 4.2l-1.4 1.4M5.6 12.4l-1.4 1.4" />
+/** Open local file — folder + arrow in (distinct from upload/share‑out iconography). */
+const IconOpenFile = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2.5 13.5V5.5l2.5-2h3.2L10 5.5H13.5a1 1 0 011 1v6a1 1 0 01-1 1h-10a1 1 0 01-1-1z" />
+    <path d="M8 7.5v4.5M6 9.5l2-2 2 2" />
   </svg>
 );
 const IconShare = () => (
@@ -92,14 +93,15 @@ const IconTrash = () => (
 
 export function Toolbar() {
   const scene = useSceneStore();
-  const ab = scene.artboards.find(a => a.id === scene.activeArtboardId);
-  const graph = ab ? ab.graph : scene.graph;
-  const rootId = ab ? ab.rootId : scene.rootId;
+  const ab = getActiveArtboard(scene);
+  const graph = ab?.graph ?? null;
+  const rootId = ab?.rootId ?? null;
+  const { history, historyIndex, timeline } = activeDocSlice(scene);
   const {
     importHtml,
     exportHtml, exportSvg, exportReact, exportAnimatedHtml, exportLottieJson,
-    undo, redo, historyIndex, history, timeline,
-    runAudit, auditIssues, deleteNode, selectedIds,
+    undo, redo,
+    deleteNode, selectedIds,
   } = scene;
   const fileRef = useRef<HTMLInputElement>(null);
   const [showExport, setShowExport] = useState(false);
@@ -111,6 +113,7 @@ export function Toolbar() {
 
   const root = graph?.getNode(rootId ?? '');
   const nodeCount = root && graph && rootId ? countSceneNodes(graph, rootId) : 0;
+  const mcpSid = ab?.mcpSceneId?.trim();
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -126,14 +129,25 @@ export function Toolbar() {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => importHtml(reader.result as string);
+    reader.onload = () => {
+      const text = reader.result as string;
+      const lower = file.name.toLowerCase();
+      if (lower.endsWith('.json')) {
+        try {
+          const json = JSON.parse(text);
+          const store = useSceneStore.getState();
+          store.loadSceneJson(json.sceneJson ?? json);
+          if (json.timeline) store.setTimeline(json.timeline);
+          if (json.designMd) store.loadDesignMd(json.designMd);
+        } catch (err) {
+          console.error('Failed to load scene JSON:', err);
+        }
+      } else {
+        void importHtml(text);
+      }
+    };
     reader.readAsText(file);
     e.target.value = '';
-  }, [importHtml]);
-
-  const handlePasteHtml = useCallback(() => {
-    const html = prompt('Paste HTML:');
-    if (html) importHtml(html);
   }, [importHtml]);
 
   const handleExport = useCallback((format: string) => {
@@ -146,30 +160,6 @@ export function Toolbar() {
     if (content) download(filename, content, type);
     setShowExport(false);
   }, [exportHtml, exportSvg, exportReact, exportAnimatedHtml, exportLottieJson]);
-
-  const handleLoadJson = useCallback(() => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = (e: any) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          const json = JSON.parse(reader.result as string);
-          const store = useSceneStore.getState();
-          store.loadSceneJson(json.sceneJson ?? json);
-          if (json.timeline) store.setTimeline(json.timeline);
-          if (json.designMd) store.loadDesignMd(json.designMd);
-        } catch (err) {
-          console.error('Failed to load JSON:', err);
-        }
-      };
-      reader.readAsText(file);
-    };
-    input.click();
-  }, []);
 
   const handleDelete = useCallback(() => {
     if (selectedIds.length === 1 && selectedIds[0] !== rootId) deleteNode(selectedIds[0]);
@@ -204,6 +194,14 @@ export function Toolbar() {
               <span className="toolbar__scene-dim">{Math.round(root.width)}×{Math.round(root.height)}</span>
               <span className="toolbar__scene-sep">·</span>
               <span className="toolbar__scene-nodes">{nodeCount} nodes</span>
+              {mcpSid ? (
+                <>
+                  <span className="toolbar__scene-sep">·</span>
+                  <span className="toolbar__scene-mcp" title="MCP session scene id">
+                    {mcpSid}
+                  </span>
+                </>
+              ) : null}
             </span>
           ) : (
             <span className="toolbar__scene-empty">reframe studio</span>
@@ -218,38 +216,38 @@ export function Toolbar() {
             <IconSearch />
           </button>
 
+          <button
+            className="toolbar__icon-btn"
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            title="Open — HTML, HTM, or scene JSON"
+          >
+            <IconOpenFile />
+          </button>
+
           {hasScene && (
             <>
-              <button className="toolbar__btn" onClick={() => setShowShare(true)}>
+              <button type="button" className="toolbar__btn" onClick={() => setShowShare(true)}>
+                <IconShare />
                 Share
               </button>
 
-              <button className="toolbar__icon-btn" onClick={() => fileRef.current?.click()} title="Import">
-                <IconShare />
-              </button>
-
               <div className="toolbar__export-wrap" ref={exportRef}>
-                <button className="toolbar__icon-btn" onClick={() => setShowExport(!showExport)} title="Export">
+                <button type="button" className="toolbar__icon-btn" onClick={() => setShowExport(!showExport)} title="Export">
                   <IconExport />
                 </button>
                 {showExport && (
                   <div className="toolbar__dropdown">
-                    <button className="toolbar__dropdown-item" onClick={() => handleExport('html')}>HTML</button>
-                    <button className="toolbar__dropdown-item" onClick={() => handleExport('svg')}>SVG</button>
-                    <button className="toolbar__dropdown-item" onClick={() => handleExport('react')}>React</button>
-                    {timeline && <button className="toolbar__dropdown-item" onClick={() => handleExport('animated')}>Animated HTML</button>}
-                    {timeline && <button className="toolbar__dropdown-item" onClick={() => handleExport('lottie')}>Lottie JSON</button>}
+                    <button type="button" className="toolbar__dropdown-item" onClick={() => handleExport('html')}>HTML</button>
+                    <button type="button" className="toolbar__dropdown-item" onClick={() => handleExport('svg')}>SVG</button>
+                    <button type="button" className="toolbar__dropdown-item" onClick={() => handleExport('react')}>React</button>
+                    {timeline && <button type="button" className="toolbar__dropdown-item" onClick={() => handleExport('animated')}>Animated HTML</button>}
+                    {timeline && <button type="button" className="toolbar__dropdown-item" onClick={() => handleExport('lottie')}>Lottie JSON</button>}
                   </div>
                 )}
               </div>
             </>
           )}
-
-          <button className="toolbar__icon-btn" onClick={() => {
-            handleLoadJson();
-          }} title="Settings">
-            <IconSettings />
-          </button>
         </div>
       </div>
 

@@ -13,8 +13,10 @@ import { SceneGraph } from '../../core/src/engine/scene-graph.js';
 import { createSceneFromJson } from './engine.js';
 import type { ITimeline } from '../../core/src/animation/types.js';
 import type { TokenIndex } from '../../core/src/design-system/tokens.js';
+import { join } from 'path';
 import { emitProjectEvent } from './events.js';
 import { toSlug, uniqueSlug } from '../../core/src/project/slug.js';
+import { coreProjectIo } from './project-io.js';
 
 export interface StoredScene {
   graph: SceneGraph;
@@ -26,12 +28,15 @@ export interface StoredScene {
   nodeCount: number;
   createdAt: number;
   timeline?: ITimeline;
+  /** Monotonic: incremented when the session graph content changes (edit, compile, Studio push). */
+  sessionRevision: number;
 }
 
 // ─── Internal state ─────────────────────────────────────────
 
 const scenes = new Map<string, StoredScene>();     // sessionId → StoredScene
 const slugIndex = new Map<string, string>();        // slug → sessionId
+/** defineTokens indices; replaceSessionSceneGraph / Studio PUT replace the graph — re-run defineTokens if agents relied on token paths for the new tree. */
 const tokenIndices = new Map<string, TokenIndex>(); // sessionId → TokenIndex
 let nextId = 1;
 
@@ -43,12 +48,34 @@ let _deferredProjectDir: string | null = null;
 
 // ─── Project directory management ───────────────────────────
 
+/**
+ * Sets the workspace root used for `.reframe/` paths and auto-save.
+ *
+ * @deprecated Prefer `setProjectDir` from `tools/project.js` (keeps `reframe_project` and store aligned).
+ * `tools/project` continues to call this internally as `setStoreProjectDir`.
+ */
 export function setProjectDir(dir: string | null): void {
   _projectDir = dir;
 }
 
+/** @internal Workspace root for exports/persist; usually set via `tools/project.setProjectDir`. */
 export function getProjectDir(): string | null {
   return _projectDir;
+}
+
+/** Open project directory, or `process.cwd()` when none (same base as deferred init target). */
+export function getWorkspaceRoot(): string {
+  return _projectDir ?? process.cwd();
+}
+
+/** `<workspace>/.reframe` — design.md, exports/, scenes/, etc. */
+export function getReframeDir(): string {
+  return join(getWorkspaceRoot(), '.reframe');
+}
+
+/** `.reframe/exports` under the workspace root. */
+export function getExportsBaseDir(): string {
+  return join(getReframeDir(), 'exports');
 }
 
 export function setDeferredProjectInit(dir: string): void {
@@ -80,32 +107,51 @@ export function storeScene(
   import('./http-server.js').then(m => m.ensureHttpSidecar()).catch(() => {});
 
   const root = graph.getNode(rootId)!;
-  const sessionId = `s${nextId++}`;
   const name = options?.name ?? root.name ?? 'Untitled';
   const nodeCount = countNodes(graph, rootId);
   const width = Math.round(root.width);
   const height = Math.round(root.height);
+  const desiredSlug = options?.slug ?? toSlug(name);
 
-  // Generate unique slug
+  // Check if scene with this slug already exists — UPDATE instead of creating duplicate
+  const existingSessionId = slugIndex.get(desiredSlug);
+  if (existingSessionId) {
+    const existing = scenes.get(existingSessionId);
+    if (existing) {
+      existing.graph = graph;
+      existing.rootId = rootId;
+      existing.name = name;
+      existing.width = width;
+      existing.height = height;
+      existing.nodeCount = nodeCount;
+      existing.timeline = timeline;
+      existing.sessionRevision = (existing.sessionRevision ?? 0) + 1;
+
+      emitProjectEvent({ type: 'scene:session-changed', sceneId: existingSessionId, revision: existing.sessionRevision });
+      autoSaveToProject(existing);
+      return existingSessionId;
+    }
+  }
+
+  // New scene — generate unique slug
+  const sessionId = `s${nextId++}`;
   const allSlugs = new Set(slugIndex.keys());
-  // Also include on-disk slugs if project exists
   if (_projectDir) {
     try {
-      const { loadProject } = require('../../core/src/project/io.js');
-      const manifest = loadProject(_projectDir);
+      const manifest = coreProjectIo().loadProject(_projectDir);
       for (const s of manifest.scenes) allSlugs.add(s.slug ?? s.id);
     } catch {}
   }
-  const slug = uniqueSlug(options?.slug ?? toSlug(name), allSlugs);
+  const slug = uniqueSlug(desiredSlug, allSlugs);
 
   const stored: StoredScene = {
     graph, rootId, name, slug, width, height, nodeCount, createdAt: Date.now(), timeline,
+    sessionRevision: 1,
   };
 
   scenes.set(sessionId, stored);
   slugIndex.set(slug, sessionId);
 
-  // Broadcast to SSE — sceneId is session id (s1…) so Studio matches GET /scenes and fetch URLs
   emitProjectEvent({
     type: 'scene:saved',
     sceneId: sessionId,
@@ -122,7 +168,7 @@ export function storeScene(
     },
   } as any);
 
-  // Auto-persist to disk
+  emitProjectEvent({ type: 'scene:session-changed', sceneId: sessionId, revision: 1 });
   autoSaveToProject(stored);
 
   return sessionId;
@@ -241,9 +287,9 @@ export function deleteScene(idOrSlug: string): boolean {
   const dir = getProjectDir();
   if (dir) {
     try {
-      const { deleteScene: deleteSceneFromDisk, projectExists } = require('../../core/src/project/io.js');
-      if (projectExists(dir)) {
-        deleteSceneFromDisk(dir, slug);
+      const io = coreProjectIo();
+      if (io.projectExists(dir)) {
+        io.deleteScene(dir, slug);
       }
     } catch {
       /* disk delete is best-effort */
@@ -268,9 +314,9 @@ function ensureProject(): string | null {
 
   if (_deferredProjectDir) {
     try {
-      const { projectExists, initProject } = require('../../core/src/project/io.js');
-      if (!projectExists(_deferredProjectDir)) {
-        initProject(_deferredProjectDir, 'reframe');
+      const io = coreProjectIo();
+      if (!io.projectExists(_deferredProjectDir)) {
+        io.initProject(_deferredProjectDir, 'reframe');
       }
       _projectDir = _deferredProjectDir;
       _deferredProjectDir = null;
@@ -288,12 +334,13 @@ function autoSaveToProject(stored: StoredScene): void {
   if (!dir) return;
 
   try {
-    const { saveScene: saveSceneToDisk } = require('../../core/src/project/io.js');
-    saveSceneToDisk(dir, stored.graph, stored.rootId, {
+    coreProjectIo().saveScene(dir, stored.graph, stored.rootId, {
       slug: stored.slug,
       name: stored.name,
       nodes: stored.nodeCount,
       timeline: stored.timeline,
+      group: (stored as any).group,
+      source: (stored as any).sourceFile,
     });
   } catch {
     // Auto-save is best-effort
@@ -307,13 +354,69 @@ export function resaveScene(sessionId: string): void {
   autoSaveToProject(stored);
 }
 
+/** Increment session revision and notify SSE subscribers (Studio pull). */
+export function bumpSceneSessionRevision(idOrSlug: string): number | undefined {
+  const sessionId = scenes.has(idOrSlug) ? idOrSlug : slugIndex.get(idOrSlug);
+  if (!sessionId) return undefined;
+  const stored = scenes.get(sessionId);
+  if (!stored) return undefined;
+  stored.sessionRevision = (stored.sessionRevision ?? 0) + 1;
+  emitProjectEvent({
+    type: 'scene:session-changed',
+    sceneId: sessionId,
+    revision: stored.sessionRevision,
+  });
+  return stored.sessionRevision;
+}
+
+/**
+ * Replace the live session graph (e.g. Studio push). Keeps session id and slug.
+ * Recomputes node metadata and auto-saves when a project is open.
+ */
+export function replaceSessionSceneGraph(
+  idOrSlug: string,
+  graph: SceneGraph,
+  rootId: string,
+  timeline?: ITimeline | null,
+  options?: { updateTimeline?: boolean },
+): { sessionId: string; revision: number } | null {
+  const sessionId = scenes.has(idOrSlug) ? idOrSlug : slugIndex.get(idOrSlug);
+  if (!sessionId) return null;
+  const stored = scenes.get(sessionId);
+  if (!stored) return null;
+
+  const root = graph.getNode(rootId);
+  if (!root) return null;
+
+  stored.graph = graph;
+  stored.rootId = rootId;
+  if (options?.updateTimeline) {
+    stored.timeline = timeline ?? undefined;
+  }
+  stored.nodeCount = countNodes(graph, rootId);
+  stored.width = Math.round(root.width);
+  stored.height = Math.round(root.height);
+
+  const revision = (stored.sessionRevision ?? 0) + 1;
+  stored.sessionRevision = revision;
+
+  emitProjectEvent({
+    type: 'scene:session-changed',
+    sceneId: sessionId,
+    revision,
+  });
+
+  autoSaveToProject(stored);
+
+  return { sessionId, revision };
+}
+
 // ─── Startup: load existing project ─────────────────────────
 
 /** Load all scenes from a .reframe/ project into the session store. Returns count loaded. */
 export function loadProjectScenes(projectDir: string): number {
   try {
-    const { loadAllScenes } = require('../../core/src/project/io.js');
-    const loaded = loadAllScenes(projectDir) as Array<{
+    const loaded = coreProjectIo().loadAllScenes(projectDir) as Array<{
       graph: SceneGraph;
       rootId: string;
       timeline?: ITimeline;
@@ -335,6 +438,7 @@ export function loadProjectScenes(projectDir: string): number {
         nodeCount,
         createdAt: Date.now(),
         timeline,
+        sessionRevision: 1,
       };
 
       scenes.set(sessionId, stored);

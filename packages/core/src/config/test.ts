@@ -8,7 +8,7 @@ import type { ReframeConfig, TestOutput, TestResult, AssertionResult, AssertionS
 import { resolveDesignMd, resolveSceneSizes } from './loader.js';
 import { compileTemplate, autoPickLayout } from '../compiler/index.js';
 import { build } from '../builder.js';
-import { computeAllLayouts } from '../engine/layout.js';
+import { ensureSceneLayout } from '../engine/layout.js';
 import { parseDesignMd } from '../design-system/index.js';
 import { StandaloneNode } from '../adapters/standalone/node.js';
 import { StandaloneHost } from '../adapters/standalone/adapter.js';
@@ -59,7 +59,7 @@ export async function testAll(
       });
       const { graph, root } = build(blueprint);
       setHost(new StandaloneHost(graph));
-      try { computeAllLayouts(graph, root.id); } catch (_) {}
+      ensureSceneLayout(graph, root.id);
 
       // Run assertions
       const wrappedRoot = new StandaloneNode(graph, graph.getNode(root.id)!);

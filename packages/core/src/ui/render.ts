@@ -35,12 +35,8 @@ async function ensureYoga() {
 }
 
 async function doLayout(graph: SceneGraph, rootId: string) {
-  try {
-    const { computeAllLayouts } = await import('../engine/layout.js');
-    computeAllLayouts(graph, rootId);
-  } catch (_) {
-    // Layout engine not available — use blueprint positions
-  }
+  const { ensureSceneLayout } = await import('../engine/layout.js');
+  ensureSceneLayout(graph, rootId);
 }
 
 export type RenderFormat = 'html' | 'svg' | 'react';
@@ -133,7 +129,7 @@ export function renderSync(
   // Try layout synchronously
   try {
     const layout = require('../engine/layout.js');
-    layout.computeAllLayouts(graph, root.id);
+    layout.ensureSceneLayout(graph, root.id);
   } catch (_) {}
 
   const fmt = format ?? 'html';

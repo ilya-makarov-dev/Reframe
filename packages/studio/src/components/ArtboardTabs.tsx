@@ -1,8 +1,5 @@
 /**
- * Artboard Tabs — switch between multiple artboards (scenes).
- *
- * Each artboard is an independent INode tree + timeline.
- * Common sizes: think multi-format campaign (banner + social + email header).
+ * Artboard Tabs — switch between open canvases.
  */
 
 import { useCallback, useState } from 'react';
@@ -56,11 +53,24 @@ export function ArtboardTabs() {
   }, [artboards.length, removeArtboard]);
 
   return (
-    <div className="artboard-tabs">
-      {artboards.map(ab => (
+    <div className="artboard-tabs-wrap">
+      <div className="artboard-tabs__section-head">
+        <span className="artboard-tabs__section-title">Documents</span>
+      </div>
+      <div className="artboard-tabs">
+      {artboards.map(ab => {
+        let dimTitle: string | undefined;
+        if (ab.rootId) {
+          const live = rootFrameMetrics(ab.graph, ab.rootId);
+          const w = live?.width ?? ab.width;
+          const h = live?.height ?? ab.height;
+          if (w > 0 && h > 0) dimTitle = `${w}×${h}`;
+        }
+        return (
         <div
           key={ab.id}
           className={`artboard-tab ${ab.id === activeArtboardId ? 'artboard-tab--active' : ''}`}
+          title={dimTitle ? `${ab.name} · ${dimTitle}` : ab.name}
           onClick={() => switchArtboard(ab.id)}
           onDoubleClick={() => handleDoubleClick(ab.id, ab.name)}
         >
@@ -75,26 +85,14 @@ export function ArtboardTabs() {
               onClick={e => e.stopPropagation()}
             />
           ) : (
-            <>
-              <span className="artboard-tab__name">{ab.name}</span>
-              {ab.rootId && (() => {
-                const live = rootFrameMetrics(ab.graph, ab.rootId);
-                const w = live?.width ?? ab.width;
-                const h = live?.height ?? ab.height;
-                if (!w && !h) return null;
-                return (
-                  <span className="artboard-tab__size">
-                    {w}×{h}
-                  </span>
-                );
-              })()}
-            </>
+            <span className="artboard-tab__name">{ab.name}</span>
           )}
           {artboards.length > 1 && (
             <span className="artboard-tab__close" onClick={e => handleClose(e, ab.id)}>×</span>
           )}
         </div>
-      ))}
+        );
+      })}
 
       <div style={{ position: 'relative' }}>
         <button
@@ -118,6 +116,7 @@ export function ArtboardTabs() {
             ))}
           </div>
         )}
+      </div>
       </div>
     </div>
   );

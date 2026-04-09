@@ -8,25 +8,19 @@
 import { z } from 'zod';
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
-import { setHost } from '../../../core/src/host/context.js';
+import { runWithHostAsync } from '../../../core/src/host/context.js';
+import type { SceneGraph } from '../../../core/src/engine/scene-graph.js';
 import { parseDesignMd } from '../../../core/src/design-system/index.js';
-import {
-  audit,
-  textOverflow, nodeOverflow, minFontSize as minFontSizeRule, noEmptyText, noZeroSize,
-  noHiddenNodes, contrastMinimum, minTouchTarget,
-  fontInPalette, colorInPalette, fontWeightCompliance, fontSizeRoleMatch,
-  borderRadiusCompliance, spacingGridCompliance,
-  visualHierarchy, contentDensity, visualBalance, ctaVisibility,
-  exportFidelity,
-  type AuditRule,
-} from '../../../core/src/audit.js';
+import { audit } from '../../../core/src/audit.js';
+import { buildInspectAuditRules } from '../../../core/src/inspect-audit-rules.js';
 import { assertDesign, formatAssertions } from '../../../core/src/assert.js';
 import { diffTrees, formatDiff } from '../../../core/src/diff.js';
-import { exportToHtml } from '../../../core/src/exporters/html.js';
-import { inspectScene, exportScene, createSceneFromJson } from '../engine.js';
+import { inspectScene, exportScene } from '../engine.js';
 import { resolveScene, listScenes, getScene } from '../store.js';
 import { getSession } from '../session.js';
 import { VERSION } from '../version.js';
+import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
+import { MCP_LIMITS } from '../limits.js';
 
 // ─── Schema ────────────────────────────────────────────────────
 
@@ -50,6 +44,45 @@ export const inspectInputSchema = {
 
   // Diff mode
   diffWith: z.string().optional().describe('Scene ID to diff against (structural comparison)'),
+  diffStructured: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'With diffWith: add a second MCP content block — JSON with kind reframe.structuralDiff, version, sceneA, sceneB, sceneNames, result (DiffResult)',
+    ),
+  diffStructuredDetail: z
+    .enum(['full', 'summary'])
+    .optional()
+    .default('full')
+    .describe(
+      'When diffStructured is true: full = result.entries + result.summary; summary = result.summary only (smaller JSON)',
+    ),
+  diffTextDetail: z
+    .enum(['full', 'summary'])
+    .optional()
+    .default('full')
+    .describe(
+      'When diffWith is set: summary = one-line counts in main text only; full = per-node diff lines (default)',
+    ),
+
+  treeMaxDepth: z
+    .number()
+    .int()
+    .min(1)
+    .max(256)
+    .optional()
+    .default(MCP_LIMITS.inspectTreeDefaultMaxDepth)
+    .describe('Max depth of the ASCII node tree (deeper children summarized).'),
+
+  treeMaxLines: z
+    .number()
+    .int()
+    .min(50)
+    .max(100_000)
+    .optional()
+    .default(MCP_LIMITS.inspectTreeDefaultMaxLines)
+    .describe('Cap lines in the ASCII tree (truncates with a flag in stats line).'),
 };
 
 // ─── Handler ───────────────────────────────────────────────────
@@ -61,6 +94,11 @@ export async function handleInspect(input: {
   assert?: Array<{ type: string; value?: any }>;
   designMd?: string;
   diffWith?: string;
+  diffStructured?: boolean;
+  diffStructuredDetail?: 'full' | 'summary';
+  diffTextDetail?: 'full' | 'summary';
+  treeMaxDepth?: number;
+  treeMaxLines?: number;
 }) {
   const session = getSession();
   session.recordToolCall('inspect');
@@ -100,11 +138,64 @@ export async function handleInspect(input: {
     // Recommendations
     const summary = session.getSummary();
     if (summary) {
-      // Extract just the recommendations section if present
       const recIdx = summary.indexOf('Recommended next:');
       if (recIdx !== -1) {
         lines.push('');
         lines.push(summary.slice(recIdx));
+      }
+    }
+
+    // ── Progressive context: design reference ──────────────────
+    // This replaces the need for massive CLAUDE.md — agents get
+    // contextual reference material when they ask for session overview.
+
+    lines.push('');
+    lines.push('---');
+    lines.push('## Design Language Reference');
+    lines.push('');
+    lines.push('### Atoms');
+    lines.push('display(text, fontSize, fontWeight, letterSpacing, fills) — hero text');
+    lines.push('heading(text, level:1-6) — section headers');
+    lines.push('body(text, muted?, fontSize?) — paragraphs');
+    lines.push('button(text, variant:filled/outline/ghost, size:sm/md/lg) — clickable');
+    lines.push('badge(text) · stat(value, label) · divider() · link(text)');
+    lines.push('');
+    lines.push('### Layout');
+    lines.push('stack(pad, gap, align, fills) — vertical | row(pad, gap, justify, align) — horizontal');
+    lines.push('card(pad, gap, fills, cornerRadius) — container | page(w:1440) — root');
+    lines.push('grid(columns, gap) — CSS grid | center(pad, gap) — centered content');
+    lines.push('');
+    lines.push('### Spacing Guide');
+    lines.push('Hero: pad [120-160, 80]  Section: pad [80-100, 80]  Card: pad 24-32 gap 16-24');
+    lines.push('Button: pad [12-16, 24-32] minHeight 44  Gap sections: 48-80  Gap cards: 16-24');
+    lines.push('');
+    lines.push('### Key INode Props');
+    lines.push('fills: ["#hex"] | opacity | cornerRadius | effects: [{type:"DROP_SHADOW",...}]');
+    lines.push('layoutMode: NONE/HORIZONTAL/VERTICAL/GRID | layoutGrow: 1 | itemSpacing (gap)');
+    lines.push('padding: number | paddingTop/Right/Bottom/Left | clipsContent');
+    lines.push('primaryAxisAlign: MIN/CENTER/MAX/SPACE_BETWEEN | counterAxisAlign: MIN/CENTER/MAX/STRETCH');
+    lines.push('fontSize | fontWeight | fontFamily | lineHeight | letterSpacing | textAlignHorizontal');
+    lines.push('states: { hover: { fills: [...] } } | responsive: [{ maxWidth: 768, props: {...} }]');
+    lines.push('');
+    lines.push('### Design Tokens (via reframe_edit)');
+    lines.push('defineTokens: DESIGN.md → token collection → auto-bind to matching nodes');
+    lines.push('setMode: switch light/dark (re-resolves all token bindings)');
+    lines.push('Token names: color.<role>, type.<role>.size, space.xs/sm/md/lg, radius.sm/md/lg');
+
+    // Brand-specific context if active
+    if (session.activeBrand) {
+      const ds = session.activeDesignSystem;
+      if (ds) {
+        lines.push('');
+        lines.push(`### Active Brand: ${session.activeBrand}`);
+        const primary = ds.colors?.primary ?? '';
+        const bg = ds.colors?.background ?? '';
+        const font = ds.typography?.hierarchy?.[0]?.fontFamily ?? 'Inter';
+        const heroSize = ds.typography?.hierarchy?.[0]?.fontSize ?? 56;
+        const heroWeight = ds.typography?.hierarchy?.[0]?.fontWeight ?? 700;
+        const radiusScale = ds.layout?.borderRadiusScale?.join('/') ?? '';
+        if (primary) lines.push(`Primary: ${primary} | Background: ${bg} | Font: ${font}`);
+        if (heroSize) lines.push(`Display: ${heroSize}px/${heroWeight} | Radius scale: ${radiusScale}px`);
       }
     }
 
@@ -113,32 +204,42 @@ export async function handleInspect(input: {
 
   // ── Scene inspection ─────────────────────────────────────────
 
-  let graph, rootId;
+  let graph: SceneGraph;
+  let rootId: string;
   try {
     ({ graph, rootId } = resolveScene({ sceneId: input.sceneId }));
   } catch (err: any) {
     return { content: [{ type: 'text' as const, text: err.message }] };
   }
 
+  const sceneId = input.sceneId!;
+
+  return runWithHostAsync(new StandaloneHost(graph), async () => {
   const rawRoot = graph.getNode(rootId)!;
+  ensureSceneLayout(graph, rootId);
+
   const sections: string[] = [];
   sections.push(`Inspect: "${rawRoot.name}" (${Math.round(rawRoot.width)}×${Math.round(rawRoot.height)})`);
 
-  // Parse design system if provided
-  const ds = input.designMd
-    ? session.getOrParseDesignMd(input.designMd, parseDesignMd)
+  // Parse design system: explicit input > session active > none
+  const designMdText = input.designMd ?? session.activeDesignMd ?? undefined;
+  const ds = designMdText
+    ? session.getOrParseDesignMd(designMdText, parseDesignMd)
     : undefined;
 
   // ── a. Tree ──────────────────────────────────────────────────
 
   if (input.tree !== false) {
-    const info = inspectScene(graph, rootId);
+    const depthCap = input.treeMaxDepth ?? MCP_LIMITS.inspectTreeDefaultMaxDepth;
+    const linesCap = input.treeMaxLines ?? MCP_LIMITS.inspectTreeDefaultMaxLines;
+    const info = inspectScene(graph, rootId, { treeMaxDepth: depthCap, treeMaxLines: linesCap });
     sections.push('');
     sections.push('--- Tree ---');
     sections.push(info.tree);
     sections.push('');
     sections.push(`Stats: ${info.stats.total} nodes, depth ${info.stats.maxDepth}, ` +
-      `${info.stats.textNodes} text, ${info.stats.autoLayoutFrames} auto-layout`);
+      `${info.stats.textNodes} text, ${info.stats.autoLayoutFrames} auto-layout` +
+      (info.treeTruncated ? ' (tree truncated — raise treeMaxDepth/treeMaxLines or narrow scope)' : ''));
     const typeEntries = Object.entries(info.stats.byType).map(([t, c]) => `${t}: ${c}`).join(', ');
     if (typeEntries) sections.push(`Types: ${typeEntries}`);
   }
@@ -150,45 +251,15 @@ export async function handleInspect(input: {
     const minFS = auditOpts.minFontSize ?? 8;
     const minC = auditOpts.minContrast ?? 3;
 
-    setHost(new StandaloneHost(graph));
     const wrappedRoot = new StandaloneNode(graph, rawRoot);
 
-    // Build all 19 rules
-    const rules: AuditRule[] = [
-      // Structural (8)
-      textOverflow(),
-      nodeOverflow(),
-      minFontSizeRule(minFS),
-      noEmptyText(),
-      noZeroSize(),
-      noHiddenNodes(),
-      contrastMinimum(minC),
-      minTouchTarget(),
-      // Design system (6)
-      fontWeightCompliance(),
-      fontSizeRoleMatch(),
-      borderRadiusCompliance(),
-      spacingGridCompliance(),
-      // Layout intelligence (4)
-      visualHierarchy(),
-      contentDensity(),
-      visualBalance(),
-      ctaVisibility(),
-      // Export fidelity (1)
-      exportFidelity(),
-    ];
-
-    // Palette rules require DESIGN.md
-    if (ds) {
-      rules.push(fontInPalette());
-      rules.push(colorInPalette());
-    }
+    const rules = buildInspectAuditRules(ds as any, { minFontSize: minFS, minContrast: minC });
 
     const issues = audit(wrappedRoot, rules, ds as any);
 
     // Record in session
     session.recordAudit({
-      sceneId: input.sceneId,
+      sceneId,
       sceneName: rawRoot.name ?? 'unnamed',
       timestamp: Date.now(),
       issueCount: issues.length,
@@ -238,7 +309,6 @@ export async function handleInspect(input: {
   // ── c. Assert ────────────────────────────────────────────────
 
   if (input.assert && input.assert.length > 0) {
-    setHost(new StandaloneHost(graph));
     const wrappedRoot = new StandaloneNode(graph, rawRoot);
 
     let builder = assertDesign(wrappedRoot);
@@ -275,7 +345,7 @@ export async function handleInspect(input: {
     const results = builder.run();
     const formatted = formatAssertions(results);
 
-    session.trackAssert(input.sceneId);
+    session.trackAssert(sceneId);
 
     sections.push('');
     sections.push('--- Assertions ---');
@@ -283,6 +353,8 @@ export async function handleInspect(input: {
   }
 
   // ── d. Diff ──────────────────────────────────────────────────
+
+  let structuredDiffJson: string | null = null;
 
   if (input.diffWith) {
     let graphB, rootIdB;
@@ -295,33 +367,50 @@ export async function handleInspect(input: {
       return { content: [{ type: 'text' as const, text: sections.join('\n') }] };
     }
 
-    setHost(new StandaloneHost(graph));
     const nodeA = new StandaloneNode(graph, rawRoot);
-
-    setHost(new StandaloneHost(graphB));
     const rawRootB = graphB.getNode(rootIdB)!;
-    const nodeB = new StandaloneNode(graphB, rawRootB);
 
-    const diff = diffTrees(nodeA, nodeB);
-    const formatted = formatDiff(diff);
+    const diff = await runWithHostAsync(new StandaloneHost(graphB), async () => {
+      ensureSceneLayout(graphB, rootIdB);
+      const nodeB = new StandaloneNode(graphB, rawRootB);
+      return diffTrees(nodeA, nodeB);
+    });
+    const diffTextDetail = input.diffTextDetail === 'summary' ? 'summary' : 'full';
+    const formatted = formatDiff(diff, { detail: diffTextDetail });
 
-    session.trackDiff(input.sceneId, input.diffWith);
+    session.trackDiff(sceneId, input.diffWith);
 
     sections.push('');
     sections.push(`--- Diff: "${rawRoot.name}" vs "${rawRootB.name}" ---`);
     sections.push(formatted);
+
+    if (input.diffStructured) {
+      const detail = input.diffStructuredDetail === 'summary' ? 'summary' : 'full';
+      structuredDiffJson = JSON.stringify({
+        kind: 'reframe.structuralDiff',
+        version: 1,
+        detail,
+        sceneA: sceneId,
+        sceneB: input.diffWith,
+        sceneNames: { a: rawRoot.name ?? null, b: rawRootB.name ?? null },
+        result: detail === 'summary' ? { summary: diff.summary } : diff,
+      });
+    }
   }
 
-  // ── Next step guidance ──────────────────────────────────────
-  const hasIssues = sections.some(s => s.includes('[x]') || s.includes('[!]'));
-  sections.push('');
-  if (hasIssues) {
-    sections.push(`Fix with reframe_edit, then reframe_inspect again. Loop until clean.`);
-    sections.push(`Then export for user to review: reframe_export({ sceneId: "${input.sceneId}", format: "html" })`);
-  } else {
-    sections.push(`Design is clean. Export for user to review: reframe_export({ sceneId: "${input.sceneId}", format: "html" })`);
-    sections.push(`User will review and may request changes → edit → inspect → export again.`);
+  // ── Next step hint (concise — agent knows the workflow from tool descriptions) ──
+  const hasErrors = sections.some(s => s.includes('[x]'));
+  const hasWarnings = sections.some(s => s.includes('[!]'));
+  if (hasErrors || hasWarnings) {
+    sections.push('');
+    sections.push(`Fix issues with reframe_edit, then re-inspect.`);
   }
 
-  return { content: [{ type: 'text' as const, text: sections.join('\n') }] };
+  const content: Array<{ type: 'text'; text: string }> = [{ type: 'text', text: sections.join('\n') }];
+  if (structuredDiffJson !== null) {
+    content.push({ type: 'text', text: structuredDiffJson });
+  }
+
+  return { content };
+  });
 }

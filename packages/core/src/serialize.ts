@@ -7,8 +7,10 @@
  * Two levels of serialization:
  *   - serializeNode / deserializeNode — INode (host abstraction), basic properties
  *   - serializeGraph / deserializeToGraph — SceneGraph (full fidelity), all SceneNode fields
+ *   - serializeGraph + deserializeScene — full SceneJSON envelope (root, images, timeline)
  *
- * For MCP roundtrips and storage, always prefer serializeGraph / deserializeToGraph.
+ * For disk/MCP/HTTP round-trips with rasters and animation metadata, use **deserializeScene** on
+ * the envelope; deserializeToGraph alone only rebuilds the node tree (normalizes fills/strokes/effects/styleRuns via applyImportedNodeLayoutProps).
  */
 
 import { type INode, type IFontName, type IPaint, type IEffect, type IExportSettings, NodeType, MIXED } from './host';
@@ -16,7 +18,23 @@ import { SceneGraph } from './engine/scene-graph.js';
 import { StandaloneNode } from './adapters/standalone/node.js';
 import { StandaloneHost } from './adapters/standalone/adapter.js';
 import { setHost } from './host/context.js';
-import type { SceneNode, StyleRun, ComponentPropertyDefinition, VectorNetwork, ArcData, GridTrack, GridPosition } from './engine/types.js';
+import type {
+  SceneNode,
+  StyleRun,
+  ComponentPropertyDefinition,
+  VectorNetwork,
+  ArcData,
+  GridTrack,
+  GridPosition,
+  Fill,
+  Color,
+  Stroke,
+  StrokeAlign,
+  Effect,
+  EffectType,
+  Vector,
+  CharacterStyleOverride,
+} from './engine/types.js';
 import type { ITimeline, ITimelineJSON } from './animation/types.js';
 
 // ─── Format Version ──────────────────────────────────────────
@@ -169,17 +187,26 @@ export interface INodeJSON {
   timeline?: ITimelineJSON;
 }
 
-/** Envelope for full scene serialization with metadata. */
+/**
+ * Envelope for full scene serialization with metadata (session, HTTP, disk, Studio).
+ * Canonical contract (семантика полей, PUT, Studio): {@link ./spec/scene-envelope.ts}.
+ */
 export interface SceneJSON {
   version: number;
   root: INodeJSON;
-  timeline?: ITimelineJSON;
+  /** Omitted or null = no timeline (PUT uses explicit null to clear session animation). */
+  timeline?: ITimelineJSON | null;
   images?: Record<string, string>;  // hash → base64
 }
 
 export interface SerializeOptions {
   /** Skip default values for compactness (default: true) */
   compact?: boolean;
+  /**
+   * When true, envelope always includes `timeline` — serialized object or JSON `null` if none.
+   * Use for Studio↔MCP PUT/GET so missing animation clears server session instead of preserving a stale timeline.
+   */
+  explicitTimelineKey?: boolean;
 }
 
 // ─── Serialize (INode path — backward compat) ────────────────
@@ -502,7 +529,9 @@ export function serializeGraph(
   };
 
   // Timeline
-  if (options?.timeline) {
+  if (options?.explicitTimelineKey) {
+    result.timeline = options.timeline != null ? serializeTimeline(options.timeline) : null;
+  } else if (options?.timeline) {
     result.timeline = serializeTimeline(options.timeline);
   }
 
@@ -544,6 +573,254 @@ function deserializeValue(val: unknown): unknown {
   return val;
 }
 
+function hexStringToColor(hex: string): { r: number; g: number; b: number; a: number } {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  const a = h.length >= 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+  return {
+    r: Number.isFinite(r) ? r : 0,
+    g: Number.isFinite(g) ? g : 0,
+    b: Number.isFinite(b) ? b : 0,
+    a: Number.isFinite(a) ? a : 1,
+  };
+}
+
+/**
+ * Normalize JSON `fills` (e.g. `"#rrggbb"` shorthand or loose objects) to engine {@link Fill}[].
+ * Used by SceneGraph import so HTTP PUT and disk JSON match Studio tolerance.
+ */
+export function normalizeImportFills(value: unknown): Fill[] {
+  if (!Array.isArray(value)) return [];
+  const out: Fill[] = [];
+  for (const f of value) {
+    if (!f) continue;
+    if (typeof f === 'string' && f.startsWith('#')) {
+      const c = hexStringToColor(f);
+      out.push({
+        type: 'SOLID',
+        color: { r: c.r, g: c.g, b: c.b, a: 1 },
+        opacity: c.a,
+        visible: true,
+      });
+      continue;
+    }
+    if (typeof f === 'object' && !Array.isArray(f)) {
+      const o = f as Record<string, unknown>;
+      const type = (typeof o.type === 'string' ? o.type : 'SOLID') as Fill['type'];
+      const col = o.color;
+      const color: Color =
+        col && typeof col === 'object' && col !== null && 'r' in col
+          ? {
+              r: Number((col as Color).r ?? 0),
+              g: Number((col as Color).g ?? 0),
+              b: Number((col as Color).b ?? 0),
+              a: Number((col as Color).a ?? 1),
+            }
+          : { r: 0, g: 0, b: 0, a: 1 };
+      out.push({
+        ...o,
+        type,
+        color,
+        opacity: typeof o.opacity === 'number' ? o.opacity : 1,
+        visible: o.visible !== false,
+      } as Fill);
+    }
+  }
+  return out;
+}
+
+/**
+ * Normalize JSON `strokes` (e.g. `"#rrggbb"` entries or hex {@link Color} strings) to engine {@link Stroke}[].
+ */
+export function normalizeImportStrokes(value: unknown): Stroke[] {
+  if (!Array.isArray(value)) return [];
+  const out: Stroke[] = [];
+  for (const s of value) {
+    if (!s) continue;
+    if (typeof s === 'string' && s.startsWith('#')) {
+      const c = hexStringToColor(s);
+      out.push({
+        color: { r: c.r, g: c.g, b: c.b, a: 1 },
+        weight: 1,
+        opacity: c.a,
+        visible: true,
+        align: 'INSIDE',
+      });
+      continue;
+    }
+    if (typeof s === 'object' && !Array.isArray(s)) {
+      const o = s as Record<string, unknown>;
+      const colRaw = o.color;
+      let color: Color;
+      let opacityDefault = 1;
+      if (typeof colRaw === 'string' && colRaw.startsWith('#')) {
+        const c = hexStringToColor(colRaw);
+        color = { r: c.r, g: c.g, b: c.b, a: 1 };
+        opacityDefault = c.a;
+      } else if (colRaw && typeof colRaw === 'object' && colRaw !== null && 'r' in colRaw) {
+        color = {
+          r: Number((colRaw as Color).r ?? 0),
+          g: Number((colRaw as Color).g ?? 0),
+          b: Number((colRaw as Color).b ?? 0),
+          a: Number((colRaw as Color).a ?? 1),
+        };
+      } else {
+        color = { r: 0, g: 0, b: 0, a: 1 };
+      }
+      const align = (typeof o.align === 'string' ? o.align : 'INSIDE') as StrokeAlign;
+      out.push({
+        ...o,
+        color,
+        weight: typeof o.weight === 'number' ? o.weight : 1,
+        opacity: typeof o.opacity === 'number' ? o.opacity : opacityDefault,
+        visible: o.visible !== false,
+        align,
+      } as Stroke);
+    }
+  }
+  return out;
+}
+
+/**
+ * Normalize JSON `effects` (e.g. `color: "#404040"`) to engine {@link Effect}[].
+ */
+export function normalizeImportEffects(value: unknown): Effect[] {
+  if (!Array.isArray(value)) return [];
+  const out: Effect[] = [];
+  for (const e of value) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    const o = e as Record<string, unknown>;
+    const type = (typeof o.type === 'string' ? o.type : 'DROP_SHADOW') as EffectType;
+    const colRaw = o.color;
+    let color: Color;
+    if (typeof colRaw === 'string' && colRaw.startsWith('#')) {
+      const c = hexStringToColor(colRaw);
+      color = { r: c.r, g: c.g, b: c.b, a: c.a };
+    } else if (colRaw && typeof colRaw === 'object' && colRaw !== null && 'r' in colRaw) {
+      color = {
+        r: Number((colRaw as Color).r ?? 0),
+        g: Number((colRaw as Color).g ?? 0),
+        b: Number((colRaw as Color).b ?? 0),
+        a: Number((colRaw as Color).a ?? 1),
+      };
+    } else {
+      color = { r: 0, g: 0, b: 0, a: 1 };
+    }
+    const rawOff = o.offset;
+    const offset: Vector =
+      rawOff && typeof rawOff === 'object' && rawOff !== null && 'x' in rawOff
+        ? {
+            x: Number((rawOff as Vector).x ?? 0),
+            y: Number((rawOff as Vector).y ?? 0),
+          }
+        : { x: 0, y: 0 };
+    out.push({
+      ...o,
+      type,
+      color,
+      offset,
+      radius: typeof o.radius === 'number' ? o.radius : 0,
+      spread: typeof o.spread === 'number' ? o.spread : 0,
+      visible: o.visible !== false,
+      blendMode: typeof o.blendMode === 'string' ? o.blendMode : undefined,
+    } as Effect);
+  }
+  return out;
+}
+
+/**
+ * Normalize `styleRuns[].style.fillColor` hex strings to {@link Color} objects.
+ */
+export function normalizeImportStyleRuns(value: unknown): StyleRun[] {
+  if (!Array.isArray(value)) return [];
+  const out: StyleRun[] = [];
+  for (const r of value) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) continue;
+    const o = r as Record<string, unknown>;
+    const start = typeof o.start === 'number' ? o.start : 0;
+    const length = typeof o.length === 'number' ? o.length : 0;
+    const styleRaw = o.style;
+    if (!styleRaw || typeof styleRaw !== 'object' || Array.isArray(styleRaw)) {
+      out.push({ start, length, style: {} });
+      continue;
+    }
+    const st = { ...(styleRaw as Record<string, unknown>) };
+    const fc = st.fillColor;
+    if (typeof fc === 'string' && fc.startsWith('#')) {
+      const c = hexStringToColor(fc);
+      st.fillColor = { r: c.r, g: c.g, b: c.b, a: c.a };
+    } else if (fc && typeof fc === 'object' && fc !== null && 'r' in fc) {
+      st.fillColor = {
+        r: Number((fc as Color).r ?? 0),
+        g: Number((fc as Color).g ?? 0),
+        b: Number((fc as Color).b ?? 0),
+        a: Number((fc as Color).a ?? 1),
+      };
+    }
+    out.push({ start, length, style: st as CharacterStyleOverride });
+  }
+  return out;
+}
+
+/**
+ * Normalize layout-related fields on node import: `constraints` → axis fields, `characters` → `text`,
+ * shorthand `fills` / `strokes` / `effects` / `styleRuns`. Mutates `props` in place (call after copying JSON fields onto `props`).
+ */
+export function applyImportedNodeLayoutProps(props: Record<string, unknown>): void {
+  const raw = props.constraints;
+  if (raw && typeof raw === 'object' && raw !== null && 'horizontal' in raw && 'vertical' in raw) {
+    const c = raw as { horizontal: string; vertical: string };
+    props.horizontalConstraint = c.horizontal;
+    props.verticalConstraint = c.vertical;
+    delete props.constraints;
+  }
+  if ('characters' in props && !('text' in props)) {
+    props.text = props.characters;
+    delete props.characters;
+  }
+  if (props.fills !== undefined) {
+    props.fills = normalizeImportFills(props.fills);
+  }
+  if (props.strokes !== undefined) {
+    props.strokes = normalizeImportStrokes(props.strokes);
+  }
+  if (props.effects !== undefined) {
+    props.effects = normalizeImportEffects(props.effects);
+  }
+  if (props.styleRuns !== undefined) {
+    props.styleRuns = normalizeImportStyleRuns(props.styleRuns);
+  }
+}
+
+/**
+ * Last-resort recursive import when {@link deserializeToGraph} throws (very loose JSON).
+ * Uses {@link applyImportedNodeLayoutProps} — keep in sync with Studio envelope fallback.
+ * @see {@link ./spec/scene-envelope.ts}
+ */
+export function importSceneNodeFallback(graph: SceneGraph, parentId: string, json: unknown): string {
+  const migrated = migrateScene(json as INodeJSON);
+  const overrides: Record<string, unknown> = {};
+  const skip = new Set(['type', 'children', 'name', 'id', 'version', 'timeline', 'strokeWeight']);
+  for (const [key, value] of Object.entries(migrated as Record<string, unknown>)) {
+    if (skip.has(key) || value === undefined) continue;
+    overrides[key] = value;
+  }
+  applyImportedNodeLayoutProps(overrides);
+  const m = migrated as INodeJSON;
+  const node = graph.createNode((m.type ?? 'FRAME') as any, parentId, {
+    name: m.name ?? m.type ?? 'Node',
+    ...overrides,
+  });
+  if (m.children) {
+    for (const child of m.children) {
+      importSceneNodeFallback(graph, node.id, child);
+    }
+  }
+  return node.id;
+}
+
 // ─── Deserialize (INode path — backward compat) ──────────────
 
 function importNodeJson(graph: SceneGraph, parentId: string, json: INodeJSON): string {
@@ -555,6 +832,8 @@ function importNodeJson(graph: SceneGraph, parentId: string, json: INodeJSON): s
     if (skip.has(key) || value === undefined) continue;
     overrides[key] = deserializeValue(value);
   }
+
+  applyImportedNodeLayoutProps(overrides);
 
   // Map INode type string to engine type
   const engineType = json.type === 'BOOLEAN_OPERATION' ? 'VECTOR' : json.type;
@@ -610,18 +889,7 @@ function importNodeToGraph(graph: SceneGraph, parentId: string, json: INodeJSON)
     props[key] = deserializeValue(value);
   }
 
-  // Normalize constraints → engine fields
-  if (json.constraints) {
-    props.horizontalConstraint = json.constraints.horizontal;
-    props.verticalConstraint = json.constraints.vertical;
-    delete props.constraints;
-  }
-
-  // Normalize characters → text (INode uses 'characters', SceneNode uses 'text')
-  if ('characters' in props && !('text' in props)) {
-    props.text = props.characters;
-    delete props.characters;
-  }
+  applyImportedNodeLayoutProps(props);
 
   // Map type
   const engineType = json.type === 'BOOLEAN_OPERATION' ? 'VECTOR' : json.type;
@@ -670,6 +938,17 @@ export function deserializeToGraph(json: INodeJSON): { graph: SceneGraph; rootId
   return { graph, rootId };
 }
 
+/** Merge base64-encoded raster payloads from SceneJSON `images` into `graph.images` (hash → bytes). */
+export function hydrateSceneImagesBase64(
+  graph: SceneGraph,
+  images: Record<string, unknown> | null | undefined,
+): void {
+  if (!images || typeof images !== 'object') return;
+  for (const [hash, b64] of Object.entries(images)) {
+    if (typeof b64 === 'string') graph.images.set(hash, base64ToBuffer(b64));
+  }
+}
+
 /**
  * Deserialize a SceneJSON envelope to a SceneGraph.
  * Restores images, timeline, and full node tree.
@@ -679,14 +958,10 @@ export function deserializeScene(scene: SceneJSON): {
   rootId: string;
   timeline?: ITimeline;
 } {
-  const { graph, rootId } = deserializeToGraph(scene.root);
+  // Always run per-node migration so envelope v2 with legacy-shaped root matches `importScene` + `migrateScene`.
+  const { graph, rootId } = deserializeToGraph(migrateScene(scene.root) as INodeJSON);
 
-  // Restore images
-  if (scene.images) {
-    for (const [hash, b64] of Object.entries(scene.images)) {
-      graph.images.set(hash, base64ToBuffer(b64));
-    }
-  }
+  hydrateSceneImagesBase64(graph, scene.images);
 
   // Restore timeline
   const timeline = scene.timeline ? deserializeTimeline(scene.timeline) : undefined;

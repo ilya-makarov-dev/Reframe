@@ -76,6 +76,8 @@ export interface AuditContext {
   path: string;
   /** Parent node (undefined for root). */
   parent?: INode;
+  /** All ancestors from root to parent (root first, immediate parent last). */
+  ancestors: INode[];
   /** Fields on this node bound to design tokens (auto-pass palette checks). */
   tokenBoundFields?: Set<string>;
 }
@@ -83,9 +85,18 @@ export interface AuditContext {
 /** Minimal design system shape for audit rules. */
 interface DesignSystemLike {
   colors?: { roles: Map<string, string>; primary?: string; background?: string; text?: string; accent?: string };
-  typography?: { hierarchy: Array<{ role: string; fontFamily?: string; fontSize: number; fontWeight: number; lineHeight: number; letterSpacing: number }> };
-  layout?: { borderRadiusScale: number[]; spacingUnit: number };
-  components?: { button?: { borderRadius: number; style?: string; fontWeight?: number } };
+  typography?: {
+    hierarchy: Array<{ role: string; fontFamily?: string; fontSize: number; fontWeight: number; lineHeight: number; letterSpacing: number; fontFeatures?: string[] }>;
+    fontFeatures?: Array<{ tag: string; scope: string }>;
+  };
+  layout?: { borderRadiusScale: number[]; spacingUnit: number; spacingScale?: number[] };
+  components?: {
+    button?: { borderRadius: number; style?: string; fontWeight?: number; variants?: Array<{ name: string; background?: string; color?: string; borderRadius?: number; paddingX?: number; paddingY?: number; minHeight?: number; hover?: { background?: string } }> };
+    card?: { borderRadius: number; background?: string; borderColor?: string; padding?: number };
+    badge?: { borderRadius: number; fontSize?: number; fontWeight?: number; paddingX?: number; paddingY?: number };
+    input?: { borderRadius: number; borderColor?: string; fontSize?: number; height?: number; focusBorderColor?: string };
+    nav?: { height?: number; fontSize?: number; fontWeight?: number };
+  };
 }
 
 // ─── Audit Runner ──────────────────────────────────────────────
@@ -104,7 +115,7 @@ export function audit(
 ): AuditIssue[] {
   const issues: AuditIssue[] = [];
 
-  const walk = (node: INode, path: string, parent?: INode) => {
+  const walk = (node: INode, path: string, parent: INode | undefined, ancestors: INode[]) => {
     // Scrollable pages (vertical layout): don't flag vertical overflow
     const isScrollable = root.layoutMode === 'VERTICAL';
     const ctx: AuditContext = {
@@ -114,6 +125,7 @@ export function audit(
       designSystem,
       path,
       parent,
+      ancestors,
       tokenBoundFields: options?.getTokenBoundFields?.(node.id),
     };
 
@@ -123,13 +135,14 @@ export function audit(
     }
 
     if (node.children) {
+      const childAncestors = [...ancestors, node];
       for (const child of node.children) {
-        walk(child, `${path} > ${child.name}`, node);
+        walk(child, `${path} > ${child.name}`, node, childAncestors);
       }
     }
   };
 
-  walk(root, root.name);
+  walk(root, root.name, undefined, []);
 
   // Sort: errors → warnings → info
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 };
@@ -166,6 +179,19 @@ export function rule(
 
 // ── Text Overflow ──
 
+/**
+ * Check if a node has a clipping ancestor (any parent with clipsContent=true).
+ * If so, overflow is visually hidden and should not be flagged.
+ */
+function hasClippingAncestor(ctx: AuditContext): boolean {
+  for (const ancestor of ctx.ancestors) {
+    if (ancestor.clipsContent) return true;
+    // Also treat overflow:hidden containers as clipping
+    if ((ancestor as any).overflow === 'hidden') return true;
+  }
+  return false;
+}
+
 /** Detect text nodes that extend beyond the root frame boundaries. */
 export function textOverflow(): AuditRule {
   return rule('text-overflow', (node, ctx) => {
@@ -173,6 +199,9 @@ export function textOverflow(): AuditRule {
 
     const bb = node.absoluteBoundingBox;
     if (!bb) return [];
+
+    // Skip if a clipping ancestor hides the overflow visually
+    if (hasClippingAncestor(ctx)) return [];
 
     const issues: AuditIssue[] = [];
 
@@ -210,6 +239,9 @@ export function nodeOverflow(): AuditRule {
     if (node === ctx.root) return [];
     const bb = node.absoluteBoundingBox;
     if (!bb) return [];
+
+    // Skip if a clipping ancestor hides the overflow visually
+    if (hasClippingAncestor(ctx)) return [];
 
     if (
       bb.x + bb.width > ctx.rootWidth + 1 ||
@@ -385,13 +417,14 @@ export function contrastMinimum(minRatio = 4.5): AuditRule {
   });
 }
 
-/** Walk up the tree via ctx.parent to find nearest ancestor with a solid fill. */
+/** Walk up all ancestors to find nearest solid background fill. */
 function findNearestBackground(node: INode, ctx: AuditContext): { r: number; g: number; b: number } | null {
-  // Check parent first, then root as fallback
-  if (ctx.parent) {
-    const parentFills = ctx.parent.fills;
-    if (parentFills && parentFills !== MIXED) {
-      const bg = (parentFills as IPaint[]).find(f => f.type === 'SOLID' && f.visible !== false) as ISolidPaint | undefined;
+  // Walk ancestors from nearest (parent) to farthest (root)
+  for (let i = ctx.ancestors.length - 1; i >= 0; i--) {
+    const ancestor = ctx.ancestors[i];
+    const fills = ancestor.fills;
+    if (fills && fills !== MIXED) {
+      const bg = (fills as IPaint[]).find(f => f.type === 'SOLID' && f.visible !== false) as ISolidPaint | undefined;
       if (bg?.color) return bg.color;
     }
   }
@@ -779,11 +812,14 @@ export function visualBalance(): AuditRule {
     const centerY = weightedY / totalArea;
 
     // How far is the center of mass from the frame center?
-    const frameCenterX = ctx.rootWidth / 2;
-    const frameCenterY = ctx.rootHeight / 2;
+    // Use real root dimensions (rootHeight may be Infinity for scrollable pages)
+    const realW = ctx.root.width;
+    const realH = ctx.root.height;
+    const frameCenterX = realW / 2;
+    const frameCenterY = realH / 2;
 
-    const offsetX = Math.abs(centerX - frameCenterX) / ctx.rootWidth;
-    const offsetY = Math.abs(centerY - frameCenterY) / ctx.rootHeight;
+    const offsetX = Math.abs(centerX - frameCenterX) / realW;
+    const offsetY = Math.abs(centerY - frameCenterY) / realH;
 
     const issues: AuditIssue[] = [];
 
@@ -800,7 +836,7 @@ export function visualBalance(): AuditRule {
     }
 
     // Check if all content is in one quadrant
-    const inTopHalf = children.filter(c => c.y + c.height / 2 < ctx.rootHeight / 2).length;
+    const inTopHalf = children.filter(c => c.y + c.height / 2 < realH / 2).length;
     const inBottomHalf = children.length - inTopHalf;
     if (children.length >= 3 && (inTopHalf === 0 || inBottomHalf === 0)) {
       issues.push({
@@ -829,7 +865,10 @@ export function ctaVisibility(): AuditRule {
     if (buttons.length === 0) return [];
 
     const issues: AuditIssue[] = [];
-    const minDim = Math.min(ctx.rootWidth, ctx.rootHeight);
+    // Use real root dimensions (rootHeight may be Infinity for scrollable pages)
+    const realWidth = ctx.root.width;
+    const realHeight = ctx.root.height;
+    const minDim = Math.min(realWidth, realHeight);
 
     for (const btn of buttons) {
       // CTA should be at least touchable size
@@ -845,7 +884,7 @@ export function ctaVisibility(): AuditRule {
 
       // CTA should have sufficient area relative to frame
       const btnArea = btn.width * btn.height;
-      const frameArea = ctx.rootWidth * ctx.rootHeight;
+      const frameArea = realWidth * realHeight;
       const areaRatio = btnArea / frameArea;
 
       if (areaRatio < 0.005 && minDim > 200) {
@@ -859,7 +898,7 @@ export function ctaVisibility(): AuditRule {
       }
 
       // CTA shouldn't be fully clipped (outside frame)
-      if (btn.x + btn.width > ctx.rootWidth + 5 || btn.y + btn.height > ctx.rootHeight + 5 ||
+      if (btn.x + btn.width > realWidth + 5 || btn.y + btn.height > realHeight + 5 ||
           btn.x < -5 || btn.y < -5) {
         issues.push({
           rule: 'cta-visibility',
@@ -1064,6 +1103,220 @@ export function exportFidelity(): AuditRule {
 
     walk(ctx.root);
     return issues;
+  });
+}
+
+// ═══ DESIGN SYSTEM DEEP COMPLIANCE ════════════════════════════
+// These rules validate INode trees against the full design system
+// spec: component specs, font features, spacing scale, interactive states.
+
+// ── Font Features Compliance ──
+
+/**
+ * Check that text nodes have correct OpenType font features applied.
+ * If the design system specifies ss01/tnum/cv01, text nodes should use them.
+ */
+export function fontFeaturesCompliance(): AuditRule {
+  return rule('font-features-compliance', (node, ctx) => {
+    if (node.type !== NodeType.Text) return [];
+    if (!ctx.designSystem?.typography?.fontFeatures) return [];
+    if (ctx.designSystem.typography.fontFeatures.length === 0) return [];
+
+    const nodeFeatures = (node as any).fontFeatureSettings as string[] | undefined;
+    const requiredTags = ctx.designSystem.typography.fontFeatures
+      .filter(f => f.scope === 'global' || f.scope === 'heading')
+      .map(f => f.tag);
+
+    if (requiredTags.length === 0) return [];
+
+    const missing = requiredTags.filter(tag => !nodeFeatures?.includes(tag));
+    if (missing.length === 0) return [];
+
+    return [{
+      rule: 'font-features-compliance',
+      severity: 'info',
+      message: `Text "${truncate(node.characters ?? '', 20)}" is missing font features: ${missing.map(t => `"${t}"`).join(', ')}`,
+      nodeId: node.id,
+      nodeName: node.name,
+      path: ctx.path,
+      fix: {
+        property: 'font-feature-settings',
+        current: nodeFeatures?.length ? nodeFeatures.map(t => `"${t}"`).join(', ') : 'none',
+        suggested: requiredTags.map(t => `"${t}"`).join(', '),
+        css: `font-feature-settings: ${requiredTags.map(t => `"${t}"`).join(', ')}`,
+      },
+    }];
+  });
+}
+
+// ── Spacing Scale Compliance ──
+
+/**
+ * Check that padding/gap values snap to the design system spacing scale.
+ * Validates itemSpacing, paddingTop/Right/Bottom/Left on layout containers.
+ */
+export function spacingScaleCompliance(): AuditRule {
+  return rule('spacing-scale-compliance', (node, ctx) => {
+    if (!ctx.designSystem?.layout?.spacingScale) return [];
+    const scale = ctx.designSystem.layout.spacingScale;
+    if (scale.length < 3) return [];
+
+    const layoutMode = (node as any).layoutMode;
+    if (!layoutMode || layoutMode === 'NONE') return [];
+
+    const issues: AuditIssue[] = [];
+    const unit = ctx.designSystem.layout.spacingUnit;
+
+    const checkValue = (prop: string, val: number, cssProp: string) => {
+      if (val === 0) return;
+      // Check if value is in the scale (exact or within 1px)
+      const inScale = scale.some(s => Math.abs(val - s) <= 1);
+      // Also allow multiples of the spacing unit
+      const isGridMultiple = unit > 0 && val % unit === 0;
+      if (!inScale && !isGridMultiple) {
+        const closest = scale.reduce((a, b) => Math.abs(b - val) < Math.abs(a - val) ? b : a);
+        issues.push({
+          rule: 'spacing-scale-compliance',
+          severity: 'info',
+          message: `${prop}=${val}px on "${node.name}" is not in spacing scale. Nearest: ${closest}px`,
+          nodeId: node.id,
+          nodeName: node.name,
+          path: ctx.path,
+          fix: { property: cssProp, current: `${val}px`, suggested: `${closest}px`, css: `${cssProp}: ${closest}px` },
+        });
+      }
+    };
+
+    checkValue('itemSpacing', (node as any).itemSpacing ?? 0, 'gap');
+    checkValue('paddingTop', (node as any).paddingTop ?? 0, 'padding-top');
+    checkValue('paddingRight', (node as any).paddingRight ?? 0, 'padding-right');
+    checkValue('paddingBottom', (node as any).paddingBottom ?? 0, 'padding-bottom');
+    checkValue('paddingLeft', (node as any).paddingLeft ?? 0, 'padding-left');
+
+    return issues;
+  });
+}
+
+// ── Component Spec Compliance ──
+
+/**
+ * Check that nodes with semantic roles (button, card, badge, input, nav)
+ * have properties matching the design system component specs.
+ */
+export function componentSpecCompliance(): AuditRule {
+  return rule('component-spec-compliance', (node, ctx) => {
+    if (!ctx.designSystem?.components) return [];
+    const components = ctx.designSystem.components;
+    const issues: AuditIssue[] = [];
+
+    const role = (node as any).semanticRole as string | null;
+    const name = (node.name ?? '').toLowerCase();
+
+    // Button compliance
+    if ((role === 'button' || role === 'cta' || /button|btn|cta/i.test(name)) && components.button) {
+      const spec = components.button;
+      const cr = node.cornerRadius;
+      if (typeof cr === 'number' && cr > 0 && Math.abs(cr - spec.borderRadius) > 2) {
+        issues.push({
+          rule: 'component-spec-compliance',
+          severity: 'info',
+          message: `Button "${node.name}" radius ${cr}px doesn't match spec (${spec.borderRadius}px)`,
+          nodeId: node.id, nodeName: node.name, path: ctx.path,
+          fix: { property: 'border-radius', current: `${cr}px`, suggested: `${spec.borderRadius}px`, css: `border-radius: ${spec.borderRadius}px` },
+        });
+      }
+    }
+
+    // Card compliance
+    if ((role === 'card' || /card/i.test(name)) && components.card) {
+      const spec = components.card;
+      const cr = node.cornerRadius;
+      if (typeof cr === 'number' && cr > 0 && Math.abs(cr - spec.borderRadius) > 2) {
+        issues.push({
+          rule: 'component-spec-compliance',
+          severity: 'info',
+          message: `Card "${node.name}" radius ${cr}px doesn't match spec (${spec.borderRadius}px)`,
+          nodeId: node.id, nodeName: node.name, path: ctx.path,
+          fix: { property: 'border-radius', current: `${cr}px`, suggested: `${spec.borderRadius}px`, css: `border-radius: ${spec.borderRadius}px` },
+        });
+      }
+    }
+
+    // Badge compliance
+    if ((role === 'badge' || role === 'tag' || /badge|tag|pill/i.test(name)) && components.badge) {
+      const spec = components.badge;
+      if (node.type === NodeType.Text && spec.fontSize) {
+        const fs = node.fontSize;
+        if (typeof fs === 'number' && Math.abs(fs - spec.fontSize) > 2) {
+          issues.push({
+            rule: 'component-spec-compliance',
+            severity: 'info',
+            message: `Badge text "${node.name}" fontSize ${fs}px doesn't match spec (${spec.fontSize}px)`,
+            nodeId: node.id, nodeName: node.name, path: ctx.path,
+            fix: { property: 'font-size', current: `${fs}px`, suggested: `${spec.fontSize}px`, css: `font-size: ${spec.fontSize}px` },
+          });
+        }
+      }
+    }
+
+    // Input compliance
+    if ((role === 'input' || /input|field|form/i.test(name)) && components.input) {
+      const spec = components.input;
+      const cr = node.cornerRadius;
+      if (typeof cr === 'number' && cr > 0 && Math.abs(cr - spec.borderRadius) > 2) {
+        issues.push({
+          rule: 'component-spec-compliance',
+          severity: 'info',
+          message: `Input "${node.name}" radius ${cr}px doesn't match spec (${spec.borderRadius}px)`,
+          nodeId: node.id, nodeName: node.name, path: ctx.path,
+          fix: { property: 'border-radius', current: `${cr}px`, suggested: `${spec.borderRadius}px`, css: `border-radius: ${spec.borderRadius}px` },
+        });
+      }
+      if (spec.height && node.height > 0 && Math.abs(node.height - spec.height) > 4) {
+        issues.push({
+          rule: 'component-spec-compliance',
+          severity: 'info',
+          message: `Input "${node.name}" height ${node.height}px doesn't match spec (${spec.height}px)`,
+          nodeId: node.id, nodeName: node.name, path: ctx.path,
+          fix: { property: 'height', current: `${node.height}px`, suggested: `${spec.height}px`, css: `height: ${spec.height}px` },
+        });
+      }
+    }
+
+    return issues;
+  });
+}
+
+// ── Interactive State Completeness ──
+
+/**
+ * Check that interactive nodes (buttons, links, inputs) have hover states defined.
+ * A button without a hover state creates a flat, non-interactive feel.
+ */
+export function stateCompleteness(): AuditRule {
+  return rule('state-completeness', (node, ctx) => {
+    const role = (node as any).semanticRole as string | null;
+    const name = (node.name ?? '').toLowerCase();
+    const isInteractive = role === 'button' || role === 'cta' || role === 'link' || role === 'input'
+      || /button|btn|cta|link|input/i.test(name);
+
+    if (!isInteractive) return [];
+
+    const states = (node as any).states as Record<string, unknown> | undefined;
+    const hasHover = states && 'hover' in states && states.hover != null;
+
+    if (!hasHover) {
+      return [{
+        rule: 'state-completeness',
+        severity: 'info',
+        message: `Interactive element "${node.name}" has no hover state defined`,
+        nodeId: node.id,
+        nodeName: node.name,
+        path: ctx.path,
+      }];
+    }
+
+    return [];
   });
 }
 
