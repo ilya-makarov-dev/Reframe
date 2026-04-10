@@ -1,23 +1,17 @@
 /**
- * Semantic Layer — auto-role detection and semantic utilities.
+ * Semantic auto-detection — node-property heuristics.
  *
- * Detects semantic roles from node properties using heuristics:
- *   - Button: small frame with text child, cornerRadius, bright fill
- *   - Heading: large text (fontSize >= 24)
- *   - Card: frame with fills, cornerRadius, shadow
- *   - Nav: horizontal frame near top with multiple children
- *   - Hero: large frame at top with large text
- *   - CTA: button with action-like text ("get started", "sign up", etc.)
- *   - Image: frame with image fill
- *   - Divider: thin rectangle (height ≤ 4 or width ≤ 4)
- *   - Badge: small frame with small text, cornerRadius ≥ half height
- *   - Avatar: small ellipse or rounded frame (1:1 aspect)
+ * Detects semantic roles from individual node properties using simple
+ * predicates: "small frame with text child + cornerRadius = button",
+ * "large text in top half = heading", etc. Operates on one node at a time
+ * with minimal cross-node context — fast, deterministic, banner-agnostic.
  *
- * Also provides semantic HTML tag mapping for export.
+ * For frame-aware multi-slot classification (titles, CTAs, sections in
+ * a long-form design) see {@link classify} in `./classify`.
  */
 
-import type { SceneNode, SemanticRole, Fill } from './engine/types';
-import type { SceneGraph } from './engine/scene-graph';
+import type { SceneNode, SemanticRole, Fill } from '../engine/types';
+import type { SceneGraph } from '../engine/scene-graph';
 
 // ─── Auto-role detection ────────────────────────────────────
 

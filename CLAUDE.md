@@ -9,8 +9,6 @@ npm run build                              # build all packages
 npm test                                   # run all tests
 npx tsc --noEmit -p packages/core/tsconfig.json   # typecheck core
 npx tsc --noEmit -p packages/mcp/tsconfig.json    # typecheck mcp
-npx tsx scripts/test-parser-coverage.ts    # 62/62 brand parser coverage
-npx tsx scripts/test-e2e-ds-pipeline.ts    # end-to-end design system pipeline
 ```
 
 ## MCP Pipeline (always this order)

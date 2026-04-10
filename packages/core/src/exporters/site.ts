@@ -139,11 +139,35 @@ export function exportSite(
     [data-nav-link].rf-nav-active { opacity: 1; font-weight: 600; }
     [data-nav-link] { cursor: pointer; }
 
+    /* Built-in floating nav — shown when the source designs don't already
+       contain nav text that injectNavLinks could hook into. Keeps site export
+       usable for arbitrary scene bundles (e.g. a compile session with
+       auto-named slugs like "375x1334 (resized)"). */
+    .rf-site-nav {
+      position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+      z-index: 9999; display: flex; gap: 6px; padding: 6px;
+      background: rgba(20, 20, 22, 0.82); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); border-radius: 999px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.24); max-width: calc(100vw - 32px);
+      overflow-x: auto; font-family: system-ui, -apple-system, sans-serif;
+    }
+    .rf-site-nav a {
+      display: inline-block; padding: 8px 14px; border-radius: 999px;
+      color: rgba(255, 255, 255, 0.72); font-size: 13px; font-weight: 500;
+      white-space: nowrap; transition: background 160ms, color 160ms;
+    }
+    .rf-site-nav a:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+    .rf-site-nav a.rf-nav-active { color: #fff; background: rgba(255, 255, 255, 0.16); }
+
     /* Transitions */
     ${keyframes}
   </style>
 </head>
 <body>
+  <nav class="rf-site-nav">
+    ${navData.map(p => `<a href="#${esc(p.slug)}" data-nav-link="${esc(p.slug)}">${esc(p.name)}</a>`).join('\n    ')}
+  </nav>
+
   ${pageFragments.join('\n\n  ')}
 
   <script>

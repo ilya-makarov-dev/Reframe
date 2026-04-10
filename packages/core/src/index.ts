@@ -189,6 +189,14 @@ export {
   semanticTag,
   ariaRole,
   headingLevel,
+  classifyScene,
+  readSemanticSkeleton,
+} from './semantic';
+export type {
+  ClassifyOptions,
+  ClassifyResult,
+  SemanticSlot,
+  DetectedRole,
 } from './semantic';
 
 // ── Pipes ──

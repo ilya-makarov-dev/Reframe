@@ -31,6 +31,7 @@ export { exportDesignMd } from './exporter';
 
 export {
   tokenizeDesignSystem,
+  rebuildTokenIndexFromGraph,
   resolveToken,
   resolveColorToken,
   resolveNumberToken,

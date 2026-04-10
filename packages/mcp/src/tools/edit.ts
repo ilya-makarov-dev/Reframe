@@ -25,9 +25,10 @@ import { parseDesignMd } from '../../../core/src/design-system/index.js';
 import {
   tokenizeDesignSystem, resolveColorToken, resolveNumberToken,
   bindTokenToNode, autoBindTokensFromGraph, switchTokenMode, listTokens, colorToHex,
+  rebuildTokenIndexFromGraph,
   type TokenIndex,
 } from '../../../core/src/design-system/tokens.js';
-import { autoDetectRoles } from '../../../core/src/semantic.js';
+import { autoDetectRoles, classifyScene } from '../../../core/src/semantic/index.js';
 import { adaptFromGraph } from '../../../core/src/resize/adapt.js';
 import { ComponentRegistry } from '../../../core/src/engine/component-registry.js';
 import { resolveBlueprint } from '../../../core/src/ui/blueprint.js';
@@ -271,6 +272,25 @@ const operationSchema = z.discriminatedUnion('op', [
     props: z.record(z.any()).describe('Properties to update (any INode properties)'),
   }),
 
+  // Update node(s) by semantic role — addresses content by meaning instead of nodeId.
+  // Requires the scene to have been classified (compile auto-classifies; otherwise
+  // updateSlot lazy-classifies on first call). Lookup walks the tree in DFS order
+  // and matches every node whose semanticRole equals `role`. Optional `index` picks
+  // the Nth match (zero-based); optional `textContains` filters to nodes whose text
+  // contains the substring (case-insensitive). Without index/textContains, props
+  // apply to ALL matching nodes — useful for bulk operations like "make every CTA
+  // slightly smaller" or "raise contrast on every caption".
+  z.object({
+    op: z.literal('updateSlot'),
+    sceneId: z.string().optional(),
+    role: z.string().describe('Semantic role: heading | button | caption | section | hero | logo | nav | footer | cta | etc.'),
+    index: z.number().int().nonnegative().optional()
+      .describe('Pick the Nth match (zero-based). Omit to update all matches.'),
+    textContains: z.string().optional()
+      .describe('Filter to matches whose text contains this substring (case-insensitive).'),
+    props: z.record(z.any()).describe('Properties to update (same shape as update.props)'),
+  }),
+
   // Delete node
   z.object({
     op: z.literal('delete'),
@@ -393,6 +413,228 @@ function findDeep(graph: SceneGraph, nodeId: string, name: string): SceneNode | 
     if (found) return found;
   }
   return undefined;
+}
+
+/**
+ * Find every node whose semanticRole matches `role`, in DFS order.
+ *
+ * Optional filters:
+ *   - `textContains` — keep only nodes whose .text or first TEXT-child .text
+ *      contains the substring (case-insensitive). Useful when several nodes
+ *      share a role and the caller wants to disambiguate by content.
+ *   - `index` — picks the Nth match (zero-based). Applied AFTER textContains.
+ *
+ * Returns a list because slot updates are bulk-friendly: omitting filters
+ * means "all matches" (e.g. "raise contrast on every caption").
+ */
+/**
+ * When updateSlot returns zero matches, scan the whole graph for the
+ * textContains needle and return a histogram of the semantic roles that
+ * actually contain it. The classifier sometimes flips a TEXT node between
+ * two plausible roles (heading vs paragraph for a short line); instead of
+ * making the agent retry each role by hand, show where the text really
+ * lives so it can reissue the edit with the correct role.
+ */
+function rolesContainingText(
+  graph: SceneGraph,
+  rootId: string,
+  needle: string,
+): Map<string, number> {
+  const n = needle.toLowerCase();
+  const hits = new Map<string, number>();
+  const walk = (id: string) => {
+    const node = graph.getNode(id);
+    if (!node) return;
+    const role = (node as any).semanticRole as string | undefined;
+    if (role) {
+      const ownText = node.type === 'TEXT' ? (node.text ?? '') : '';
+      let matched = ownText.toLowerCase().includes(n);
+      if (!matched) {
+        // Walk descendants looking for TEXT children with matching content.
+        const inner = (cid: string): boolean => {
+          const c = graph.getNode(cid);
+          if (!c) return false;
+          if (c.type === 'TEXT' && c.text && c.text.toLowerCase().includes(n)) return true;
+          for (const gcid of c.childIds) {
+            if (inner(gcid)) return true;
+          }
+          return false;
+        };
+        for (const cid of node.childIds) {
+          if (inner(cid)) { matched = true; break; }
+        }
+      }
+      if (matched) {
+        hits.set(role, (hits.get(role) ?? 0) + 1);
+      }
+    }
+    for (const cid of node.childIds) walk(cid);
+  };
+  walk(rootId);
+  return hits;
+}
+
+function findBySlot(
+  graph: SceneGraph,
+  rootId: string,
+  role: string,
+  filters: { index?: number; textContains?: string } = {},
+): SceneNode[] {
+  const matches: SceneNode[] = [];
+  const walk = (id: string) => {
+    const n = graph.getNode(id);
+    if (!n) return;
+    if ((n as any).semanticRole === role) matches.push(n);
+    for (const cid of n.childIds) walk(cid);
+  };
+  walk(rootId);
+
+  let filtered = matches;
+  if (filters.textContains) {
+    const needle = filters.textContains.toLowerCase();
+    filtered = filtered.filter(n => {
+      const ownText = n.type === 'TEXT' ? n.text : null;
+      if (ownText && ownText.toLowerCase().includes(needle)) return true;
+      // Also try first TEXT descendant — slot is often a wrapper FRAME
+      // tagged as 'button' with the label text inside.
+      let found = false;
+      const inner = (id: string) => {
+        if (found) return;
+        const c = graph.getNode(id);
+        if (!c) return;
+        if (c.type === 'TEXT' && c.text && c.text.toLowerCase().includes(needle)) {
+          found = true; return;
+        }
+        for (const ccid of c.childIds) inner(ccid);
+      };
+      for (const cid of n.childIds) inner(cid);
+      return found;
+    });
+  }
+  if (filters.index !== undefined) {
+    const picked = filtered[filters.index];
+    filtered = picked ? [picked] : [];
+  }
+  return filtered;
+}
+
+/**
+ * Apply an update-style props patch to a single node, with the same
+ * sanitization, token resolution, fills shorthand, and semantic-role
+ * mapping that the `update` op uses. Used by both `update` (single
+ * target) and `updateSlot` (one or many targets).
+ *
+ * Returns the list of sanitisation warnings the caller can attach to
+ * its result line. Mutates `propsCopy` in place during sanitisation —
+ * pass a fresh copy per node when calling for multiple targets.
+ */
+function applyNodeUpdate(
+  graph: SceneGraph,
+  target: SceneNode,
+  propsInput: Record<string, any>,
+  tokenIdx: TokenIndex | undefined,
+): { warnings: string[]; appliedKeys: string[] } {
+  const changes: any = { ...propsInput };
+  const sanitizeWarnings: string[] = [];
+  const clampInPlace = (key: string, min: number, max: number) => {
+    if (changes[key] === undefined || changes[key] === null) return;
+    if (typeof changes[key] !== 'number' || !Number.isFinite(changes[key])) {
+      sanitizeWarnings.push(`${key} must be a finite number`);
+      delete changes[key];
+      return;
+    }
+    if (changes[key] < min || changes[key] > max) {
+      const original = changes[key];
+      changes[key] = Math.min(Math.max(changes[key], min), max);
+      sanitizeWarnings.push(`${key} ${original} → ${changes[key]} (clamped to [${min}, ${max}])`);
+    }
+  };
+  clampInPlace('opacity', 0, 1);
+  clampInPlace('rotation', -360, 360);
+  clampInPlace('width', 0, 16384);
+  clampInPlace('height', 0, 16384);
+  clampInPlace('minWidth', 0, 16384);
+  clampInPlace('minHeight', 0, 16384);
+  clampInPlace('maxWidth', 0, 16384);
+  clampInPlace('maxHeight', 0, 16384);
+  for (const k of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'padding', 'itemSpacing', 'counterAxisSpacing']) {
+    if (typeof changes[k] === 'number' && changes[k] < 0) {
+      sanitizeWarnings.push(`${k} ${changes[k]} → 0 (negative spacing not allowed)`);
+      changes[k] = 0;
+    }
+  }
+  for (const k of ['cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius']) {
+    if (typeof changes[k] === 'number' && changes[k] < 0) {
+      sanitizeWarnings.push(`${k} ${changes[k]} → 0 (negative radius not allowed)`);
+      changes[k] = 0;
+    }
+  }
+  if (Array.isArray(changes.fills)) {
+    for (const f of changes.fills) {
+      if (f && typeof f === 'object' && f.color && typeof f.color === 'object') {
+        for (const ch of ['r', 'g', 'b', 'a'] as const) {
+          if (typeof f.color[ch] === 'number' && (f.color[ch] < 0 || f.color[ch] > 1)) {
+            const orig = f.color[ch];
+            f.color[ch] = Math.min(Math.max(f.color[ch], 0), 1);
+            sanitizeWarnings.push(`fill.color.${ch} ${orig} → ${f.color[ch]} (clamped to [0,1])`);
+          }
+        }
+      }
+    }
+  }
+
+  if (changes.fills) {
+    const { fills, tokenBindings } = parseFillsWithTokens(changes.fills, graph, tokenIdx);
+    changes.fills = fills;
+    for (const [idx, tokenName] of tokenBindings) {
+      bindTokenToNode(graph, tokenIdx!, target.id, `fills[${idx}].color`, tokenName);
+    }
+  }
+
+  const tokenNumFields = ['fontSize', 'fontWeight', 'lineHeight', 'letterSpacing',
+    'cornerRadius', 'itemSpacing', 'counterAxisSpacing',
+    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'] as const;
+  for (const field of tokenNumFields) {
+    if (changes[field] !== undefined) {
+      const { value, tokenName } = resolveTokenProp(changes[field], graph, tokenIdx);
+      changes[field] = value;
+      if (tokenName && tokenIdx) {
+        bindTokenToNode(graph, tokenIdx, target.id, field, tokenName);
+      }
+    }
+  }
+
+  if (changes.padding !== undefined) {
+    const { value, tokenName } = resolveTokenProp(changes.padding, graph, tokenIdx);
+    changes.paddingTop = value;
+    changes.paddingRight = value;
+    changes.paddingBottom = value;
+    changes.paddingLeft = value;
+    if (tokenName && tokenIdx) {
+      for (const side of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft']) {
+        bindTokenToNode(graph, tokenIdx, target.id, side, tokenName);
+      }
+    }
+    delete changes.padding;
+  }
+
+  if (changes.role !== undefined) {
+    changes.semanticRole = changes.role;
+    delete changes.role;
+  }
+
+  if (changes.states) {
+    const states: Record<string, any> = {};
+    for (const [stateName, stateProps] of Object.entries(changes.states as Record<string, any>)) {
+      const parsed: any = { ...stateProps };
+      if (parsed.fills) parsed.fills = parseFills(parsed.fills);
+      states[stateName] = parsed;
+    }
+    changes.states = states;
+  }
+
+  graph.updateNode(target.id, changes);
+  return { warnings: sanitizeWarnings, appliedKeys: Object.keys(propsInput) };
 }
 
 // ─── Build node tree into graph ──────────────────────────────
@@ -784,122 +1026,153 @@ export async function handleEdit(input: {
         if (!target) { results.push(`UPDATE ERROR: "${op.path}" not found`); break; }
 
         const tokenIdx = getActiveTokenIndex(sceneId);
-        const changes: any = { ...op.props };
-
-        // ── Input sanitisation ───────────────────────────────────
-        // Reject / clamp obviously invalid values before they hit the graph.
-        // Without this, an agent passing `opacity: -5, rotation: 99999,
-        // width: -200` corrupts the scene silently and downstream layout /
-        // export code crashes far away from the offending edit.
-        const sanitizeWarnings: string[] = [];
-        const clampInPlace = (key: string, min: number, max: number) => {
-          if (changes[key] === undefined || changes[key] === null) return;
-          if (typeof changes[key] !== 'number' || !Number.isFinite(changes[key])) {
-            sanitizeWarnings.push(`${key} must be a finite number`);
-            delete changes[key];
-            return;
-          }
-          if (changes[key] < min || changes[key] > max) {
-            const original = changes[key];
-            changes[key] = Math.min(Math.max(changes[key], min), max);
-            sanitizeWarnings.push(`${key} ${original} → ${changes[key]} (clamped to [${min}, ${max}])`);
-          }
-        };
-        clampInPlace('opacity', 0, 1);
-        clampInPlace('rotation', -360, 360);
-        clampInPlace('width', 0, 16384);
-        clampInPlace('height', 0, 16384);
-        clampInPlace('minWidth', 0, 16384);
-        clampInPlace('minHeight', 0, 16384);
-        clampInPlace('maxWidth', 0, 16384);
-        clampInPlace('maxHeight', 0, 16384);
-        for (const k of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'padding', 'itemSpacing', 'counterAxisSpacing']) {
-          if (typeof changes[k] === 'number' && changes[k] < 0) {
-            sanitizeWarnings.push(`${k} ${changes[k]} → 0 (negative spacing not allowed)`);
-            changes[k] = 0;
-          }
-        }
-        for (const k of ['cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius']) {
-          if (typeof changes[k] === 'number' && changes[k] < 0) {
-            sanitizeWarnings.push(`${k} ${changes[k]} → 0 (negative radius not allowed)`);
-            changes[k] = 0;
-          }
-        }
-        // RGB channel range: each component must be in [0, 1]. Catch object
-        // fills passed directly (e.g. {type:"SOLID", color:{r:2, g:-1, b:0.5}}).
-        if (Array.isArray(changes.fills)) {
-          for (const f of changes.fills) {
-            if (f && typeof f === 'object' && f.color && typeof f.color === 'object') {
-              for (const ch of ['r', 'g', 'b', 'a'] as const) {
-                if (typeof f.color[ch] === 'number' && (f.color[ch] < 0 || f.color[ch] > 1)) {
-                  const orig = f.color[ch];
-                  f.color[ch] = Math.min(Math.max(f.color[ch], 0), 1);
-                  sanitizeWarnings.push(`fill.color.${ch} ${orig} → ${f.color[ch]} (clamped to [0,1])`);
-                }
-              }
-            }
-          }
-        }
-
-        // Handle fills shorthand with token support
-        if (changes.fills) {
-          const { fills, tokenBindings } = parseFillsWithTokens(changes.fills, stored.graph, tokenIdx);
-          changes.fills = fills;
-          for (const [idx, tokenName] of tokenBindings) {
-            bindTokenToNode(stored.graph, tokenIdx!, target.id, `fills[${idx}].color`, tokenName);
-          }
-        }
-
-        // Handle token-aware numeric properties
-        const tokenNumFields = ['fontSize', 'fontWeight', 'lineHeight', 'letterSpacing',
-          'cornerRadius', 'itemSpacing', 'counterAxisSpacing',
-          'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'] as const;
-        for (const field of tokenNumFields) {
-          if (changes[field] !== undefined) {
-            const { value, tokenName } = resolveTokenProp(changes[field], stored.graph, tokenIdx);
-            changes[field] = value;
-            if (tokenName && tokenIdx) {
-              bindTokenToNode(stored.graph, tokenIdx, target.id, field, tokenName);
-            }
-          }
-        }
-
-        // Handle padding shorthand
-        if (changes.padding !== undefined) {
-          const { value, tokenName } = resolveTokenProp(changes.padding, stored.graph, tokenIdx);
-          changes.paddingTop = value;
-          changes.paddingRight = value;
-          changes.paddingBottom = value;
-          changes.paddingLeft = value;
-          if (tokenName && tokenIdx) {
-            for (const side of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft']) {
-              bindTokenToNode(stored.graph, tokenIdx, target.id, side, tokenName);
-            }
-          }
-          delete changes.padding;
-        }
-
-        // Handle semantic role
-        if (changes.role !== undefined) {
-          changes.semanticRole = changes.role;
-          delete changes.role;
-        }
-
-        // Handle interaction states
-        if (changes.states) {
-          const states: Record<string, any> = {};
-          for (const [stateName, stateProps] of Object.entries(changes.states as Record<string, any>)) {
-            const parsed: any = { ...stateProps };
-            if (parsed.fills) parsed.fills = parseFills(parsed.fills);
-            states[stateName] = parsed;
-          }
-          changes.states = states;
-        }
-
-        stored.graph.updateNode(target.id, changes);
+        const { warnings, appliedKeys } = applyNodeUpdate(stored.graph, target, op.props, tokenIdx);
         touchedScenes.add(sceneId);
-        const warnSuffix = sanitizeWarnings.length > 0 ? ` [sanitized: ${sanitizeWarnings.join('; ')}]` : '';
-        results.push(`UPDATE "${target.name}" — ${Object.keys(op.props).join(', ')}${warnSuffix}`);
+        const warnSuffix = warnings.length > 0 ? ` [sanitized: ${warnings.join('; ')}]` : '';
+        results.push(`UPDATE "${target.name}" — ${appliedKeys.join(', ')}${warnSuffix}`);
+        break;
+      }
+
+      case 'updateSlot': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('UPDATE_SLOT ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`UPDATE_SLOT ERROR: scene "${sceneId}" not found`); break; }
+
+        // Text-prop routing helper. The matched slot is often a wrapper FRAME
+        // (button, card, hero) whose visible text lives on an inner TEXT node.
+        // When the agent passes text-only props like `text` or `fontSize`, we
+        // re-route those to the first TEXT descendant and keep container-only
+        // props on the wrapper. Without this, "updateSlot button text='Buy'"
+        // would silently land `text: 'Buy'` on a div that doesn't render text.
+        const TEXT_ONLY_PROPS = new Set([
+          'text', 'characters', 'fontSize', 'fontFamily', 'fontWeight',
+          'fontName', 'lineHeight', 'letterSpacing', 'italic',
+          'textAlignHorizontal', 'textAlignVertical', 'textCase', 'textDecoration',
+          'textTruncation', 'maxLines',
+        ]);
+        const findFirstTextDescendant = (graph: SceneGraph, nodeId: string): SceneNode | null => {
+          const seen = new Set<string>();
+          const stack = [nodeId];
+          while (stack.length > 0) {
+            const id = stack.pop()!;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            const n = graph.getNode(id);
+            if (!n) continue;
+            if (n.id !== nodeId && n.type === 'TEXT') return n;
+            for (const cid of n.childIds) stack.push(cid);
+          }
+          return null;
+        };
+        const splitProps = (props: Record<string, any>) => {
+          const textProps: Record<string, any> = {};
+          const containerProps: Record<string, any> = {};
+          for (const [k, v] of Object.entries(props)) {
+            if (TEXT_ONLY_PROPS.has(k)) textProps[k] = v;
+            else containerProps[k] = v;
+          }
+          return { textProps, containerProps };
+        };
+
+        // Make sure scene has been classified. If readSemanticSkeleton finds
+        // nothing tagged we lazy-classify so updateSlot works on imported
+        // scenes that bypassed reframe_compile. This is the same lazy path
+        // inspect uses; safe to call repeatedly (idempotent).
+        const probe = findBySlot(stored.graph, stored.rootId, op.role, {});
+        if (probe.length === 0) {
+          try {
+            await classifyScene(stored.graph, stored.rootId, {
+              designSystem: ds as any,
+              multiSlot: true,
+            });
+          } catch (err: any) {
+            results.push(`UPDATE_SLOT ERROR: classification failed — ${err?.message ?? err}`);
+            break;
+          }
+        }
+
+        const matches = findBySlot(stored.graph, stored.rootId, op.role, {
+          index: op.index,
+          textContains: op.textContains,
+        });
+
+        if (matches.length === 0) {
+          // Be helpful: list which roles ARE present so the agent can correct.
+          const roleHistogram = new Map<string, number>();
+          const walk = (id: string) => {
+            const n = stored.graph.getNode(id);
+            if (!n) return;
+            if ((n as any).semanticRole) {
+              roleHistogram.set((n as any).semanticRole, (roleHistogram.get((n as any).semanticRole) ?? 0) + 1);
+            }
+            for (const cid of n.childIds) walk(cid);
+          };
+          walk(stored.rootId);
+          const available = [...roleHistogram].map(([r, n]) => `${r}=${n}`).join(', ');
+          const filterDesc = [
+            op.textContains ? `textContains="${op.textContains}"` : null,
+            op.index !== undefined ? `index=${op.index}` : null,
+          ].filter(Boolean).join(', ');
+          // If the caller passed textContains, tell them which role actually
+          // has that text so they can retry with the right slot name.
+          let hint = '';
+          if (op.textContains) {
+            const hits = rolesContainingText(stored.graph, stored.rootId, op.textContains);
+            if (hits.size > 0) {
+              const parts = [...hits].map(([r, n]) => `${r}=${n}`).join(', ');
+              hint = `. Text "${op.textContains}" found in: ${parts}`;
+            } else {
+              hint = `. Text "${op.textContains}" not found in any tagged node`;
+            }
+          }
+          results.push(
+            `UPDATE_SLOT ERROR: no nodes match role="${op.role}"` +
+            (filterDesc ? ` (${filterDesc})` : '') +
+            (available ? `. Available roles: ${available}` : '. Scene has no semantic tags — run reframe_compile first.') +
+            hint
+          );
+          break;
+        }
+
+        const tokenIdx = getActiveTokenIndex(sceneId);
+        const allWarnings: string[] = [];
+        const updatedNames: string[] = [];
+        const { textProps, containerProps } = splitProps(op.props);
+        const hasTextProps = Object.keys(textProps).length > 0;
+        const hasContainerProps = Object.keys(containerProps).length > 0;
+
+        for (const target of matches) {
+          // For text-only props, route to the matched node directly if it
+          // already IS a TEXT node, otherwise to its first TEXT descendant.
+          // For container props, always apply to the matched node itself.
+          if (hasTextProps) {
+            const textTarget = target.type === 'TEXT'
+              ? target
+              : findFirstTextDescendant(stored.graph, target.id);
+            if (textTarget) {
+              const { warnings } = applyNodeUpdate(stored.graph, textTarget, { ...textProps }, tokenIdx);
+              allWarnings.push(...warnings);
+            } else {
+              allWarnings.push(`no TEXT descendant under "${target.name}" — text props skipped`);
+            }
+          }
+          if (hasContainerProps) {
+            const { warnings } = applyNodeUpdate(stored.graph, target, { ...containerProps }, tokenIdx);
+            allWarnings.push(...warnings);
+          }
+          updatedNames.push(target.name ?? target.id);
+        }
+        touchedScenes.add(sceneId);
+        const filterDesc = [
+          op.textContains ? `text~"${op.textContains}"` : null,
+          op.index !== undefined ? `[${op.index}]` : null,
+        ].filter(Boolean).join(' ');
+        const warnSuffix = allWarnings.length > 0 ? ` [sanitized: ${allWarnings.join('; ')}]` : '';
+        const targetSummary = matches.length === 1
+          ? `"${updatedNames[0]}"`
+          : `${matches.length} matches: ${updatedNames.slice(0, 3).map(n => `"${n}"`).join(', ')}${matches.length > 3 ? ` …` : ''}`;
+        results.push(`UPDATE_SLOT [${op.role}${filterDesc ? ' ' + filterDesc : ''}] ${targetSummary} — ${Object.keys(op.props).join(', ')}${warnSuffix}`);
         break;
       }
 
@@ -1164,8 +1437,36 @@ export async function handleEdit(input: {
         const stored = getScene(sceneId);
         if (!stored) { results.push(`SET_MODE ERROR: scene "${sceneId}" not found`); break; }
 
-        const tokenIdx = getActiveTokenIndex(sceneId);
-        if (!tokenIdx) { results.push('SET_MODE ERROR: no tokens defined (run defineTokens first)'); break; }
+        // Lookup order:
+        //   1. In-memory sidecar TokenIndex from the current session.
+        //   2. Rebuild from `graph.variableCollections` — works when
+        //      the graph's variables survived serialization (currently
+        //      they don't, but this is the right place for the future
+        //      format upgrade that includes them).
+        //   3. Auto-run `defineTokens` from the active design system —
+        //      this is the path that actually unblocks MCP sessions
+        //      where scenes got rehydrated without their token sidecar.
+        //      The call is idempotent (same DS → same tokens) so it
+        //      doesn't harm re-invocations.
+        let tokenIdx = getActiveTokenIndex(sceneId);
+        if (!tokenIdx) {
+          tokenIdx = rebuildTokenIndexFromGraph(stored.graph);
+        }
+        if (!tokenIdx) {
+          const designMdStr = input.designMd ?? effectiveDesignMd ?? session.activeDesignMd;
+          if (designMdStr) {
+            try {
+              const parsedDs = session.getOrParseDesignMd(designMdStr, parseDesignMd);
+              tokenIdx = tokenizeDesignSystem(stored.graph, parsedDs, { darkMode: true });
+              autoBindTokensFromGraph(stored.graph, stored.rootId, tokenIdx);
+            } catch { /* best-effort */ }
+          }
+        }
+        if (tokenIdx) {
+          const sessId = findSessionId(sceneId);
+          if (sessId) setTokenIndex(sessId, tokenIdx);
+        }
+        if (!tokenIdx) { results.push('SET_MODE ERROR: no tokens defined (run defineTokens first, or pass designMd / activate a brand)'); break; }
 
         const modeId = switchTokenMode(stored.graph, tokenIdx, op.mode);
         if (!modeId) {

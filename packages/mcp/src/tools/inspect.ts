@@ -20,6 +20,7 @@ import { resolveScene, listScenes, getScene } from '../store.js';
 import { getSession } from '../session.js';
 import { VERSION } from '../version.js';
 import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
+import { classifyScene, readSemanticSkeleton, SEMANTIC_TO_BANNER } from '../../../core/src/semantic/index.js';
 import { MCP_LIMITS } from '../limits.js';
 
 // ─── Schema ────────────────────────────────────────────────────
@@ -242,6 +243,56 @@ export async function handleInspect(input: {
       (info.treeTruncated ? ' (tree truncated — raise treeMaxDepth/treeMaxLines or narrow scope)' : ''));
     const typeEntries = Object.entries(info.stats.byType).map(([t, c]) => `${t}: ${c}`).join(', ');
     if (typeEntries) sections.push(`Types: ${typeEntries}`);
+  }
+
+  // ── a.5. Semantic skeleton ─────────────────────────────────────
+  // Reads `node.semanticRole` set by reframe_compile and lists slots in
+  // tree order. Re-runs classification on demand if the scene is unmarked
+  // (e.g. imported from outside the reframe pipeline).
+  try {
+    let skeleton = readSemanticSkeleton(graph, rootId);
+    if (skeleton.length === 0) {
+      // Lazy classify on first inspect of an un-tagged scene.
+      await classifyScene(graph, rootId, {
+        designSystem: ds as any,
+        multiSlot: true,
+      });
+      skeleton = readSemanticSkeleton(graph, rootId);
+    }
+    if (skeleton.length > 0) {
+      sections.push('');
+      sections.push('--- Semantic skeleton ---');
+      // Group by role for the summary line. Display roles in the banner
+      // vocabulary (`title`, `description`, …) so inspect matches the same
+      // labels compile's own `Semantic: title=4, …` line prints — the two
+      // outputs are meant to be read side by side and must agree.
+      const labelOf = (role: string) => (SEMANTIC_TO_BANNER as Record<string, string>)[role] ?? role;
+      const byRole = new Map<string, number>();
+      for (const slot of skeleton) {
+        const label = labelOf(slot.role);
+        byRole.set(label, (byRole.get(label) ?? 0) + 1);
+      }
+      const dist = [...byRole]
+        .sort(([, a], [, b]) => b - a)
+        .map(([r, n]) => `${r}=${n}`)
+        .join(', ');
+      sections.push(`${skeleton.length} tagged: ${dist}`);
+      // Per-slot listing capped at 20 entries to keep inspect output sane
+      const cap = 20;
+      const visible = skeleton.slice(0, cap);
+      for (const slot of visible) {
+        const text = slot.text ? ` "${slot.text.replace(/\s+/g, ' ').slice(0, 32)}"` : '';
+        const wh = `${Math.round(slot.bounds.w)}×${Math.round(slot.bounds.h)}`;
+        sections.push(`  [${labelOf(slot.role)}] ${slot.name} ${wh}${text}`);
+      }
+      if (skeleton.length > cap) {
+        sections.push(`  … and ${skeleton.length - cap} more`);
+      }
+    }
+  } catch (err: any) {
+    // Semantic view is best-effort — never block inspect.
+    sections.push('');
+    sections.push(`--- Semantic skeleton --- (skipped: ${err?.message ?? 'unknown'})`);
   }
 
   // ── b. Audit ─────────────────────────────────────────────────

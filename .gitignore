@@ -40,11 +40,11 @@ test-output/
 **/test-output/
 coverage/
 
-# Generated files
-scripts/*.html
-
-# Internal dev scripts (brutal test harnesses, scratch experiments)
-scripts/internal/
+# Dev scripts (exploration harnesses, stress tests, phase verifiers).
+# These are situational — written for specific debugging sessions
+# and go stale fast. Proper regression tests live under
+# packages/*/src/tests/ and run via `npm test`.
+scripts/
 
 # NPM artifacts
 *.tgz
@@ -56,10 +56,12 @@ packages/mcp/src/**/*.d.ts
 packages/mcp/src/**/*.d.ts.map
 
 # reframe local data (generated at runtime)
+# Covers .reframe/scenes, /exports, /brands, /src, design.md, phase*-report.md
 .reframe/
 
-# MCP config (user-specific)
+# MCP config (user-specific paths/api keys)
 .mcp.json
 
-# Brand cache (downloaded via npx getdesign at runtime)
-# Already inside .reframe/ which is ignored above
+# Phase scratch reports outside .reframe/
+phase*-report.md
+*-scratch.md

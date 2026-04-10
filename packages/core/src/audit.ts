@@ -195,16 +195,57 @@ function hasClippingAncestor(ctx: AuditContext): boolean {
 }
 
 /** Detect text nodes that extend beyond the root frame boundaries. */
+/**
+ * Translate a node's absoluteBoundingBox into coordinates relative to
+ * the audit root. Figma's `absoluteBoundingBox` (and the standalone
+ * adapter's equivalent) returns x/y in the graph's CANVAS space. When a
+ * resize pipeline clones a frame and parks it beside the source
+ * (`clone.x = source.x + source.width + 50`), every descendant's bb.x
+ * picks up that 700+ px offset. The overflow rules were comparing those
+ * absolute x values against `ctx.rootWidth` (a *local* number) and
+ * flagging every resized scene as overflowing. The fix is to subtract
+ * the root's own absoluteBoundingBox so comparisons happen in one
+ * coordinate space.
+ */
+function localBounds(
+  bb: { x: number; y: number; width: number; height: number },
+  rootBb: { x: number; y: number; width: number; height: number } | null | undefined,
+): { x: number; y: number; width: number; height: number } {
+  if (!rootBb) return bb;
+  return {
+    x: bb.x - rootBb.x,
+    y: bb.y - rootBb.y,
+    width: bb.width,
+    height: bb.height,
+  };
+}
+
 export function textOverflow(): AuditRule {
   return rule('text-overflow', (node, ctx) => {
     if (node.type !== NodeType.Text) return [];
 
-    const bb = node.absoluteBoundingBox;
-    if (!bb) return [];
+    const rawBb = node.absoluteBoundingBox;
+    if (!rawBb) return [];
 
     // Skip if a clipping ancestor hides the overflow visually
     if (hasClippingAncestor(ctx)) return [];
 
+    // Flex column wrap escape hatch: linkedom doesn't compute flex constraints,
+    // so a TEXT node inside a VERTICAL parent can report a natural width much
+    // wider than its parent even though it would wrap in a real browser. If
+    // the parent is a column and the text's measured width is well past the
+    // parent's inner width, trust CSS wrap rather than flag overflow.
+    const parent = ctx.parent;
+    if (
+      parent &&
+      parent.layoutMode === 'VERTICAL' &&
+      parent.width > 0 &&
+      node.width > parent.width * 1.1
+    ) {
+      return [];
+    }
+
+    const bb = localBounds(rawBb, ctx.root.absoluteBoundingBox);
     const issues: AuditIssue[] = [];
 
     if (bb.x + bb.width > ctx.rootWidth + 1 || bb.y + bb.height > ctx.rootHeight + 1) {
@@ -239,11 +280,13 @@ export function textOverflow(): AuditRule {
 export function nodeOverflow(): AuditRule {
   return rule('node-overflow', (node, ctx) => {
     if (node === ctx.root) return [];
-    const bb = node.absoluteBoundingBox;
-    if (!bb) return [];
+    const rawBb = node.absoluteBoundingBox;
+    if (!rawBb) return [];
 
     // Skip if a clipping ancestor hides the overflow visually
     if (hasClippingAncestor(ctx)) return [];
+
+    const bb = localBounds(rawBb, ctx.root.absoluteBoundingBox);
 
     if (
       bb.x + bb.width > ctx.rootWidth + 1 ||
@@ -517,16 +560,16 @@ export function fontWeightCompliance(): AuditRule {
     const fontSize = node.fontSize;
     if (typeof fontSize !== 'number') return [];
 
-    // Find the closest matching typography role by font size
-    const hierarchy = ctx.designSystem.typography.hierarchy;
-    const match = findClosestTypoRule(hierarchy, fontSize);
-    if (!match) return [];
-
     // Get the font weight from the node — check fontName.style
     const fontName = node.fontName;
     if (!fontName || fontName === MIXED) return [];
     const style = typeof fontName === 'object' && 'style' in fontName ? fontName.style : '';
     const nodeWeight = styleToWeight(style);
+
+    // Find the closest matching typography role by size, tie-breaking on weight
+    const hierarchy = ctx.designSystem.typography.hierarchy;
+    const match = findClosestTypoRule(hierarchy, fontSize, nodeWeight);
+    if (!match) return [];
 
     if (nodeWeight !== match.fontWeight && Math.abs(nodeWeight - match.fontWeight) > 100) {
       return [{
@@ -961,6 +1004,12 @@ export function ctaVisibility(): AuditRule {
         }
       }
 
+      // Absolute-positioned elements are intentionally placed outside the
+      // normal flow — a "POPULAR" ribbon pinned at `top: -12px` on a pricing
+      // card is correct, not broken. Skip the clip check for them. Without
+      // this carve-out every authored decoration trips the rule on import.
+      if ((btn as any).layoutPositioning === 'ABSOLUTE') continue;
+
       // CTA shouldn't be fully clipped (outside frame) — use content-bottom on
       // scrollable pages so buttons below the fold don't all register as clipped.
       if (btn.x + btn.width > realWidth + 5 || btn.y + btn.height > clipBottom ||
@@ -1250,12 +1299,20 @@ export function spacingScaleCompliance(): AuditRule {
       // documented section padding range. Linear DESIGN.md says "Section: pad
       // 80–100" but the parsed spacingScale (1, 4, 7, 8, 11... 35) tops out at
       // 35px, so without this exemption every hero gets crushed.
-      const isSectionPadding =
+      const isVerticalSectionPadding =
         isSectionLike &&
         (cssProp === 'padding-top' || cssProp === 'padding-bottom') &&
         sectionRange &&
         val >= sectionRange[0] * 0.9 &&
         val <= sectionRange[1] * 1.25;
+      // Horizontal section padding: sites routinely use 40-120px left/right
+      // gutters on full-width sections. These live outside the micro spacing
+      // scale but are design-legal. Exempt when the container is section-like.
+      const isHorizontalSectionPadding =
+        isSectionLike &&
+        (cssProp === 'padding-left' || cssProp === 'padding-right') &&
+        val >= 32 && val <= 160;
+      const isSectionPadding = isVerticalSectionPadding || isHorizontalSectionPadding;
       if (!inScale && !isGridMultiple && !isSectionPadding) {
         const closest = scale.reduce((a, b) => Math.abs(b - val) < Math.abs(a - val) ? b : a);
         issues.push({
@@ -1403,6 +1460,237 @@ export function stateCompleteness(): AuditRule {
   });
 }
 
+// ─── Semantic-aware rules ──────────────────────────────────────
+//
+// These rules read `node.semanticRole` (set by the semantic classifier
+// during compile/inspect) and enforce role-specific constraints. They
+// are additive to the existing name- or shape-based rules: nothing
+// fires when a scene has no semantic tags, and they target roles
+// directly so they don't fight with classifier-agnostic checks.
+//
+// All rules silently no-op when classifier hasn't run.
+
+const INTERACTIVE_ROLES = new Set([
+  'button', 'cta', 'link', 'input', 'checkbox', 'radio', 'select',
+]);
+
+const HEADING_ROLES = new Set(['heading']);
+
+// ── semantic-cta-contrast ──
+
+/**
+ * Buttons / CTAs / links must meet WCAG AA contrast (4.5:1 by default) between
+ * their label text fill and the button background. Walks each interactive
+ * node, finds the first TEXT child, computes contrast against the button's
+ * own fill (or its first ancestor with fill), and flags violations.
+ *
+ * Stricter than the global `contrast-minimum` rule which uses the configurable
+ * minContrast (often 3.0 for large text) — interactive elements need 4.5
+ * regardless of size to remain reliably readable on tap.
+ */
+export function semanticCtaContrast(minRatio = 4.5): AuditRule {
+  return rule('semantic-cta-contrast', (node, ctx) => {
+    if (!node.semanticRole || !INTERACTIVE_ROLES.has(node.semanticRole)) return [];
+
+    // Find first TEXT descendant — that's the label
+    let labelNode: INode | null = null;
+    const walk = (n: INode): void => {
+      if (labelNode) return;
+      if (n.type === NodeType.Text) { labelNode = n; return; }
+      if (n.children) for (const c of n.children) walk(c);
+    };
+    if (node.children) for (const c of node.children) walk(c);
+    if (!labelNode) return [];
+
+    // Label text fill
+    const labelFills = (labelNode as INode).fills;
+    if (!labelFills || labelFills === MIXED) return [];
+    const labelFill = (labelFills as IPaint[]).find(
+      (f: IPaint) => f.type === 'SOLID' && f.visible !== false,
+    ) as ISolidPaint | undefined;
+    if (!labelFill?.color) return [];
+
+    // Button's own background (preferred) or nearest ancestor with fill
+    let bgColor: { r: number; g: number; b: number } | null = null;
+    const ownFills = node.fills;
+    if (ownFills && ownFills !== MIXED) {
+      const own = (ownFills as IPaint[]).find(
+        f => f.type === 'SOLID' && f.visible !== false,
+      ) as ISolidPaint | undefined;
+      if (own?.color) bgColor = own.color;
+    }
+    if (!bgColor) {
+      bgColor = findNearestBackground(node, ctx);
+    }
+    if (!bgColor) return [];
+
+    const ratio = contrastRatio(labelFill.color, bgColor);
+    if (ratio < minRatio) {
+      return [{
+        rule: 'semantic-cta-contrast',
+        severity: 'warning',
+        message: `Interactive "${node.name}" (${node.semanticRole}) has contrast ${ratio.toFixed(2)}:1, below WCAG AA ${minRatio}:1 for interactive elements.`,
+        nodeId: node.id,
+        nodeName: node.name,
+        path: ctx.path,
+      }];
+    }
+    return [];
+  });
+}
+
+// ── semantic-heading-hierarchy ──
+
+/**
+ * Headings should descend monotonically by font size in DFS order. A heading
+ * larger than the previous heading suggests an out-of-order document outline
+ * (h2 → h1 → h2), which screen readers and search engines treat as an error.
+ *
+ * Implementation note: collected once on root via state map keyed by root.id,
+ * then each heading visit checks against the running max.
+ */
+export function semanticHeadingHierarchy(): AuditRule {
+  return rule('semantic-heading-hierarchy', (node, ctx) => {
+    // Run once at the root to collect all headings in DFS order
+    if (node !== ctx.root) return [];
+
+    interface H { node: INode; fs: number }
+    const headings: H[] = [];
+    const walk = (n: INode) => {
+      if (n.semanticRole && HEADING_ROLES.has(n.semanticRole)) {
+        // Find the actual text node — semanticRole may sit on the wrapper
+        let fs: number | undefined;
+        if (n.type === NodeType.Text) {
+          fs = typeof n.fontSize === 'number' ? n.fontSize : undefined;
+        } else if (n.children) {
+          for (const c of n.children) {
+            if (c.type === NodeType.Text && typeof c.fontSize === 'number') {
+              fs = c.fontSize; break;
+            }
+          }
+        }
+        if (fs && fs > 0) headings.push({ node: n, fs });
+      }
+      if (n.children) for (const c of n.children) walk(c);
+    };
+    walk(ctx.root);
+
+    if (headings.length < 2) return [];
+
+    const issues: AuditIssue[] = [];
+    let prev = headings[0];
+    for (let i = 1; i < headings.length; i++) {
+      const cur = headings[i];
+      // Allow equal sizes (siblings at same level). Flag any heading larger
+      // than the previous one — that's an outline jump up.
+      if (cur.fs > prev.fs * 1.05) {
+        issues.push({
+          rule: 'semantic-heading-hierarchy',
+          severity: 'info',
+          message: `Heading "${truncate((cur.node as any).characters ?? cur.node.name, 30)}" is ${cur.fs}px after a ${prev.fs}px heading — outline jumps back up.`,
+          nodeId: cur.node.id,
+          nodeName: cur.node.name,
+          path: ctx.path,
+        });
+      }
+      // The new running maximum is the max of fs seen so far at this depth-1
+      // level — but we actually want the previous *visited* heading, since
+      // that captures DFS order which mirrors visual reading order.
+      prev = cur;
+    }
+    return issues;
+  });
+}
+
+// ── semantic-caption-readability ──
+
+/**
+ * Caption text (disclaimers, legal lines, fine print) must remain readable.
+ * Stricter than the global `min-font-size` (default 8px which only catches
+ * "browser will refuse to render") — captions specifically need ≥ 9px to
+ * stay legible on a real display, and the rule pitches a concrete bump.
+ */
+export function semanticCaptionReadability(minPx = 9): AuditRule {
+  return rule('semantic-caption-readability', (node, ctx) => {
+    if (node.semanticRole !== 'caption') return [];
+    if (node.type !== NodeType.Text) return [];
+    const fs = typeof node.fontSize === 'number' ? node.fontSize : 0;
+    if (fs > 0 && fs < minPx) {
+      return [{
+        rule: 'semantic-caption-readability',
+        severity: 'warning',
+        message: `Caption "${truncate(node.characters ?? node.name, 30)}" is ${fs}px — below readable minimum ${minPx}px for fine print.`,
+        nodeId: node.id,
+        nodeName: node.name,
+        path: ctx.path,
+        fix: { property: 'font-size', current: `${fs}px`, suggested: `${minPx}px`, css: `font-size: ${minPx}px` },
+      }];
+    }
+    return [];
+  });
+}
+
+// ── semantic-touch-target ──
+
+/**
+ * Interactive nodes (button/cta/link/input/checkbox/radio/select) must meet
+ * the 44×44px touch-target minimum (WCAG 2.5.5 / Apple HIG). Improvement
+ * over `min-touch-target` which matches by name pattern (`/button|btn|cta/`)
+ * — semantic mode tags actual roles, so this rule fires on the right nodes
+ * even when names are `div-1`, `Frame 42`, etc.
+ */
+export function semanticTouchTarget(minSize = 44): AuditRule {
+  return rule('semantic-touch-target', (node, ctx) => {
+    if (!node.semanticRole || !INTERACTIVE_ROLES.has(node.semanticRole)) return [];
+    if (node.width >= minSize && node.height >= minSize) return [];
+    return [{
+      rule: 'semantic-touch-target',
+      severity: 'warning',
+      message: `Interactive "${node.name}" (${node.semanticRole}) is ${Math.round(node.width)}×${Math.round(node.height)}px — below WCAG ${minSize}×${minSize}px touch target.`,
+      nodeId: node.id,
+      nodeName: node.name,
+      path: ctx.path,
+    }];
+  });
+}
+
+// ── semantic-landmark-presence ──
+
+/**
+ * A page-sized scene (height ≥ 600px) should expose at least one landmark
+ * region — `header`, `nav`, `main`, `footer`, or `hero`. Without any of
+ * these, screen readers have no skip-link targets and SEO indexers cannot
+ * identify the document structure. Fires once per scene at the root.
+ *
+ * Skips small scenes (banners, badges, snippets) where landmark structure
+ * is meaningless.
+ */
+export function semanticLandmarkPresence(): AuditRule {
+  const LANDMARK_ROLES = new Set(['header', 'nav', 'main', 'footer', 'hero', 'section']);
+  return rule('semantic-landmark-presence', (node, ctx) => {
+    if (node !== ctx.root) return [];
+    if (ctx.root.height < 600) return [];
+
+    let found = false;
+    const walk = (n: INode) => {
+      if (found) return;
+      if (n.semanticRole && LANDMARK_ROLES.has(n.semanticRole)) { found = true; return; }
+      if (n.children) for (const c of n.children) walk(c);
+    };
+    walk(ctx.root);
+
+    if (found) return [];
+    return [{
+      rule: 'semantic-landmark-presence',
+      severity: 'info',
+      message: `Scene has no landmark regions (header / nav / main / hero / section). Screen readers and SEO indexers will see flat content.`,
+      nodeId: ctx.root.id,
+      nodeName: ctx.root.name,
+      path: ctx.path,
+    }];
+  });
+}
+
 // ─── Helpers ───────────────────────────────────────────────────
 
 /** Collect all text nodes in a tree. */
@@ -1420,6 +1708,15 @@ function collectTextNodes(root: INode): INode[] {
 function findButtonElements(root: INode): INode[] {
   const buttons: INode[] = [];
   const walk = (node: INode) => {
+    // Absolute-positioned decoration (badges, ribbons, pinned chips) is
+    // never an interactive CTA — it's authored placement outside the
+    // normal flow. Excluding it here stops the cta-visibility clip check
+    // from flagging intentional overhang like `top: -12px` pricing
+    // ribbons as "extends outside frame".
+    if ((node as any).layoutPositioning === 'ABSOLUTE') {
+      if (node.children) for (const c of node.children) walk(c);
+      return;
+    }
     if (node.type === NodeType.Frame || node.type === NodeType.Instance) {
       const name = (node.name ?? '').toLowerCase();
       // Must contain a TEXT child with enough content to be a real label.
@@ -1431,8 +1728,13 @@ function findButtonElements(root: INode): INode[] {
 
       // Rough sizing sanity: CTA should not dominate the screen, but also should
       // not be tiny (avatars 24×24, tiny icons 16×16 are not CTAs).
+      // Absolute 80×24 floor: on a 1440×6000 landing page the relative check
+      // (width < 0.6·root, height < 0.4·root) lets 40×24 chips through and a
+      // real Stripe-style 96×32 CTA gets lost in the noise of false positives.
+      // Anchoring the minimum in absolute pixels keeps detection stable across
+      // tiny banners and long landing pages.
       const isSmall = node.width < root.width * 0.6 && node.height < root.height * 0.4;
-      const isButtonSized = node.width >= 40 && node.height >= 24;
+      const isButtonSized = node.width >= 80 && node.height >= 24;
 
       // Must either be explicitly named like a button OR actually look+behave like
       // one: rounded corners AND a meaningful label AND button-sized.
@@ -1509,17 +1811,31 @@ function deltaE(a: { r: number; g: number; b: number }, b: { r: number; g: numbe
   return Math.sqrt((2 + rmean / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rmean) / 256) * db * db);
 }
 
-/** Find the closest typography rule by font size. */
+/**
+ * Find the closest typography rule by font size. When a weight hint is
+ * supplied and multiple roles share the same size (e.g. Apple has Card Title
+ * weight 700 AND Sub-heading weight 400 both at 21px), prefer the role whose
+ * weight is closest to the hint. Without this, the first-declared role wins
+ * and valid bold text at that size gets "fixed" to regular — or vice versa.
+ */
 function findClosestTypoRule(
   hierarchy: Array<{ role: string; fontSize: number; fontWeight: number }>,
   fontSize: number,
+  weightHint?: number,
 ): { role: string; fontSize: number; fontWeight: number } | null {
   if (hierarchy.length === 0) return null;
-  let best = hierarchy[0];
-  let bestDist = Math.abs(fontSize - best.fontSize);
+  let bestSizeDist = Infinity;
   for (const r of hierarchy) {
     const d = Math.abs(fontSize - r.fontSize);
-    if (d < bestDist) { bestDist = d; best = r; }
+    if (d < bestSizeDist) bestSizeDist = d;
+  }
+  const candidates = hierarchy.filter(r => Math.abs(fontSize - r.fontSize) === bestSizeDist);
+  if (candidates.length === 1 || weightHint === undefined) return candidates[0];
+  let best = candidates[0];
+  let bestWeightDist = Math.abs(weightHint - best.fontWeight);
+  for (const r of candidates) {
+    const d = Math.abs(weightHint - r.fontWeight);
+    if (d < bestWeightDist) { bestWeightDist = d; best = r; }
   }
   return best;
 }

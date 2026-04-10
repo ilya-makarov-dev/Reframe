@@ -479,8 +479,12 @@ function parseTypographyTable(text: string): TypographyRule[] {
       }
     }
 
-    // Deduplicate: keep the first occurrence of each role
-    if (!rules.some(r => r.role === role)) {
+    // Deduplicate on the full identity (role + size + weight). A single role
+    // bucket (e.g. "title") routinely contains multiple distinct rows — Apple
+    // has Display Hero 56/600, Section Heading 40/600, and Card Title 21/700
+    // all classified as 'title'. Collapsing to one entry per role destroys the
+    // hierarchy and makes audit rules flag legitimate weights as violations.
+    if (!rules.some(r => r.role === role && r.fontSize === fontSize && r.fontWeight === fontWeight)) {
       rules.push({ role, fontFamily, fontSize, fontWeight, lineHeight, letterSpacing, textTransform });
     }
   }
@@ -1120,7 +1124,7 @@ function parseLayout(section: Section | undefined): DesignSystemLayout {
 
       if (inRadiusBlock || /radius/i.test(line)) {
         const pxValues = [...line.matchAll(/(\d+)\s*(?:px|%)/g)].map(m => parseInt(m[1], 10));
-        for (const v of pxValues) if (v <= 100 || v === 9999) radiusValues.add(v);
+        for (const v of pxValues) if (v <= 100 || v >= 500) radiusValues.add(v);
       }
     }
     if (radiusValues.size > defaults.borderRadiusScale.length) {

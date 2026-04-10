@@ -85,6 +85,86 @@ function effectToIEffect(effect: import('../../engine/types').Effect): IEffect {
   };
 }
 
+// ─── Recursive Rescale ──────────────────────────────────────────
+
+/**
+ * DFS-rescale every node under (and including) `rootId`, applying `scale`
+ * to all geometry, layout, typography, and corner / stroke metrics.
+ *
+ * Implementation notes:
+ *  - Single pass: each node is visited exactly once. Position (x/y) is
+ *    relative to parent and scaled when descending; container metrics
+ *    (width/height/padding/gap/fontSize/radius/stroke) are scaled in the
+ *    same updateNode call to minimise round-trips through SceneGraph.
+ *  - INSTANCE subtrees are intentionally NOT recursed: their children are
+ *    component-managed (read-only) and Figma's own rescale leaves them to
+ *    the component's internal layout. Resizing the instance container is
+ *    enough — the component re-renders at the new size.
+ *  - 0-valued fields (no padding, no radius) collapse to multiplications
+ *    by 0 which are no-ops in the graph; we don't bother filtering.
+ */
+function rescaleSubtree(graph: SceneGraph, rootId: string, scale: number): void {
+  const root = graph.getNode(rootId);
+  if (!root) return;
+
+  // Container metrics on this node — single updateNode call.
+  const updates: Record<string, number> = {
+    width: root.width * scale,
+    height: root.height * scale,
+  };
+  if (root.paddingTop) updates.paddingTop = root.paddingTop * scale;
+  if (root.paddingRight) updates.paddingRight = root.paddingRight * scale;
+  if (root.paddingBottom) updates.paddingBottom = root.paddingBottom * scale;
+  if (root.paddingLeft) updates.paddingLeft = root.paddingLeft * scale;
+  if (root.itemSpacing) updates.itemSpacing = root.itemSpacing * scale;
+  if (root.counterAxisSpacing) updates.counterAxisSpacing = root.counterAxisSpacing * scale;
+  if (typeof root.cornerRadius === 'number' && root.cornerRadius > 0) {
+    updates.cornerRadius = root.cornerRadius * scale;
+  }
+  // Per-corner radii (set when corners differ)
+  for (const k of ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'] as const) {
+    const v = (root as any)[k];
+    if (typeof v === 'number' && v > 0) updates[k] = v * scale;
+  }
+  if (typeof (root as any).strokeWeight === 'number' && (root as any).strokeWeight > 0) {
+    updates.strokeWeight = (root as any).strokeWeight * scale;
+  }
+
+  // TEXT-specific metrics
+  if (root.type === 'TEXT') {
+    if (typeof root.fontSize === 'number' && root.fontSize > 0) {
+      updates.fontSize = root.fontSize * scale;
+    }
+    // lineHeight is sometimes a numeric pixel value, sometimes an object
+    // (auto / percent / pixels). Only scale the bare-number case.
+    if (typeof (root as any).lineHeight === 'number' && (root as any).lineHeight > 0) {
+      updates.lineHeight = (root as any).lineHeight * scale;
+    }
+    // letterSpacing same idea — bare numeric pixel value only.
+    if (typeof (root as any).letterSpacing === 'number') {
+      updates.letterSpacing = (root as any).letterSpacing * scale;
+    }
+  }
+
+  graph.updateNode(rootId, updates);
+
+  // Instance subtrees: container resized above, children stay component-managed.
+  if (root.type === 'INSTANCE') return;
+
+  // Recurse into children — scale relative position first, then descend.
+  for (const childId of root.childIds) {
+    const child = graph.getNode(childId);
+    if (!child) continue;
+    const positionUpdates: Record<string, number> = {};
+    if (child.x) positionUpdates.x = child.x * scale;
+    if (child.y) positionUpdates.y = child.y * scale;
+    if (Object.keys(positionUpdates).length > 0) {
+      graph.updateNode(childId, positionUpdates);
+    }
+    rescaleSubtree(graph, childId, scale);
+  }
+}
+
 // ─── Node Cache ─────────────────────────────────────────────────
 
 const nodeCache = new WeakMap<SceneGraph, Map<string, StandaloneNode>>();
@@ -105,6 +185,18 @@ function getOrCreateNode(graph: SceneGraph, id: string): StandaloneNode | null {
   const node = new StandaloneNode(graph, raw);
   cache.set(id, node);
   return node;
+}
+
+/**
+ * Public, cached factory for INode wrappers. Always use this instead of
+ * `new StandaloneNode(...)` when constructing a wrapper for a node that
+ * may already have descendants in the graph — otherwise child→parent
+ * identity checks (e.g. `child.parent === root`) silently break, because
+ * descendants resolve through the cache while the manually-constructed
+ * root is a separate instance.
+ */
+export function getStandaloneNode(graph: SceneGraph, id: string): StandaloneNode | null {
+  return getOrCreateNode(graph, id);
 }
 
 // ─── StandaloneNode ─────────────────────────────────────────────
@@ -213,11 +305,29 @@ export class StandaloneNode implements INode {
     this.graph.updateNode(this.raw.id, { width: w, height: h });
   }
 
+  /**
+   * Recursive proportional scale (Figma-equivalent semantics).
+   *
+   * The previous implementation only scaled the immediate node's width/height,
+   * which silently broke every caller that relied on rescale behaving like
+   * Figma — most notably the resize cluster scaler, which uses rescale to
+   * shrink section frames in a long-form layout. With single-level scaling,
+   * the section frame got smaller but its descendant CTAs / cards / text
+   * stayed at original dimensions, producing 560-wide button rows inside
+   * 57-wide leaderboard banners.
+   *
+   * Semantics: every descendant has its
+   *   - width / height
+   *   - x / y  (relative-to-parent)
+   *   - padding* / itemSpacing / counterAxisSpacing
+   *   - fontSize / lineHeight (when numeric)
+   *   - cornerRadius / per-corner radii
+   *   - strokeWeight
+   * multiplied by `scale` in a single DFS pass. INSTANCE subtrees are not
+   * recursed into (their children are component-managed read-only).
+   */
   rescale(scale: number): void {
-    this.graph.updateNode(this.raw.id, {
-      width: this.raw.width * scale,
-      height: this.raw.height * scale,
-    });
+    rescaleSubtree(this.graph, this.raw.id, scale);
   }
 
   // Absolute transform
@@ -354,6 +464,31 @@ export class StandaloneNode implements INode {
 
   get visible(): boolean { return this.raw.visible; }
   set visible(v: boolean) { this.graph.updateNode(this.raw.id, { visible: v }); }
+
+  // Semantic — written by classifyScene/auto-detect, read by semantic audit
+  // rules and the HTML exporter for tag/aria mapping. Without these getters
+  // wrapped INodes return undefined for semanticRole even though the engine
+  // SceneNode has it set, which silently disables every semantic-aware rule.
+  get semanticRole(): string | undefined {
+    return (this.raw as any).semanticRole ?? undefined;
+  }
+  set semanticRole(v: string | undefined) {
+    this.graph.updateNode(this.raw.id, { semanticRole: v ?? null } as any);
+  }
+
+  get slot(): string | undefined {
+    return (this.raw as any).slot ?? undefined;
+  }
+  set slot(v: string | undefined) {
+    this.graph.updateNode(this.raw.id, { slot: v ?? null } as any);
+  }
+
+  get href(): string | undefined {
+    return (this.raw as any).href ?? undefined;
+  }
+  set href(v: string | undefined) {
+    this.graph.updateNode(this.raw.id, { href: v ?? null } as any);
+  }
 
   get rotation(): number { return this.raw.rotation; }
   set rotation(v: number) { this.graph.updateNode(this.raw.id, { rotation: v }); }

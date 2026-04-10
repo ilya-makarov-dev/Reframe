@@ -14,12 +14,13 @@ import { z } from 'zod';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { execSync } from 'child_process';
-import { importFromHtml } from '../../../core/src/importers/html.js';
+import { importFromHtml, resolveDeferredAbsolutePositions } from '../../../core/src/importers/html.js';
 import { compileTemplate, autoPickLayout } from '../../../core/src/compiler/index.js';
 import { build } from '../../../core/src/builder.js';
 import { resolveBlueprint } from '../../../core/src/ui/blueprint.js';
 import { fromDesignMd } from '../../../core/src/ui/theme.js';
 import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
+import { classifyScene } from '../../../core/src/semantic/index.js';
 import { exportToHtml } from '../../../core/src/exporters/html.js';
 import { exportToReact } from '../../../core/src/exporters/react.js';
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
@@ -265,11 +266,18 @@ export async function handleCompile(input: CompileInput) {
       height: bpH,
       name: input.name ?? 'Scene',
     });
-  } else if (input.html) {
-    // HTML import: size comes from the imported document
+  } else if (input.html || input.file) {
+    // HTML import: use whichever explicit dimension the caller passed
+    // (usually just `width` for a viewport hint) and let HUG resolve
+    // the other axis. Falling back to 0/0 here meant importFromHtml
+    // got `width: undefined` and leaned on `ctx.defaultWidth = 1920`
+    // for every `position: absolute; right: Npx` resolution, so a
+    // badge pinned with `right: 40px` to a card that actually lives
+    // in a 1440 canvas ended up at `left: 1780` (1920 − 100 − 40)
+    // instead of `left: 1300` (1440 − 100 − 40).
     sizes.push({
-      width: 0,
-      height: 0,
+      width: input.width ?? 0,
+      height: input.height ?? 0,
       name: input.name ?? 'Imported',
     });
   } else {
@@ -472,6 +480,38 @@ export async function handleCompile(input: CompileInput) {
     const root = graph.getNode(rootId)!;
     ensureSceneLayout(graph, rootId);
 
+    // Resolve `right:` / `bottom:` offsets on absolute children now
+    // that both parent widths AND child HUG sizes have been finalized
+    // by Yoga. The importer only had default dimensions to work with,
+    // so badges pinned with `right: 40px` were computed against the
+    // 100-default badge width instead of the HUG-measured content
+    // width, landing them ~40px off their intended anchor.
+    resolveDeferredAbsolutePositions(graph, rootId);
+
+    // ── SEMANTIC CLASSIFICATION ────────────────────────────
+    // Tag every node with a semantic role so downstream consumers
+    // (inspect, edit, export, audit) can address slots by meaning
+    // instead of by raw nodeId. Multi-slot mode picks up multiple
+    // titles/CTAs/sections in long-form designs (emails, landings).
+    let semanticSummary = '';
+    try {
+      const classifyResult = await classifyScene(graph, rootId, {
+        designSystem: ds as any,
+        multiSlot: true,
+      });
+      const dist = Object.entries(classifyResult.distribution)
+        .filter(([k]) => k !== 'other')
+        .sort(([, a], [, b]) => b - a)
+        .map(([role, n]) => `${role}=${n}`)
+        .join(', ');
+      if (dist) {
+        semanticSummary = `Semantic: ${dist} (${classifyResult.classified}/${classifyResult.candidates} nodes)`;
+      }
+    } catch (err: any) {
+      // Classifier is best-effort — never block compile if it fails.
+      semanticSummary = `Semantic: skipped (${err?.message ?? 'unknown error'})`;
+    }
+
     // ── AUDIT + AUTOFIX ────────────────────────────────────
     let auditSummary = '';
     if (auditEnabled) {
@@ -655,6 +695,10 @@ export async function handleCompile(input: CompileInput) {
       for (const line of auditSummary.trimEnd().split('\n')) {
         sections.push(`    ${line}`);
       }
+    }
+
+    if (semanticSummary) {
+      sections.push(`    ${semanticSummary}`);
     }
 
     // Report source HTML path (for agent to read/edit later)

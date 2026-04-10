@@ -15,8 +15,9 @@ import { editInputSchema, handleEdit } from './tools/edit.js';
 import { exportInputSchema, handleExport } from './tools/export.js';
 import { inspectInputSchema, handleInspect } from './tools/inspect.js';
 import { projectInputSchema, handleProject } from './tools/project.js';
+import { resizeInputSchema, handleResize } from './tools/resize.js';
 
-/** 6 public tools: design, compile, edit, inspect, export, project. */
+/** 7 public tools: design, compile, edit, inspect, export, project, resize. */
 export function registerReframeMcpTools(server: McpServer): void {
 
   // ── 1. DESIGN ──────────────────────────────────────────────
@@ -119,6 +120,33 @@ Returns: export file path and size. The file is ready to open in a browser or im
 Only export after reframe_inspect confirms the design is clean. Exporting a scene with audit errors produces a working file but with known issues.`,
     exportInputSchema,
     handleExport,
+  );
+
+  // ── 7. RESIZE ──────────────────────────────────────────────
+  server.tool(
+    'reframe_resize',
+    `Adapt an existing scene to one or many target dimensions in a single call. Each target produces a new session scene (sN) with semantic classification, layout-profile detection, and optional auto-export to HTML.
+
+Use this when you have a working design at one size and want to derive multiple variants — e.g. take a 680×1080 email and produce mobile-email 375×1334, social-square 1080×1080, story 1080×1920, leaderboard 728×90 in one go. Each variant is independently inspectable, editable, and exportable via existing reframe_inspect/reframe_edit/reframe_export tools.
+
+Strategies:
+- smart (default): letterbox-contain + JSON guide post-process. Best for similar-aspect adaptations (vertical → mobile, vertical → story).
+- contain: uniform letterbox to fit, no cropping, margins on the opposite axis.
+- cover: uniform letterbox to fill, may crop. Good for backgrounds/hero adaptations.
+- stretch: non-uniform per-axis (sX, sY differ). Distorts aspect — only for stretchable content.
+
+For each target the engine runs:
+1. Yoga layout pass (positions get computed)
+2. Semantic classification — every node tagged with role (heading, button, section, caption, etc.)
+3. Cluster scaling — sections + descendants resize proportionally (recursively)
+4. Optional guide post-process — JSON guides for known sizes (1080×1080, 728×90, 1080×1920, etc.)
+5. Auto-export to HTML if exportHtml is true (default)
+
+Returns: per-target line with new scene ID, layout profile + confidence, semantic distribution (role=count), guide key if used, export filepath if exported. Use the returned scene IDs with reframe_inspect to view the adapted tree, semantic skeleton, and audit results.
+
+LIMITATION: Extreme aspect changes (e.g. vertical email → wide leaderboard) are mathematically correct but may produce unusable slivers — long-form content needs a reflow strategy that doesn't yet exist. Ideal use is similar-aspect or moderate-aspect changes.`,
+    resizeInputSchema,
+    handleResize,
   );
 
   // ── 6. PROJECT ─────────────────────────────────────────────

@@ -328,10 +328,22 @@ export function snapToRadiusScale(ds: DesignSystem, rawRadius: number): number {
   return best;
 }
 
-/** Check if a fontSize approximately matches a typography role (±20%). */
+/**
+ * Check if a fontSize approximately matches a typography role.
+ * Checks every entry with the given role — typography parsers preserve
+ * multiple rows per role (e.g. Apple has Section Heading 40, Tile Heading 28,
+ * Card Title 21 all classified as 'title'), and a single-`find` would only
+ * compare against the first row, mass-rejecting valid sizes.
+ *
+ * Tolerance is ±10%: looser would conflate adjacent roles (17px body sits
+ * within 20% of 21px Card Title and would mass-tag body as title), tighter
+ * would miss legitimate variants like 39px on a 40px-defined Section Heading.
+ */
 export function fontSizeMatchesRole(ds: DesignSystem, fontSize: number, role: TypographyRole): boolean {
-  const rule = ds.typography.hierarchy.find(r => r.role === role);
-  if (!rule) return false;
-  const ratio = fontSize / rule.fontSize;
-  return ratio >= 0.8 && ratio <= 1.2;
+  for (const rule of ds.typography.hierarchy) {
+    if (rule.role !== role) continue;
+    const ratio = fontSize / rule.fontSize;
+    if (ratio >= 0.9 && ratio <= 1.1) return true;
+  }
+  return false;
 }

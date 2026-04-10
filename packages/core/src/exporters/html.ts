@@ -38,6 +38,42 @@ export function isPlausibleWebFontName(family: string): boolean {
   return true;
 }
 
+/**
+ * Pick a meaningful document title from the scene. Walks the tree in
+ * DFS order and returns the first TEXT node tagged `heading` or the
+ * first h1/title role frame's inner text. Falls back to null when
+ * nothing matches, which the caller replaces with the raw root name.
+ */
+function findDocumentTitle(graph: SceneGraph, rootId: string): string | null {
+  let found = '';
+  const walk = (id: string): boolean => {
+    const n = graph.getNode(id);
+    if (!n) return false;
+    const role = (n as any).semanticRole;
+    if (n.type === 'TEXT' && (role === 'heading' || role === 'title') && n.text) {
+      found = n.text.trim();
+      return true;
+    }
+    // h1/h2 tags get named "h1"/"h2" by the importer — use that as a
+    // signal too in case the semantic classifier didn't tag them.
+    if (/^h[1-2]$/.test(n.name ?? '')) {
+      for (const cid of n.childIds) {
+        const c = graph.getNode(cid);
+        if (c?.type === 'TEXT' && c.text) {
+          found = c.text.trim();
+          return true;
+        }
+      }
+    }
+    for (const cid of n.childIds) {
+      if (walk(cid)) return true;
+    }
+    return false;
+  };
+  walk(rootId);
+  return found.length > 0 ? found : null;
+}
+
 export interface HtmlExportOptions {
   /** Include a full HTML document wrapper (default: true) */
   fullDocument?: boolean;
@@ -167,7 +203,12 @@ export function exportToHtml(
   }
   autoInteractiveHover(rootId);
 
-  function renderNode(node: SceneNode, isRoot: boolean, parentLayout?: string): string {
+  function renderNode(
+    node: SceneNode,
+    isRoot: boolean,
+    parentLayout?: string,
+    parentInteractive: boolean = false,
+  ): string {
     // Root is often an invisible “artboard” frame; still export children for HTML round-trip / Studio MCP.
     if (!node.visible && !isRoot) return '';
 
@@ -178,9 +219,31 @@ export function exportToHtml(
     } else {
       tag = semanticTag(node.semanticRole, node.type);
     }
+    // HTML validity: <button>, <a>, and other interactive elements may only
+    // contain phrasing content. <p>, <h1>-<h6>, <section>, <small> nested
+    // inside them produce invalid markup that browsers auto-recover from
+    // by closing the parent early — visually breaking the layout. When the
+    // ancestor chain has flagged itself interactive, force any non-phrasing
+    // tag down to <span>. The CSS layout still works because the inline
+    // styles set display/flex behaviour explicitly on every element.
+    if (parentInteractive) {
+      const NON_PHRASING = new Set([
+        'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article',
+        'aside', 'header', 'footer', 'nav', 'main', 'small',
+      ]);
+      if (NON_PHRASING.has(tag)) tag = 'span';
+    }
 
     const tokenVars = tokenVarLookup.get(node.id);
-    const styles = computeStyles(node, isRoot, parentLayout, tokenVars);
+    // Check once here whether any direct child is absolute-positioned;
+    // if so, `computeStyles` will emit `position: relative` so the
+    // child's left/top resolve against us instead of escaping to the
+    // nearest positioned ancestor (typically the root).
+    const hasAbsoluteChild = node.childIds.some(cid => {
+      const child = graph.getNode(cid);
+      return child?.layoutPositioning === 'ABSOLUTE';
+    });
+    const styles = computeStyles(node, isRoot, parentLayout, tokenVars, hasAbsoluteChild);
 
     // Add transition CSS if this node has behavior states
     const behaviorCls = behaviorClassMap.get(node.id);
@@ -250,10 +313,18 @@ export function exportToHtml(
 
     // Container with children
     const childLayout = node.layoutMode !== 'NONE' ? node.layoutMode : undefined;
+    // Track interactive ancestry: any descendant of <button>, <a>, or an
+    // interactive-role wrapper inherits the constraint and uses phrasing
+    // content only.
+    const INTERACTIVE_TAGS = new Set(['button', 'a']);
+    const INTERACTIVE_ROLES_FOR_CHILDREN = new Set(['button', 'cta', 'link', 'input', 'checkbox', 'radio', 'select']);
+    const childInteractive = parentInteractive
+      || INTERACTIVE_TAGS.has(tag)
+      || (node.semanticRole != null && INTERACTIVE_ROLES_FOR_CHILDREN.has(node.semanticRole));
     const children = node.childIds
       .map(id => graph.getNode(id))
       .filter((n): n is SceneNode => n !== null && n !== undefined)
-      .map(child => renderNode(child, false, childLayout))
+      .map(child => renderNode(child, false, childLayout, childInteractive))
       .filter(Boolean);
 
     if (children.length === 0) {
@@ -321,11 +392,19 @@ export function exportToHtml(
 
   const primaryFont = [...usedFonts][0] ?? 'system-ui';
 
+  // Document title prefers a meaningful scene name. Most HTML imports
+  // name their root element `div` (the outermost tag), which produces
+  // `<title>div</title>` in the exported page — not useful in a browser
+  // tab, not useful in link previews. Walk the tree for the first title
+  // role node and use its text; otherwise fall back to the root name
+  // (which for HTML imports is almost always "div").
+  const docTitle = findDocumentTitle(graph, rootId) ?? root.name;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">${viewport}
-  <title>${escapeHtml(root.name)}</title>
+  <title>${escapeHtml(docTitle)}</title>
   ${fontLinks.join('\n  ')}
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
@@ -392,7 +471,7 @@ function responsiveRuleToCss(rule: ResponsiveRule): string[] {
 
 // ─── Style Computation ─────────────────────────────────────────
 
-function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, tokenVars?: Map<string, string>): string {
+function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, tokenVars?: Map<string, string>, hasAbsoluteChild = false): string {
   const s: string[] = [];
   const hasFlexLayout = node.layoutMode !== 'NONE' && node.layoutMode !== 'GRID';
 
@@ -426,11 +505,22 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
     // In a VERTICAL column: primary axis = height, counter axis = width.
 
     const isParentRow = parentLayout === 'HORIZONTAL';
-    const primarySizing = node.primaryAxisSizing ?? 'FIXED';
-    const counterSizing = node.counterAxisSizing ?? 'FIXED';
+    const rawPrimarySizing = node.primaryAxisSizing ?? 'FIXED';
+    const rawCounterSizing = node.counterAxisSizing ?? 'FIXED';
     const isText = node.type === 'TEXT';
     const autoResize = node.textAutoResize;
     const hasLayout = node.layoutMode && node.layoutMode !== 'NONE';
+
+    // primaryAxisSizing / counterAxisSizing describe the CHILD's own axes
+    // (primary = along its flex-direction). When the child's direction is
+    // perpendicular to its parent, what the parent considers its "primary
+    // axis" maps to the child's counter axis, and vice versa. Without this
+    // remap an explicit width:260 on a HORIZONTAL button inside a VERTICAL
+    // section gets dropped because the exporter checks the wrong field.
+    const childIsRow = node.layoutMode === 'HORIZONTAL';
+    const axesAligned = !hasLayout || childIsRow === isParentRow;
+    const primarySizing = axesAligned ? rawPrimarySizing : rawCounterSizing;
+    const counterSizing = axesAligned ? rawCounterSizing : rawPrimarySizing;
 
     // Detect if dimensions are likely invalid (Yoga couldn't compute without font metrics)
     const primaryDim = isParentRow ? node.width : node.height;
@@ -455,7 +545,21 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
 
     // Counter axis (perpendicular to parent direction)
     const selfAlign = node.layoutAlignSelf;
-    if (selfAlign === 'STRETCH' || counterSizing === 'FILL') {
+    // `counterSizing === FILL` used to always emit `align-self: stretch`,
+    // but that collides with `max-width` from the source CSS: a child
+    // with both `max-width: 900` and `align-self: stretch` ends up
+    // clamped to 900 AND flush to the start of the parent's cross axis,
+    // ignoring the parent's own `align-items: center`. Source HTML like
+    //   section { align-items: center }
+    //     h1-wrapper { max-width: 900 } ← should stay centered
+    // broke visually — the h1 block glued itself to the left edge.
+    // Skip the stretch emission when the node has an explicit
+    // max-width so the parent's align-items wins.
+    const hasMaxWidth = !isParentRow && node.maxWidth != null && node.maxWidth > 0;
+    const hasMaxHeight = isParentRow && node.maxHeight != null && node.maxHeight > 0;
+    const hasMaxConstraint = hasMaxWidth || hasMaxHeight;
+    const shouldStretch = (selfAlign === 'STRETCH' || counterSizing === 'FILL') && !hasMaxConstraint;
+    if (shouldStretch) {
       s.push('align-self: stretch');
     } else if (counterSizing === 'HUG' || counterSuspect || (isText && (autoResize === 'WIDTH_AND_HEIGHT' || autoResize === 'HEIGHT'))) {
       // HUG or suspect counter axis — let CSS auto-size
@@ -481,6 +585,19 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
     s.push(`top: ${px(node.y)}`);
     s.push(`width: ${px(node.width)}`);
     s.push(`height: ${px(node.height)}`);
+  }
+
+  // Any frame that contains an absolute-positioned direct child must
+  // itself be a positioning context — otherwise the child's `left/top`
+  // coordinates escape up to the nearest positioned ancestor (usually
+  // the root), and a "POPULAR" ribbon at `top:-12px; right:40px`
+  // relative to its pricing card ends up absolutely positioned
+  // against the 1440-wide canvas instead, landing hundreds of pixels
+  // off the card. CSS's `position: relative` without any offset is a
+  // pure-anchor no-op — it doesn't shift the node, just establishes
+  // the coordinate frame its absolute children resolve against.
+  if (hasAbsoluteChild && !isRoot && node.layoutPositioning !== 'ABSOLUTE') {
+    s.push('position: relative');
   }
 
   // Flex layout (when this node IS a flex container)
@@ -632,6 +749,21 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
 
   // Text styles
   if (node.type === 'TEXT') {
+    // Emit the Yoga-computed width as an upper bound so the browser
+    // wraps long text the same way the engine did. Without this a
+    // 72px heading whose Yoga-measured width is 900px comes out as
+    // `flex: 0 0 auto` with no width cap, and the browser lets the
+    // text overflow both sides of its parent (the h1 "Linear is a
+    // purpose-built tool…" bleed that showed up in the live preview
+    // on the 1440 canvas). `max-width` instead of `width` keeps the
+    // behaviour soft — if the text happens to fit in less, it does,
+    // but it can never exceed the Yoga bbox.
+    if (node.width > 0 && node.width < 16000) {
+      s.push(`max-width: ${px(node.width)}`);
+      // `word-wrap: break-word` covers the edge case where a single
+      // word (URL, identifier) is wider than the max-width.
+      s.push('word-wrap: break-word');
+    }
     s.push(`font-size: ${tv('fontSize', px(node.fontSize || 16))}`);
     if (node.fontFamily) s.push(`font-family: ${tv('fontFamily', `'${node.fontFamily}', sans-serif`)}`);
     if (node.fontWeight && node.fontWeight !== 400) s.push(`font-weight: ${tv('fontWeight', String(node.fontWeight))}`);

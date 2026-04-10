@@ -34,14 +34,21 @@ export interface StoredScene {
   brand?: string;
   /** DESIGN.md short hash at last compile — persisted to project.json for drift detection. */
   brandHash?: string;
+  /**
+   * Token index created by `defineTokens`. Stored on the scene itself
+   * (not in a sidecar Map) so it shares the scene's lifecycle — a
+   * sidecar `Map<sceneId, TokenIndex>` gets wiped on module hot-reload
+   * in dev even though the scenes Map survives, leaving `setMode`
+   * thinking tokens were never defined. Attaching to the scene object
+   * keeps the two in sync.
+   */
+  tokenIndex?: TokenIndex;
 }
 
 // ─── Internal state ─────────────────────────────────────────
 
 const scenes = new Map<string, StoredScene>();     // sessionId → StoredScene
 const slugIndex = new Map<string, string>();        // slug → sessionId
-/** defineTokens indices; replaceSessionSceneGraph / Studio PUT replace the graph — re-run defineTokens if agents relied on token paths for the new tree. */
-const tokenIndices = new Map<string, TokenIndex>(); // sessionId → TokenIndex
 let nextId = 1;
 
 /** Project directory for auto-persistence. Set on startup or first scene. */
@@ -257,15 +264,16 @@ export function resolveScene(input: { sceneId?: string; scene?: any }): { graph:
 
 /** Store a token index for a scene. */
 export function setTokenIndex(sessionId: string, index: TokenIndex): void {
-  tokenIndices.set(sessionId, index);
+  const scene = scenes.get(sessionId);
+  if (scene) scene.tokenIndex = index;
 }
 
 /** Get the token index for a scene (by session ID or slug). */
 export function getTokenIndex(idOrSlug: string): TokenIndex | undefined {
-  const direct = tokenIndices.get(idOrSlug);
-  if (direct) return direct;
+  const direct = scenes.get(idOrSlug);
+  if (direct?.tokenIndex) return direct.tokenIndex;
   const sessionId = slugIndex.get(idOrSlug);
-  if (sessionId) return tokenIndices.get(sessionId);
+  if (sessionId) return scenes.get(sessionId)?.tokenIndex;
   return undefined;
 }
 
@@ -288,7 +296,6 @@ export function deleteScene(idOrSlug: string): boolean {
   if (!stored) return false;
   const slug = stored.slug;
   slugIndex.delete(stored.slug);
-  tokenIndices.delete(sessionId);
   scenes.delete(sessionId);
   emitProjectEvent({ type: 'scene:deleted', sceneId: sessionId, slug });
 
@@ -310,7 +317,6 @@ export function deleteScene(idOrSlug: string): boolean {
 export function clearScenes(): void {
   scenes.clear();
   slugIndex.clear();
-  tokenIndices.clear();
   nextId = 1;
 }
 

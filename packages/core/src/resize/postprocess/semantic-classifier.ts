@@ -246,14 +246,29 @@ export function overlapFrac(a: RectLike, b: RectLike): number {
 }
 
 /**
+ * Options for {@link assignSemanticTypes}.
+ *
+ * Default mode is single-slot (banner): each role picks at most one node,
+ * matching the legacy figma-banner-resizer behavior. Pass `multiSlot: true`
+ * for long-form content (emails, landing pages, docs) where one design has
+ * many titles, many CTAs, multiple section backgrounds, etc.
+ */
+export interface AssignSemanticOptions {
+  /** Permit multiple matches per semantic role. Default false. */
+  multiSlot?: boolean;
+}
+
+/**
  * Slot heuristics as in `figma-banner-resizer` legacy + `oLD`: across all frame descendants, not a stub.
  * Optional DesignSystem param enables design-system-informed classification (higher confidence).
  */
 export function assignSemanticTypes(
   nodes: INode[],
   frame: INode,
-  ds?: DesignSystem
+  ds?: DesignSystem,
+  options?: AssignSemanticOptions,
 ): Map<string, BannerElementType> {
+  const multiSlot = options?.multiSlot === true;
   const W = frame.width;
   const H = frame.height;
   const areaFrame = W * H;
@@ -273,26 +288,31 @@ export function assignSemanticTypes(
   const framesOrComponents = nodes.filter(n => n.type === NodeType.Frame || n.type === NodeType.Component);
   const groups = nodes.filter(n => n.type === NodeType.Group);
 
-  let bestBg: { id: string; area: number } | null = null;
+  // Background detection. In single mode the largest direct-child fill wins;
+  // in multi mode every direct-child fill above the area threshold counts
+  // (sectioned designs like emails have multiple full-width section bgs).
+  const bgCandidates: Array<{ id: string; area: number }> = [];
   for (const node of withFills) {
     const b = boundsMap.get(node.id)!;
     const area = b.w * b.h;
-    if (area > areaFrame * 0.25 && isDirectChild(node, frame) && area > (bestBg?.area ?? 0)) {
-      bestBg = { id: node.id, area };
+    if (area > areaFrame * 0.25 && isDirectChild(node, frame)) {
+      bgCandidates.push({ id: node.id, area });
     }
   }
-  if (!bestBg) {
-    let bestAreaSoFar = 0;
+  if (bgCandidates.length === 0) {
+    // Fallback: a direct-child container that itself has fills, or whose
+    // first child is a >25% rectangle with fills (covers the "wrapped bg"
+    // pattern from imported HTML where the bg is a rect inside a section).
     for (const node of [...framesOrComponents, ...groups]) {
       if (!isDirectChild(node, frame)) continue;
       const b = boundsMap.get(node.id)!;
       const area = b.w * b.h;
       if (area < areaFrame * 0.25) continue;
       const selfFills = 'fills' in node && node.fills !== MIXED && node.fills && node.fills.length > 0;
-      if (selfFills && area > bestAreaSoFar) {
-        bestAreaSoFar = area;
-        bestBg = { id: node.id, area };
-        break;
+      if (selfFills) {
+        bgCandidates.push({ id: node.id, area });
+        if (!multiSlot) break;
+        continue;
       }
       if (node.children) {
         for (const child of node.children) {
@@ -300,17 +320,18 @@ export function assignSemanticTypes(
           if (!cb) continue;
           const childArea = cb.w * cb.h;
           const childFills = 'fills' in child && child.fills !== MIXED && child.fills && child.fills.length > 0;
-          if (childFills && childArea > areaFrame * 0.25 && area > bestAreaSoFar) {
-            bestAreaSoFar = area;
-            bestBg = { id: node.id, area };
+          if (childFills && childArea > areaFrame * 0.25) {
+            bgCandidates.push({ id: node.id, area });
             break;
           }
         }
       }
-      if (bestBg) break;
+      if (!multiSlot && bgCandidates.length > 0) break;
     }
   }
-  if (bestBg) result.set(bestBg.id, 'background');
+  bgCandidates.sort((a, b) => b.area - a.area);
+  const bgPicks = multiSlot ? bgCandidates : bgCandidates.slice(0, 1);
+  for (const bg of bgPicks) result.set(bg.id, 'background');
 
   for (const node of texts) {
     const t = node;
@@ -324,6 +345,17 @@ export function assignSemanticTypes(
       break;
     }
   }
+
+  // For long-form designs, content height frequently exceeds the source frame
+  // height (an HTML import with no explicit height inherits a 1080 default).
+  // Computing y/H against the nominal frame loses meaning past 1.0, so derive
+  // an effective content bottom from the union of all candidate bounds.
+  const contentBottomCandidates = texts
+    .map(t => boundsMap.get(t.id)!)
+    .filter(b => b && b.h > 0);
+  const contentBottom = contentBottomCandidates.length > 0
+    ? Math.max(H, ...contentBottomCandidates.map(b => b.y + b.h))
+    : H;
 
   const bottomTexts = texts
     .filter(t => !result.has(t.id))
@@ -344,18 +376,30 @@ export function assignSemanticTypes(
         const disclaimerRule = ds.typography.hierarchy.find(r => r.role === 'disclaimer' || r.role === 'caption');
         if (disclaimerRule) maxFs = disclaimerRule.fontSize * 1.3;
       }
-      return x.b.y / H > 0.65 && x.len > 40 && x.fs < maxFs;
+      // In multi mode tighten the size cap and use content-relative bottom so
+      // body paragraphs in long emails don't get mass-tagged as disclaimers.
+      const tightFs = multiSlot ? Math.min(14, maxFs) : maxFs;
+      const yRel = (x.b.y + x.b.h) / contentBottom;
+      const yThreshold = multiSlot ? 0.75 : 0.65;
+      return yRel > yThreshold && x.len > 40 && x.fs < tightFs;
     })
     .sort((a, b) => b.b.y - a.b.y || b.len - a.len);
-  if (bottomTexts.length > 0) result.set(bottomTexts[0].node.id, 'disclaimer');
+  // Multi mode: every text matching the bottom-of-content + tight size rule,
+  // capped at 2 (multiple disclaimers are rare; cap suppresses runaway tags).
+  // Single mode: the most-bottom one wins.
+  const disclaimerPicks = multiSlot ? bottomTexts.slice(0, 2) : bottomTexts.slice(0, 1);
+  for (const d of disclaimerPicks) result.set(d.node.id, 'disclaimer');
 
+  // Logo detection. Multiple logos are rare even on long-form content
+  // (header logo + footer logo at most), so multi mode just doesn't break
+  // after the first match — single mode keeps `break` for backward compat.
   for (const node of instances) {
     if (result.has(node.id)) continue;
     const b = boundsMap.get(node.id)!;
     if (looksLikeButtonHitRectBounds(b, W, H)) continue;
     if (b.y / H < 0.25 && (b.w * b.h) / areaFrame < 0.2) {
       result.set(node.id, 'logo');
-      break;
+      if (!multiSlot) break;
     }
   }
   if (instances.length === 0) {
@@ -364,16 +408,65 @@ export function assignSemanticTypes(
       .filter(n => {
         const b = boundsMap.get(n.id)!;
         if (looksLikeButtonHitRectBounds(b, W, H)) return false;
-        return b.y / H < 0.2 && (b.w * b.h) / areaFrame < 0.12;
+        // Real logos sit in the very top strip (header row), not just
+        // the "top 20%". Tightening this threshold keeps the fallback
+        // from firing on hero sub-sections, feature icons, and
+        // badges-on-cards.
+        if (b.y / H >= 0.08) return false;
+        if ((b.w * b.h) / areaFrame >= 0.08) return false;
+        // Logo-ish proportions: slightly square or wider-than-tall,
+        // never extreme strips. Navigation link wrappers end up ~60×16
+        // (aspect ~3.75) and are NOT logos; footer columns end up
+        // 0.2 × page (aspect ~0.2) and are NOT logos either.
+        const aspect = b.w / Math.max(1, b.h);
+        if (aspect > 2.5 || aspect < 0.5) return false;
+        // A real logo node is either a vector/group containing graphics
+        // or a named wrapper ("logo", "brand", "mark"). Reject any
+        // candidate whose only descendant is a text node longer than
+        // a few characters — that's a nav link or label, not a logo.
+        const name = ((n as any).name ?? '').toLowerCase();
+        const named = /logo|brand|mark|wordmark/.test(name);
+        if (named) return true;
+        const textDescendants: INode[] = [];
+        const collect = (x: INode) => {
+          if (x.children) {
+            for (const c of x.children as INode[]) {
+              if (c.type === NodeType.Text) textDescendants.push(c);
+              else collect(c);
+            }
+          }
+        };
+        collect(n);
+        if (textDescendants.length > 0) {
+          const chars = textDescendants
+            .map(t => (t as any).characters ?? (t as any).text ?? '')
+            .join(' ')
+            .trim();
+          // Logo wordmarks are short ("Stripe", "Linear", "Notion"). A
+          // nav link or badge with >12 chars is almost certainly not a
+          // logo.
+          if (chars.length > 12) return false;
+        }
+        return true;
       })
       .sort(
         (a, b) =>
           boundsMap.get(a.id)!.w * boundsMap.get(a.id)!.h - boundsMap.get(b.id)!.w * boundsMap.get(b.id)!.h
       );
-    if (topSmall.length > 0) result.set(topSmall[0].id, 'logo');
+    // Cap picks: a landing page has at most one header logo. Even in
+    // multi-slot mode we keep it to 1 here because the heuristic is
+    // about "is this the brand mark", and that question has a single
+    // correct answer per page.
+    const logoPicks = topSmall.slice(0, 1);
+    for (const l of logoPicks) result.set(l.id, 'logo');
   }
 
-  const topTexts = texts
+  // Title detection. Single mode keeps the legacy "top half + sort by font
+  // size, pick one" rule. Multi mode drops the position filter and treats
+  // every text whose font size matches a DS title/hero role as a section
+  // heading — required for emails and landings where section heads sit at
+  // many y positions and the largest font may not be at the top.
+  const titleCandidatesAll = texts
     .filter(t => !result.has(t.id))
     .map(t => {
       const tn = t;
@@ -382,25 +475,57 @@ export function assignSemanticTypes(
         node: t,
         b: boundsMap.get(t.id)!,
         fs: fsNum,
-        len: tn.characters!.length
+        len: tn.characters!.length,
       };
-    })
-    .filter(x => x.b.y / H < 0.55)
-    .sort((a, b) => {
-      // DS-informed: boost nodes whose fontSize matches 'hero' or 'title' role
-      if (ds) {
-        const aMatchesTitle = fontSizeMatchesRole(ds, a.fs, 'hero') || fontSizeMatchesRole(ds, a.fs, 'title');
-        const bMatchesTitle = fontSizeMatchesRole(ds, b.fs, 'hero') || fontSizeMatchesRole(ds, b.fs, 'title');
-        if (aMatchesTitle && !bMatchesTitle) return -1;
-        if (!aMatchesTitle && bMatchesTitle) return 1;
-      }
-      return b.fs - a.fs || a.b.y - b.b.y || a.len - b.len;
     });
-  if (topTexts.length > 0) result.set(topTexts[0].node.id, 'title');
+
+  let titlePicks: typeof titleCandidatesAll;
+  if (multiSlot && ds) {
+    // Pick every text whose font size matches DS hero or title role.
+    titlePicks = titleCandidatesAll
+      .filter(x =>
+        fontSizeMatchesRole(ds, x.fs, 'hero') ||
+        fontSizeMatchesRole(ds, x.fs, 'title'),
+      )
+      .sort((a, b) => b.fs - a.fs || a.b.y - b.b.y);
+  } else if (multiSlot) {
+    // No DS: take texts >= 80% of largest, anywhere on canvas.
+    const maxFs = Math.max(0, ...titleCandidatesAll.map(x => x.fs));
+    titlePicks = titleCandidatesAll
+      .filter(x => x.fs >= maxFs * 0.8)
+      .sort((a, b) => b.fs - a.fs || a.b.y - b.b.y);
+  } else {
+    const topTexts = titleCandidatesAll
+      .filter(x => x.b.y / H < 0.55)
+      .sort((a, b) => {
+        if (ds) {
+          const aMatchesTitle = fontSizeMatchesRole(ds, a.fs, 'hero') || fontSizeMatchesRole(ds, a.fs, 'title');
+          const bMatchesTitle = fontSizeMatchesRole(ds, b.fs, 'hero') || fontSizeMatchesRole(ds, b.fs, 'title');
+          if (aMatchesTitle && !bMatchesTitle) return -1;
+          if (!aMatchesTitle && bMatchesTitle) return 1;
+        }
+        return b.fs - a.fs || a.b.y - b.b.y || a.len - b.len;
+      });
+    titlePicks = topTexts.slice(0, 1);
+  }
+  for (const t of titlePicks) result.set(t.node.id, 'title');
 
   for (const t of texts) {
     if (!result.has(t.id)) result.set(t.id, 'description');
   }
+
+  // Button detection. Multi mode picks every frame/component matching the
+  // size+position+children filter (long-form designs typically have several
+  // CTAs); the y-filter is dropped because email/landing CTAs sit anywhere
+  // including the top hero. Single mode keeps the legacy y > 0.35 + best-area
+  // pick for banner backward compat.
+  // For multi mode tightening: a button typically has its own background
+  // (fills) so wrapper rows of buttons are excluded; small child count
+  // (1 text label or icon+label); short height; and is not full-width.
+  const hasOwnFills = (n: INode): boolean =>
+    'fills' in n && n.fills !== MIXED && Array.isArray(n.fills) && n.fills.length > 0;
+  const containsTextChild = (n: INode): boolean =>
+    !!(n.children && n.children.some(c => c.type === NodeType.Text));
 
   const buttonCandidates = framesOrComponents
     .filter(n => !result.has(n.id))
@@ -408,11 +533,10 @@ export function assignSemanticTypes(
       const b = boundsMap.get(n.id)!;
       const area = (b.w * b.h) / areaFrame;
       let dsBoost = 0;
-      // DS-informed: if design system says buttons are pill-shaped, boost nodes with high cornerRadius
       if (ds?.components.button) {
         const cr = typeof n.cornerRadius === 'number' ? n.cornerRadius : -1;
         if (ds.components.button.style === 'pill' && (cr >= 50 || cr >= Math.min(b.w, b.h) / 2 - 2)) {
-          dsBoost = -0.1; // negative = better sort position (closer to target area)
+          dsBoost = -0.1;
         } else if (ds.components.button.style === 'square' && cr === 0) {
           dsBoost = -0.1;
         } else if (cr >= 0 && Math.abs(cr - ds.components.button.borderRadius) < 4) {
@@ -421,27 +545,59 @@ export function assignSemanticTypes(
       }
       return { node: n, b, area, children: n.children ? n.children.length : 0, dsBoost };
     })
-    .filter(x => x.area >= 0.01 && x.area <= 0.3 && x.b.y / H > 0.35 && x.children >= 1)
+    .filter(x => {
+      if (x.area < 0.01 || x.area > 0.3) return false;
+      if (x.children < 1) return false;
+      if (!multiSlot && x.b.y / H <= 0.35) return false;
+      if (multiSlot) {
+        // Tight multi-mode constraints: real buttons are short, not full-width,
+        // have their own background fill, and at most a couple children
+        // (typically just a label text). Wrapper rows and card containers
+        // get filtered out by these checks.
+        if (x.b.h > 100) return false;
+        // Width cap: real buttons are narrow. Anything wider than ~40% of
+        // the canvas is a text block or section wrapper, not a CTA.
+        // `<p>` with explicit background color was slipping past the old
+        // 85% cap and tagging paragraph copy as a button in landing pages.
+        if (x.b.w > W * 0.4) return false;
+        if (x.children > 2) return false;
+        if (!hasOwnFills(x.node)) return false;
+        if (!containsTextChild(x.node)) return false;
+        // Text child content check: real button labels are short. A
+        // paragraph full of prose with its own background fill is still
+        // a paragraph, not a button.
+        const textChild = (x.node.children ?? []).find(c => c.type === NodeType.Text);
+        if (textChild) {
+          const chars = (textChild as any).characters ?? (textChild as any).text ?? '';
+          // CTAs rarely exceed 30 chars ("Get started free", "Start
+          // building", "Book a demo"). Prose paragraphs always do.
+          if (chars.length > 30) return false;
+        }
+      }
+      return true;
+    })
     .sort((a, b) => (Math.abs(a.area - 0.05) + a.dsBoost) - (Math.abs(b.area - 0.05) + b.dsBoost));
-  if (buttonCandidates.length > 0) {
-    result.set(buttonCandidates[0].node.id, 'button');
+
+  const buttonPicks = multiSlot ? buttonCandidates : buttonCandidates.slice(0, 1);
+  if (buttonPicks.length > 0) {
+    for (const bp of buttonPicks) result.set(bp.node.id, 'button');
   } else {
     const rectButtons = nodes
       .filter(n => !result.has(n.id) && n.type === NodeType.Rectangle)
       .map(n => ({
         node: n,
         b: boundsMap.get(n.id)!,
-        area: (boundsMap.get(n.id)!.w * boundsMap.get(n.id)!.h) / areaFrame
+        area: (boundsMap.get(n.id)!.w * boundsMap.get(n.id)!.h) / areaFrame,
       }))
-      .filter(
-        x =>
-          looksLikeButtonHitRectBounds(x.b, W, H) &&
-          x.area >= 0.01 &&
-          x.area <= 0.3 &&
-          x.b.y / H > 0.35
-      )
+      .filter(x => {
+        if (!looksLikeButtonHitRectBounds(x.b, W, H)) return false;
+        if (x.area < 0.01 || x.area > 0.3) return false;
+        if (!multiSlot && x.b.y / H <= 0.35) return false;
+        return true;
+      })
       .sort((a, b) => Math.abs(a.area - 0.05) - Math.abs(b.area - 0.05));
-    if (rectButtons.length > 0) result.set(rectButtons[0].node.id, 'button');
+    const rectPicks = multiSlot ? rectButtons : rectButtons.slice(0, 1);
+    for (const rp of rectPicks) result.set(rp.node.id, 'button');
   }
 
   const assignedIds = new Set(result.keys());

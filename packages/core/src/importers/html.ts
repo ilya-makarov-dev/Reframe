@@ -133,7 +133,134 @@ export async function importFromHtml(
     graph.updateNode(rootId, updates);
   }
 
+  // Top-down width propagation. convertElement runs depth-first so child
+  // post-processes see parents whose own width hasn't been finalized yet;
+  // that landed cards and inner wrappers at stale widths (80 px, 0 px)
+  // instead of the flex-share their `flex: 1` implied. Yoga *could* fix
+  // this during ensureSceneLayout, but it respects any already-written
+  // FIXED width and won't recompute. Walking the tree from the top after
+  // convertElement is done lets each node look at its now-resolved parent
+  // and rewrite its counter-axis dimension from the actual parent inner
+  // width, before audit/layout runs.
+  propagateWidthsTopDown(graph, rootId);
+
   return { graph, rootId, stats };
+}
+
+/**
+ * Walk the tree top-down after the depth-first convertElement pass, and
+ * rewrite any flex child's cross-axis width from its parent's resolved
+ * inner width. Only touches nodes whose counterAxisSizing is FILL (the
+ * "stretch to parent" marker convertElement already set) or whose
+ * layoutGrow distributes remaining space in the parent main axis. Nodes
+ * that authored their own width via explicit CSS keep it.
+ */
+/**
+ * Resolve deferred `right:` / `bottom:` positioning on absolute
+ * children now that both the parent's width/height AND the child's
+ * own HUG-measured dimensions are final. This has to run AFTER Yoga
+ * has computed HUG sizes for absolute FRAMEs — otherwise we do the
+ * math with the default 100×100 badge size and land `left: 281` on a
+ * 421-wide card when the correct answer is `left: 318`.
+ */
+export function resolveDeferredAbsolutePositions(graph: SceneGraph, rootId: string): void {
+  const walk = (nodeId: string): void => {
+    const node = graph.getNode(nodeId);
+    if (!node) return;
+    for (const cid of node.childIds) {
+      const child = graph.getNode(cid) as any;
+      if (!child) continue;
+      if (child.layoutPositioning === 'ABSOLUTE') {
+        const dR = child._deferredRight as number | undefined;
+        const dB = child._deferredBottom as number | undefined;
+        if (dR != null && node.width > 0) {
+          graph.updateNode(child.id, { x: node.width - child.width - dR });
+          delete child._deferredRight;
+        }
+        if (dB != null && node.height > 0) {
+          graph.updateNode(child.id, { y: node.height - child.height - dB });
+          delete child._deferredBottom;
+        }
+      }
+      walk(cid);
+    }
+  };
+  walk(rootId);
+}
+
+function propagateWidthsTopDown(graph: SceneGraph, rootId: string): void {
+  const walk = (nodeId: string): void => {
+    const node = graph.getNode(nodeId);
+    if (!node) return;
+
+    if (node.layoutMode && node.layoutMode !== 'NONE' && node.childIds.length > 0) {
+      const padL = node.paddingLeft ?? 0;
+      const padR = node.paddingRight ?? 0;
+      const padT = node.paddingTop ?? 0;
+      const padB = node.paddingBottom ?? 0;
+      const gap = node.itemSpacing ?? 0;
+      const isRow = node.layoutMode === 'HORIZONTAL';
+      const innerW = Math.max(0, node.width - padL - padR);
+      const innerH = Math.max(0, node.height - padT - padB);
+
+      const children = node.childIds
+        .map(cid => graph.getNode(cid))
+        .filter(Boolean) as NonNullable<ReturnType<typeof graph.getNode>>[];
+      const autoChildren = children.filter(c => (c as any).layoutPositioning !== 'ABSOLUTE');
+
+      if (isRow) {
+        // Row: distribute inner width across grow children, fixed children
+        // keep their widths. Non-grow children that were flagged FILL (or
+        // left with a default 100) get their stored width; we don't know
+        // their intrinsic min without running layout. In that case just
+        // cross-axis (height) propagation happens below.
+        const totalGrow = autoChildren.reduce(
+          (s, c) => s + ((c as any).layoutGrow ?? 0),
+          0,
+        );
+        const fixedW = autoChildren
+          .filter(c => !((c as any).layoutGrow > 0))
+          .reduce((s, c) => s + (c.width || 0), 0);
+        const gapTotal = gap * Math.max(0, autoChildren.length - 1);
+        const available = Math.max(0, innerW - fixedW - gapTotal);
+        for (const c of autoChildren) {
+          const grow = (c as any).layoutGrow ?? 0;
+          if (grow > 0 && totalGrow > 0) {
+            const share = Math.floor(available * (grow / totalGrow));
+            graph.updateNode(c.id, { width: Math.max(40, share) });
+          }
+          // Cross axis (height): stretch children with FILL counter sizing
+          // to the parent inner height when the parent has a known height.
+          if ((c as any).counterAxisSizing === 'FILL' && innerH > 0) {
+            graph.updateNode(c.id, { height: innerH });
+          }
+        }
+      } else {
+        // Column: cross axis is width. Stretch width-FILL children to
+        // innerW. A child's width is controlled by whichever of its axes
+        // maps onto the parent's cross axis: counterAxisSizing for a
+        // VERTICAL child (own cross = width), primaryAxisSizing for a
+        // HORIZONTAL child (own main = width). Either one being FILL
+        // means "stretch me to the parent's content width" per CSS
+        // `align-items: stretch` default.
+        for (const c of autoChildren) {
+          const childIsRow = (c as any).layoutMode === 'HORIZONTAL';
+          const widthSizing = childIsRow
+            ? (c as any).primaryAxisSizing
+            : (c as any).counterAxisSizing;
+          const needsStretch =
+            widthSizing === 'FILL' ||
+            (c.width === 100 && (c as any).layoutMode !== 'NONE');
+          if (needsStretch && innerW > 0) {
+            graph.updateNode(c.id, { width: innerW });
+          }
+        }
+      }
+    }
+
+    for (const cid of node.childIds) walk(cid);
+  };
+  walk(rootId);
 }
 
 // ─── Types ────────────────────────────────────────────────────
@@ -1074,6 +1201,13 @@ function convertElement(
 
   const node = ctx.graph.createNode(nodeType, parentId, overrides);
 
+  // Stash the deferred offsets on the raw graph node so
+  // propagateWidthsTopDown can resolve them once parent widths are
+  // final. Stored via direct property assignment (not updateNode) so
+  // they're internal metadata, not part of the serialized schema.
+  if (deferredRight !== undefined) (node as any)._deferredRight = deferredRight;
+  if (deferredBottom !== undefined) (node as any)._deferredBottom = deferredBottom;
+
   // For promoted frames, create the TEXT child with inherited text styles
   if (wasPromotedToFrame) {
     const textContent = getTextContent(el);
@@ -1143,18 +1277,67 @@ function convertElement(
     const parentNode = createdNode.parentId ? ctx.graph.getNode(createdNode.parentId) : null;
     const parentIsRow = parentNode?.layoutMode === 'HORIZONTAL';
 
-    if (noExplicitWidth) {
+    // Absolute-positioned elements are out of flow and must NOT inherit
+    // the parent's inner width via the flex-stretch post-process. A
+    // `position: absolute` badge with no explicit width should stay at
+    // HUG content size (whatever width its text demands), not balloon to
+    // `parent.innerWidth` which turned every pinned chip into a
+    // full-section-wide strip in the HTML export.
+    const isAbsolute = (createdNode as any).layoutPositioning === 'ABSOLUTE';
+
+    // For absolute children we still want HUG sizing so Yoga measures
+    // their content and sets a sensible bbox for export. Without this
+    // they stay at the creation-default 100×100 and render as mystery
+    // squares instead of content-shaped pills.
+    if (isAbsolute && noExplicitWidth && hasLayout) {
+      const sizeUpdates: any = {};
+      if (createdNode.layoutMode === 'VERTICAL') {
+        sizeUpdates.primaryAxisSizing = 'HUG';
+        sizeUpdates.counterAxisSizing = 'HUG';
+      } else if (createdNode.layoutMode === 'HORIZONTAL') {
+        sizeUpdates.primaryAxisSizing = 'HUG';
+        sizeUpdates.counterAxisSizing = 'HUG';
+      }
+      if (Object.keys(sizeUpdates).length > 0) {
+        ctx.graph.updateNode(createdNode.id, sizeUpdates);
+      }
+    }
+
+    if (noExplicitWidth && !isAbsolute) {
       if (isFlex || (hasLayout && !styles.width)) {
         // Flex child or layout container without explicit width → let CSS handle it
-        updates.primaryAxisSizing = hasLayout ? 'HUG' : 'FILL';
-        // Counter axis sizing depends on layout direction AND parent:
-        // VERTICAL child in VERTICAL parent: counter=width → FILL (CSS block fills parent width)
-        // VERTICAL child in HORIZONTAL parent: counter=width → HUG (flex row controls width)
-        // HORIZONTAL child: counter=height → HUG (CSS doesn't stretch height by default)
-        if (createdNode.layoutMode === 'VERTICAL' && !parentIsRow) {
-          updates.counterAxisSizing = 'FILL';
-        } else {
+        //
+        // CSS default on a flex child in a column parent is `align-items:
+        // stretch`, which stretches the child's width to the parent's
+        // content width regardless of the child's own layoutMode. The
+        // previous code only marked VERTICAL children as FILL and left
+        // HORIZONTAL-in-VERTICAL children as HUG, so every HORIZONTAL
+        // wrapper (nav, card row, pricing row) landed at HUG = sum of
+        // children and cascaded stale narrow widths down the tree.
+        //
+        // Now both branches set the *width-controlling* axis to FILL when
+        // the parent is a column, so CSS stretch is preserved:
+        //   · VERTICAL child in column parent → counterAxisSizing (cross =
+        //     width) = FILL
+        //   · HORIZONTAL child in column parent → primaryAxisSizing (main
+        //     = width) = FILL
+        if (parentIsRow) {
+          updates.primaryAxisSizing = hasLayout ? 'HUG' : 'FILL';
           updates.counterAxisSizing = 'HUG';
+        } else {
+          // Column parent.
+          if (createdNode.layoutMode === 'VERTICAL') {
+            updates.primaryAxisSizing = 'HUG';
+            updates.counterAxisSizing = 'FILL';
+          } else if (createdNode.layoutMode === 'HORIZONTAL') {
+            updates.primaryAxisSizing = 'FILL';
+            updates.counterAxisSizing = 'HUG';
+          } else {
+            // No layout on this node — treat width as stretch via FILL
+            // marker that propagateWidthsTopDown() will resolve.
+            updates.primaryAxisSizing = 'FILL';
+            updates.counterAxisSizing = 'HUG';
+          }
         }
         // Width default: for any child without explicit width, inherit from the
         // parent's inner width. The viewport default (ctx.defaultWidth, typically
@@ -1215,7 +1398,7 @@ function convertElement(
       }
     }
 
-    if (noExplicitHeight) {
+    if (noExplicitHeight && !isAbsolute) {
       if (hasLayout) {
         // Layout container without height → HUG content on the height axis
         if (createdNode.layoutMode === 'VERTICAL') {
@@ -1266,17 +1449,35 @@ function convertElement(
     }
   }
 
-  // Resolve deferred right/bottom positioning now that sizes are computed
-  if (deferredRight !== undefined && deferredParentW !== undefined) {
+  // Resolve deferred right/bottom positioning now that sizes are computed.
+  // Prefer the parent NODE's current width/height over the captured
+  // `deferredParentW/H` because the latter was the parent's CSS width at
+  // parse time — which for a flex child without explicit width falls back
+  // to `ctx.defaultWidth` (usually 1440 or 1920). A badge pinned with
+  // `right: 40px` to a 421-wide pricing card would then get
+  // `left = 1440 − 100 − 40 = 1300` relative to the card, sending it way
+  // past the card's right edge. Looking up the real parent width at this
+  // point (post-process runs child-first, but the badge's parent isn't
+  // necessarily final either — top-down propagation will still shuffle
+  // widths — so we fall back to the captured value if the node hasn't
+  // settled yet).
+  const parentFrame = ctx.graph.getNode(parentId);
+  if (deferredRight !== undefined) {
     const finalNode = ctx.graph.getNode(node.id);
     if (finalNode) {
-      ctx.graph.updateNode(node.id, { x: deferredParentW - finalNode.width - deferredRight });
+      const parentW = parentFrame && parentFrame.width > 100
+        ? parentFrame.width
+        : (deferredParentW ?? ctx.defaultWidth);
+      ctx.graph.updateNode(node.id, { x: parentW - finalNode.width - deferredRight });
     }
   }
-  if (deferredBottom !== undefined && deferredParentH !== undefined) {
+  if (deferredBottom !== undefined) {
     const finalNode = ctx.graph.getNode(node.id);
     if (finalNode) {
-      ctx.graph.updateNode(node.id, { y: deferredParentH - finalNode.height - deferredBottom });
+      const parentH = parentFrame && parentFrame.height > 100
+        ? parentFrame.height
+        : (deferredParentH ?? ctx.defaultHeight);
+      ctx.graph.updateNode(node.id, { y: parentH - finalNode.height - deferredBottom });
     }
   }
 
@@ -1309,7 +1510,21 @@ function cssToOverrides(
   // Default root dimensions — only when the CSS did not set width/height at all.
   // An explicit `width: 0` (or huge value) must NOT fall through to the default.
   if (!parentStyles && o.width == null && !styles.width) o.width = ctx.defaultWidth;
-  if (!parentStyles && o.height == null && !styles.height) o.height = ctx.defaultHeight;
+  // Height default only fires when the root is NOT a flex-column container.
+  // A flex-column root without explicit height is a long-form page (landing,
+  // email, docs) whose height should be computed by HUG-from-children in the
+  // post-process below. Without this carve-out the root got locked at 1080,
+  // the post-process saw `height !== 100` and skipped its HUG branch, and
+  // every section below the first viewport ended up bleeding off-frame and
+  // tripping audit false-positives.
+  if (!parentStyles && o.height == null && !styles.height) {
+    const isVerticalFlexRoot = styles.display === 'flex' &&
+      (styles['flex-direction'] === 'column' || !styles['flex-direction']);
+    if (!isVerticalFlexRoot) {
+      o.height = ctx.defaultHeight;
+    }
+    // else: leave o.height undefined so the post-process HUG path runs.
+  }
 
   // DoS cap: ridiculous dimensions corrupt layout and hang exporters.
   // CSS allowed up to 99999px in tests; clamp at 16384px (max texture/canvas on most platforms).
@@ -1355,8 +1570,19 @@ function cssToOverrides(
       const pPadL = parseUnit(parentStyles['padding-left'] ?? '') || pPad[3];
 
       if ((parentDir === 'column' || parentDir === 'column-reverse') && !styles.width) {
-        // Column layout: child without width → stretch to parent width
-        o.width = Math.max(40, parentW - pPadL - pPadR);
+        // Column layout: child without width → stretch to parent width.
+        // Only apply when the parent's width is EXPLICITLY set in its CSS
+        // (parentStyles.width). Without that guard we'd use ctx.defaultWidth
+        // (1920) as a fallback and baked a 1840-wide child into every
+        // flex-column grandchild of a landing page root — Yoga can't
+        // un-bake a FIXED width later, so the post-process path at line
+        // 1183 (which uses the actual parent *node* width) is the correct
+        // place to resolve this. Leaving o.width undefined here lets that
+        // post-process run on a clean 100-default and compute the right
+        // value from the parent's resolved dimensions.
+        if (parentStyles.width) {
+          o.width = Math.max(40, parentW - pPadL - pPadR);
+        }
       }
       if ((parentDir === 'row' || parentDir === 'row-reverse') && !styles.height && parentH != null && parentH > 0) {
         // Row layout: child without height → stretch to parent height (only if parent has explicit height)
@@ -1614,6 +1840,18 @@ function cssToOverrides(
   } else if (hasChildElements && nodeType === 'FRAME' && position !== 'absolute' && position !== 'fixed') {
     // Block-level container with element children → VERTICAL (normal document flow)
     o.layoutMode = 'VERTICAL';
+  }
+
+  // In normal CSS block flow, text-align on a parent centers inline content
+  // within each child block. When we collapse block flow into a flex column,
+  // children sized by content default to flex-start and visually jump to the
+  // left edge. Translate parent text-align into counterAxisAlign so the
+  // layout matches the pre-flex visual. Only apply when no explicit
+  // align-items was set — explicit wins.
+  if (o.layoutMode === 'VERTICAL' && o.counterAxisAlign === undefined) {
+    const ta = styles['text-align'];
+    if (ta === 'center') o.counterAxisAlign = 'CENTER';
+    else if (ta === 'right' || ta === 'end') o.counterAxisAlign = 'MAX';
   }
 
   // ── Flex item properties ──

@@ -29,6 +29,11 @@ import {
   visualBalance,
   ctaVisibility,
   exportFidelity,
+  semanticCtaContrast,
+  semanticHeadingHierarchy,
+  semanticCaptionReadability,
+  semanticTouchTarget,
+  semanticLandmarkPresence,
   type AuditRule,
 } from './audit';
 
@@ -68,6 +73,13 @@ export function buildInspectAuditRules(
     visualBalance(),
     ctaVisibility(),
     exportFidelity(),
+    // Semantic-aware rules — read node.semanticRole set by classifyScene.
+    // Silently no-op when scene has no semantic tags.
+    semanticCtaContrast(),
+    semanticHeadingHierarchy(),
+    semanticCaptionReadability(),
+    semanticTouchTarget(),
+    semanticLandmarkPresence(),
   ];
 
   if (designSystem) {

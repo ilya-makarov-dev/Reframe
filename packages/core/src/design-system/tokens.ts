@@ -14,7 +14,7 @@
  */
 
 import type { SceneGraph } from '../engine/scene-graph';
-import type { Variable, VariableValue, Color } from '../engine/types';
+import type { Variable, VariableValue, Color, VariableCollection } from '../engine/types';
 import type { DesignSystem } from './types';
 
 // ─── Constants ──────────────────────────────────────────────
@@ -63,6 +63,45 @@ export interface TokenIndex {
   collectionId: string;
   tokens: Map<string, string>;  // name → variableId
   modeIds: { light: string; dark?: string };
+}
+
+/**
+ * Rebuild a TokenIndex from a SceneGraph that already has a
+ * `design-tokens` VariableCollection. Used when an MCP session is
+ * rehydrated from disk (stdio harness forks a fresh Node process per
+ * request and the in-memory TokenIndex sidecar vanishes, but the
+ * graph's variableCollections survive via scene serialization). With
+ * this helper, `setMode` can reconstruct the index instead of failing
+ * with "no tokens defined (run defineTokens first)".
+ *
+ * Returns undefined if the graph has no design-tokens collection.
+ */
+export function rebuildTokenIndexFromGraph(graph: SceneGraph): TokenIndex | undefined {
+  let tokenCollection: VariableCollection | undefined;
+  for (const col of graph.variableCollections.values()) {
+    if (col.name === TOKEN_COLLECTION_NAME) {
+      tokenCollection = col;
+      break;
+    }
+  }
+  if (!tokenCollection) return undefined;
+
+  const tokens = new Map<string, string>();
+  for (const v of graph.variables.values()) {
+    if (v.collectionId === tokenCollection.id) {
+      tokens.set(v.name, v.id);
+    }
+  }
+
+  const lightMode = tokenCollection.modes.find(m => m.name === MODE_LIGHT);
+  const darkMode = tokenCollection.modes.find(m => m.name === MODE_DARK);
+  if (!lightMode) return undefined;
+
+  return {
+    collectionId: tokenCollection.id,
+    tokens,
+    modeIds: { light: lightMode.modeId, dark: darkMode?.modeId },
+  };
 }
 
 // ─── Main: DesignSystem → Tokens ────────────────────────────

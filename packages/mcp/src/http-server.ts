@@ -281,7 +281,15 @@ export function startHttpSidecar(port = 4100): void {
     }
 
     if (url.pathname.startsWith('/preview/') && req.method === 'GET') {
-      const sceneId = url.pathname.split('/preview/')[1];
+      // Split `<sceneId>[.<ext>]` — the optional extension selects the
+      // export format (`.svg`, `.tsx`, `.lottie`, `.transition`) so the
+      // agent can link each `reframe_export` result to its own URL
+      // instead of all formats sharing the same `/preview/s10` and
+      // silently overwriting the last rendered format.
+      const tail = url.pathname.split('/preview/')[1];
+      const dotIdx = tail.lastIndexOf('.');
+      const sceneId = dotIdx >= 0 ? tail.slice(0, dotIdx) : tail;
+      const ext = dotIdx >= 0 ? tail.slice(dotIdx + 1).toLowerCase() : 'html';
       const stored = getScene(sceneId);
       if (!stored) {
         res.writeHead(404, { 'Content-Type': 'text/html' });
@@ -290,6 +298,38 @@ export function startHttpSidecar(port = 4100): void {
       }
       const { ensureSceneLayout } = await import('../../core/src/engine/layout.js');
       ensureSceneLayout(stored.graph, stored.rootId);
+
+      if (ext === 'svg') {
+        const { exportSvgFromGraph } = await import('./engine.js');
+        const svg = exportSvgFromGraph(stored.graph, stored.rootId);
+        res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+        res.end(svg);
+        return;
+      }
+      if (ext === 'tsx' || ext === 'react') {
+        const { exportToReact } = await import('../../core/src/exporters/react.js');
+        const { StandaloneHost } = await import('../../core/src/adapters/standalone/adapter.js');
+        const { StandaloneNode } = await import('../../core/src/adapters/standalone/node.js');
+        const { setHost } = await import('../../core/src/host/context.js');
+        const host = new StandaloneHost(stored.graph);
+        setHost(host);
+        const rootNode = new StandaloneNode(stored.graph, stored.graph.getNode(stored.rootId)!);
+        const tsx = exportToReact(rootNode as any, { typescript: true });
+        // Render as HTML showing the TSX source — browsers can't
+        // execute React source directly, so the next best thing is a
+        // readable code view.
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${stored.name} — TSX</title>
+<style>body{margin:0;background:#0b0b0d;color:#f5f5f7;font-family:ui-monospace,SF Mono,Menlo,monospace;padding:24px;font-size:13px;line-height:1.6}pre{margin:0;white-space:pre-wrap}</style>
+</head><body><pre>${tsx.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</pre></body></html>`);
+        return;
+      }
+      if (ext === 'lottie' || ext === 'json') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html><html><body><h1>Lottie preview requires a player</h1><p>Open <code>.reframe/exports/${stored.slug}.lottie.json</code> with lottiefiles.com or a native Lottie viewer.</p></body></html>`);
+        return;
+      }
+      // Default: HTML render (same as old /preview/<id> behavior).
       const { exportToHtml } = await import('../../core/src/exporters/html.js');
       const html = exportToHtml(stored.graph, stored.rootId, { fullDocument: true });
       res.writeHead(200, { 'Content-Type': 'text/html' });

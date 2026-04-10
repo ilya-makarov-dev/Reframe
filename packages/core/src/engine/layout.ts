@@ -214,10 +214,67 @@ function configureFlexContainer(y: YogaInstance, yogaNode: YogaNode, node: Scene
 
 // ─── Child Configuration ────────────────────────────────────────
 
-function configureAbsoluteChild(y: YogaInstance, yogaChild: YogaNode, child: SceneNode): void {
+function configureAbsoluteChild(
+  y: YogaInstance,
+  yogaChild: YogaNode,
+  child: SceneNode,
+  graph?: SceneGraph,
+): void {
   yogaChild.setPositionType(y.POSITION_TYPE_ABSOLUTE);
   yogaChild.setPosition(y.EDGE_LEFT, child.x);
   yogaChild.setPosition(y.EDGE_TOP, child.y);
+
+  // Non-layout absolute nodes (raw shapes, image rectangles) have no
+  // intrinsic content — use their stored dimensions.
+  if (child.layoutMode === 'NONE' || !graph) {
+    yogaChild.setWidth(child.width);
+    yogaChild.setHeight(child.height);
+    return;
+  }
+
+  // Absolute FRAME with a layout — if EITHER axis is HUG, we need
+  // Yoga to measure the child's content, which means we have to build
+  // a full sub-tree under this Yoga node (grandchildren + their
+  // measure funcs). Without this, HUG absolutes come back at the
+  // default 100×100 because Yoga has nothing to measure.
+  const hasHugAxis = child.primaryAxisSizing === 'HUG' || child.counterAxisSizing === 'HUG';
+  if (hasHugAxis) {
+    // Configure this Yoga node as a flex container mirroring the
+    // frame's layout, then recursively add its children via the same
+    // nested-auto-layout path auto children use.
+    configureFlexContainer(y, yogaChild, child);
+    const grandchildren = graph.getChildren(child.id);
+    let idx = 0;
+    for (const grandchild of grandchildren) {
+      const yogaGrandchild = y.Node.create();
+      if (grandchild.layoutPositioning === 'ABSOLUTE') {
+        configureAbsoluteChild(y, yogaGrandchild, grandchild, graph);
+      } else if (!grandchild.visible) {
+        yogaGrandchild.setDisplay(y.DISPLAY_NONE);
+      } else if (grandchild.layoutMode !== 'NONE') {
+        configureNestedAutoLayout(y, graph, yogaGrandchild, grandchild, child);
+      } else {
+        configureLeaf(y, yogaGrandchild, grandchild, child);
+      }
+      const selfAlign = mapAlignSelf(y, grandchild.layoutAlignSelf);
+      if (selfAlign != null) yogaGrandchild.setAlignSelf(selfAlign);
+      yogaChild.insertChild(yogaGrandchild, idx++);
+    }
+    // Set explicit dimensions for axes that are FIXED; HUG axes stay
+    // unconstrained so Yoga sizes them from the now-present children.
+    if (child.primaryAxisSizing === 'FIXED') {
+      if (child.layoutMode === 'HORIZONTAL') yogaChild.setWidth(child.width);
+      else yogaChild.setHeight(child.height);
+    }
+    if (child.counterAxisSizing === 'FIXED') {
+      if (child.layoutMode === 'HORIZONTAL') yogaChild.setHeight(child.height);
+      else yogaChild.setWidth(child.width);
+    }
+    return;
+  }
+
+  // Both axes FIXED (or FILL on an absolute, which doesn't really
+  // apply) — honor the stored dimensions directly.
   yogaChild.setWidth(child.width);
   yogaChild.setHeight(child.height);
 }
@@ -324,7 +381,7 @@ function buildYogaTree(
     const yogaChild = y.Node.create();
 
     if (child.layoutPositioning === 'ABSOLUTE') {
-      configureAbsoluteChild(y, yogaChild, child);
+      configureAbsoluteChild(y, yogaChild, child, graph);
     } else if (!child.visible) {
       yogaChild.setDisplay(y.DISPLAY_NONE);
     } else if (child.layoutMode !== 'NONE') {
@@ -398,7 +455,7 @@ function configureNestedAutoLayout(
     const yogaGrandchild = y.Node.create();
 
     if (grandchild.layoutPositioning === 'ABSOLUTE') {
-      configureAbsoluteChild(y, yogaGrandchild, grandchild);
+      configureAbsoluteChild(y, yogaGrandchild, grandchild, graph);
     } else if (!grandchild.visible) {
       yogaGrandchild.setDisplay(y.DISPLAY_NONE);
     } else if (grandchild.layoutMode !== 'NONE') {
@@ -435,7 +492,26 @@ function applyYogaLayout(
     const child = children[i];
     const yogaChild = yogaNode.getChild(i);
 
-    if (child.layoutPositioning === 'ABSOLUTE' || !child.visible) continue;
+    if (!child.visible) continue;
+
+    // Absolute children: don't overwrite stored x/y (those are
+    // authored placement, not layout-derived), but DO write back the
+    // computed width/height so HUG absolutes (badges, ribbons) come
+    // out content-shaped instead of stuck at the 100×100 default. The
+    // configureAbsoluteChild path now builds a measurable subtree,
+    // and applyYogaLayout has to finish the round trip by reading its
+    // computed dimensions.
+    if (child.layoutPositioning === 'ABSOLUTE') {
+      if (child.primaryAxisSizing === 'HUG' || child.counterAxisSizing === 'HUG') {
+        const w = yogaChild.getComputedWidth();
+        const h = yogaChild.getComputedHeight();
+        graph.updateNode(child.id, { width: w, height: h });
+        if (child.layoutMode !== 'NONE') {
+          applyYogaLayout(graph, child, yogaChild);
+        }
+      }
+      continue;
+    }
 
     const x = yogaChild.getComputedLeft();
     const y = yogaChild.getComputedTop();
