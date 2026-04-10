@@ -100,12 +100,12 @@ export function tokenizeDesignSystem(
   const mode = collection.modes[0];
   if (mode) mode.name = MODE_LIGHT;
 
-  // Optionally add dark mode
-  let darkModeId: string | undefined;
-  if (options.darkMode) {
-    darkModeId = `mode-dark-${Date.now()}`;
-    collection.modes.push({ modeId: darkModeId, name: MODE_DARK });
-  }
+  // Always add a dark mode collection so `setMode: 'dark'` works out of the box.
+  // Values mirror light unless an explicit dark override is supplied; color roles
+  // get inverted via invertColorForDarkMode() when options.darkMode is true.
+  const darkModeId: string = `mode-dark-${Date.now()}`;
+  collection.modes.push({ modeId: darkModeId, name: MODE_DARK });
+  const generateDarkOverrides = options.darkMode !== false;
 
   const index: TokenIndex = {
     collectionId: collection.id,
@@ -116,12 +116,8 @@ export function tokenizeDesignSystem(
   // Helper: create a variable and register in index
   function addToken(name: string, type: 'COLOR' | 'FLOAT' | 'STRING', lightValue: VariableValue, darkValue?: VariableValue): Variable {
     const variable = graph.createVariable(name, type, collection.id, lightValue);
-
-    // Set dark mode value if applicable
-    if (darkModeId) {
-      variable.valuesByMode[darkModeId] = darkValue ?? lightValue;
-    }
-
+    // Always populate dark mode — either with provided override or mirror of light.
+    variable.valuesByMode[darkModeId] = darkValue ?? lightValue;
     index.tokens.set(name, variable.id);
     return variable;
   }
@@ -130,7 +126,7 @@ export function tokenizeDesignSystem(
   if (ds.colors.roles) {
     for (const [role, hex] of ds.colors.roles) {
       const color = hexToColor(hex);
-      const darkColor = options.darkMode ? invertColorForDarkMode(color, role) : undefined;
+      const darkColor = generateDarkOverrides ? invertColorForDarkMode(color, role) : undefined;
       addToken(`color.${role}`, 'COLOR', color, darkColor);
     }
   }
@@ -140,7 +136,7 @@ export function tokenizeDesignSystem(
     const value = ds.colors[role];
     if (value && !index.tokens.has(`color.${role}`)) {
       const color = hexToColor(value);
-      const darkColor = options.darkMode ? invertColorForDarkMode(color, role) : undefined;
+      const darkColor = generateDarkOverrides ? invertColorForDarkMode(color, role) : undefined;
       addToken(`color.${role}`, 'COLOR', color, darkColor);
     }
   }
@@ -361,6 +357,117 @@ export function bindTokenToNode(
 
   graph.bindVariable(nodeId, field, varId);
   return graph.resolveVariable(varId);
+}
+
+// ─── Auto-bind tokens to a scene graph ─────────────────────
+
+/**
+ * Walk a subtree and bind every node property whose current value matches a
+ * registered token. Until this runs, defineTokens creates tokens but no node
+ * actually references them, so setMode "dark" updates 0 properties — the
+ * agent's report says "121 tokens defined" but nothing changes when modes
+ * switch. Auto-binding closes that loop by value-matching:
+ *
+ *   - SOLID fill colors against `color.*` tokens (exact channel match)
+ *   - fontSize / fontWeight against `type.<role>.size|weight` tokens
+ *   - padding{Top,Right,Bottom,Left} / itemSpacing against `space.*` and
+ *     direct numeric scale tokens (`space.16`, `space.24`, ...)
+ *   - cornerRadius against `radius.*` tokens
+ *
+ * Returns the number of properties that were bound. Idempotent — re-binding a
+ * field that already points at the same variable is a no-op.
+ */
+export function autoBindTokensFromGraph(
+  graph: SceneGraph,
+  rootId: string,
+  index: TokenIndex,
+): number {
+  // Build value→variableId reverse lookups once.
+  const colorByHex = new Map<string, string>();      // "#ff0000" → varId
+  const numberByValue = new Map<number, string[]>(); // value → [varId, ...]
+  for (const [name, varId] of index.tokens) {
+    const variable = graph.variables.get(varId);
+    if (!variable) continue;
+    const value = graph.resolveVariable(varId);
+    if (value === undefined) continue;
+    if (variable.type === 'COLOR' && typeof value === 'object' && 'r' in value) {
+      colorByHex.set(colorToHex(value as Color).toLowerCase(), varId);
+    } else if (variable.type === 'FLOAT' && typeof value === 'number') {
+      const list = numberByValue.get(value) ?? [];
+      list.push(varId);
+      numberByValue.set(value, list);
+    }
+    // Bias number lookups: prefer variables in the more semantic namespace
+    // (`type.*`, `space.*`, `radius.*`) over generic ones when the same number
+    // is registered multiple times. The list is walked in insertion order.
+    void name;
+  }
+
+  let bound = 0;
+  const bindIfFree = (nodeId: string, field: string, varId: string) => {
+    const node = graph.getNode(nodeId);
+    if (!node) return;
+    if (node.boundVariables[field] === varId) return; // already bound
+    graph.bindVariable(nodeId, field, varId);
+    bound++;
+  };
+
+  function walk(nodeId: string) {
+    const node = graph.getNode(nodeId);
+    if (!node) return;
+
+    // Color fills
+    const fills = node.fills as any[] | undefined;
+    if (Array.isArray(fills)) {
+      for (let i = 0; i < fills.length; i++) {
+        const fill = fills[i];
+        if (!fill || fill.type !== 'SOLID' || !fill.color) continue;
+        const hex = colorToHex(fill.color as Color).toLowerCase();
+        const varId = colorByHex.get(hex);
+        if (varId) bindIfFree(nodeId, `fills[${i}].color`, varId);
+      }
+    }
+
+    // Font size / weight (text only)
+    if (node.type === 'TEXT') {
+      const fs = (node as any).fontSize;
+      if (typeof fs === 'number') {
+        const varId = numberByValue.get(fs)?.find(id => graph.variables.get(id)?.name.startsWith('type.') && graph.variables.get(id)!.name.endsWith('.size'));
+        if (varId) bindIfFree(nodeId, 'fontSize', varId);
+      }
+      const fw = (node as any).fontWeight;
+      if (typeof fw === 'number') {
+        const varId = numberByValue.get(fw)?.find(id => graph.variables.get(id)?.name.endsWith('.weight'));
+        if (varId) bindIfFree(nodeId, 'fontWeight', varId);
+      }
+    }
+
+    // Spacing — padding + itemSpacing → space.* tokens
+    const numericFields: Array<[string, number | undefined]> = [
+      ['paddingTop', (node as any).paddingTop],
+      ['paddingRight', (node as any).paddingRight],
+      ['paddingBottom', (node as any).paddingBottom],
+      ['paddingLeft', (node as any).paddingLeft],
+      ['itemSpacing', (node as any).itemSpacing],
+    ];
+    for (const [field, val] of numericFields) {
+      if (typeof val !== 'number' || val === 0) continue;
+      const varId = numberByValue.get(val)?.find(id => graph.variables.get(id)?.name.startsWith('space.'));
+      if (varId) bindIfFree(nodeId, field, varId);
+    }
+
+    // Corner radius → radius.* tokens
+    const cr = (node as any).cornerRadius;
+    if (typeof cr === 'number' && cr !== 0) {
+      const varId = numberByValue.get(cr)?.find(id => graph.variables.get(id)?.name.startsWith('radius.'));
+      if (varId) bindIfFree(nodeId, 'cornerRadius', varId);
+    }
+
+    for (const childId of node.childIds) walk(childId);
+  }
+
+  walk(rootId);
+  return bound;
 }
 
 // ─── Switch mode ────────────────────────────────────────────

@@ -195,7 +195,32 @@ export function applyFix(graph: SceneGraph, issue: AuditIssue): boolean {
   // Numeric properties
   const numVal = parseFloat(suggested);
   if (!isNaN(numVal)) {
-    graph.updateNode(issue.nodeId, { [nodeProp]: numVal });
+    const updates: Record<string, number> = { [nodeProp]: numVal };
+
+    // When fontSize changes, proportionally scale the baked-in absolute line-height
+    // so it stays visually correct. HTML importer bakes `line-height: 1.2` as an
+    // absolute px value (fontSize × 1.2); without this adjustment, shrinking fontSize
+    // would leave the old leading baked in and open up massive empty gaps between
+    // lines. Only applied when the current lineHeight clearly represents a ratio-
+    // derived px value (lineHeight > fontSize × 0.8, i.e. sane leading).
+    if (nodeProp === 'fontSize' && node.type === 'TEXT') {
+      const oldFontSize = (node as any).fontSize;
+      const currentLH = (node as any).lineHeight;
+      if (
+        typeof oldFontSize === 'number' && oldFontSize > 0 &&
+        typeof currentLH === 'number' && currentLH > 0 &&
+        numVal > 0 && numVal !== oldFontSize
+      ) {
+        const ratio = currentLH / oldFontSize;
+        // Ratio must look like real leading (between 0.8 and 3.0). Outside that, leave
+        // lineHeight alone — it may already be a small fixed override.
+        if (ratio >= 0.8 && ratio <= 3.0) {
+          updates.lineHeight = Math.round(numVal * ratio * 100) / 100;
+        }
+      }
+    }
+
+    graph.updateNode(issue.nodeId, updates);
     return true;
   }
 

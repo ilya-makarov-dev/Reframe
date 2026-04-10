@@ -30,6 +30,10 @@ export interface StoredScene {
   timeline?: ITimeline;
   /** Monotonic: incremented when the session graph content changes (edit, compile, Studio push). */
   sessionRevision: number;
+  /** Brand slug this scene was compiled against (persisted to project.json). */
+  brand?: string;
+  /** DESIGN.md short hash at last compile — persisted to project.json for drift detection. */
+  brandHash?: string;
 }
 
 // ─── Internal state ─────────────────────────────────────────
@@ -101,7 +105,7 @@ export function storeScene(
   graph: SceneGraph,
   rootId: string,
   timeline?: ITimeline,
-  options?: { slug?: string; name?: string },
+  options?: { slug?: string; name?: string; brand?: string; brandHash?: string },
 ): string {
   // Ensure HTTP sidecar is up
   import('./http-server.js').then(m => m.ensureHttpSidecar()).catch(() => {});
@@ -126,6 +130,8 @@ export function storeScene(
       existing.nodeCount = nodeCount;
       existing.timeline = timeline;
       existing.sessionRevision = (existing.sessionRevision ?? 0) + 1;
+      if (options?.brand !== undefined) existing.brand = options.brand;
+      if (options?.brandHash !== undefined) existing.brandHash = options.brandHash;
 
       emitProjectEvent({ type: 'scene:session-changed', sceneId: existingSessionId, revision: existing.sessionRevision });
       autoSaveToProject(existing);
@@ -147,6 +153,8 @@ export function storeScene(
   const stored: StoredScene = {
     graph, rootId, name, slug, width, height, nodeCount, createdAt: Date.now(), timeline,
     sessionRevision: 1,
+    brand: options?.brand,
+    brandHash: options?.brandHash,
   };
 
   scenes.set(sessionId, stored);
@@ -341,6 +349,8 @@ function autoSaveToProject(stored: StoredScene): void {
       timeline: stored.timeline,
       group: (stored as any).group,
       source: (stored as any).sourceFile,
+      brand: stored.brand,
+      brandHash: stored.brandHash,
     });
   } catch {
     // Auto-save is best-effort

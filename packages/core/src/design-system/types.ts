@@ -160,6 +160,12 @@ export interface DesignSystemLayout {
   spacingScale?: number[];    // full scale: [2, 4, 8, 12, 16, 24, 32, 48, 64]
   maxWidth?: number;          // content container max-width
   sectionSpacing?: number;    // vertical gap between sections
+  /**
+   * Allowed range for section-level padding (e.g. [80, 160]). When set, audit
+   * rules accept any padding within this range as section spacing — without it,
+   * marketing-grade 80–120px hero padding gets snapped to micro-scale tokens.
+   */
+  sectionPaddingRange?: [number, number];
   borderRadiusScale: number[];// e.g. [0, 2, 4, 8, 12, 16, 9999]
 }
 
@@ -209,6 +215,12 @@ export interface DesignSystem {
     fontFeatures?: FontFeature[];     // global OpenType features
     primaryFont?: string;             // primary font family name
     secondaryFont?: string;           // secondary/accent font
+    /**
+     * Every font size found in the typography table, regardless of role dedup.
+     * Audit rules use this as the authoritative "is this size legal?" set so a
+     * brand documenting Display 72/64/48 isn't reduced to a single hero entry.
+     */
+    allSizes?: number[];
   };
   components: DesignSystemComponents;
   layout: DesignSystemLayout;

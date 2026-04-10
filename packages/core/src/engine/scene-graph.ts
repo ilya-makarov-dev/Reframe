@@ -375,6 +375,10 @@ export class SceneGraph {
   reparentNode(nodeId: string, newParentId: string): void {
     const node = this.nodes.get(nodeId);
     if (!node) return;
+    if (nodeId === newParentId) return;         // no-op: parent cannot be self
+    if (!this.nodes.has(newParentId)) return;   // target parent missing
+    // Reject cycles: newParentId must not be a descendant of nodeId.
+    if (this.isDescendantOf(newParentId, nodeId)) return;
 
     const oldParentId = node.parentId;
 
@@ -399,6 +403,21 @@ export class SceneGraph {
 
     this.clearAbsPosCache();
     this.emitter.emit('node:reparented', nodeId, oldParentId, newParentId);
+  }
+
+  /** True if candidateId is nodeId or any transitive descendant of nodeId. */
+  private isDescendantOf(candidateId: string, nodeId: string): boolean {
+    if (candidateId === nodeId) return true;
+    const root = this.nodes.get(nodeId);
+    if (!root) return false;
+    const stack = [...root.childIds];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      if (cur === candidateId) return true;
+      const n = this.nodes.get(cur);
+      if (n) stack.push(...n.childIds);
+    }
+    return false;
   }
 
   reorderChild(nodeId: string, parentId: string, insertIndex: number): void {

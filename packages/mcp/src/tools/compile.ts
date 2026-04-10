@@ -26,6 +26,8 @@ import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
 import { runWithHostAsync } from '../../../core/src/host/context.js';
 import { parseDesignMd } from '../../../core/src/design-system/index.js';
+import { hashDesignMdContent } from '../../../core/src/project/types.js';
+import { coreProjectIo } from '../project-io.js';
 import { audit } from '../../../core/src/audit.js';
 import { buildInspectAuditRules } from '../../../core/src/inspect-audit-rules.js';
 import { runAutoFixLoop } from './_auto-fix.js';
@@ -166,6 +168,16 @@ export async function handleCompile(input: CompileInput) {
       // Also set as session brand
       const ds = session.getOrParseDesignMd(loaded, parseDesignMd);
       session.setBrand(input.brand, loaded, ds);
+      // Persist as activeBrand in project.json so subsequent forked MCP
+      // calls (edit / inspect / export) read the same brand from disk
+      // instead of falling back to whatever was last extracted globally.
+      try {
+        const projectDir = getWorkspaceRoot();
+        const manifest = coreProjectIo().loadProject(projectDir);
+        if (manifest.brands?.[input.brand]) {
+          coreProjectIo().setActiveBrand(projectDir, input.brand);
+        }
+      } catch { /* best-effort */ }
     } else {
       return makeToolJsonErrorResult(
         `Brand "${input.brand}" not found. Use reframe_design (url/html/slug) or pass designMd.`,
@@ -177,6 +189,28 @@ export async function handleCompile(input: CompileInput) {
   // Fallback to session brand if no explicit brand/designMd
   if (!input.designMd && session.activeDesignMd) {
     input.designMd = session.activeDesignMd;
+  }
+  // Last-resort fallback: read activeBrand from project.json. The session
+  // singleton can lose state across MCP transport boundaries (each tool call
+  // may run in a fresh interpreter when stdio harness forks), so the last
+  // brand the user extracted only survives on disk. Without this fallback,
+  // every compile after a process boundary silently runs without DESIGN.md
+  // and audit drops to 17 generic rules instead of the 23 brand-aware ones.
+  if (!input.designMd) {
+    try {
+      const projectDir = getWorkspaceRoot();
+      const manifest = coreProjectIo().loadProject(projectDir);
+      if (manifest.activeBrand) {
+        const loaded = coreProjectIo().loadBrandFromProject(projectDir, manifest.activeBrand);
+        if (loaded) {
+          input.designMd = loaded.content;
+          // Re-hydrate the session so subsequent calls in the same process
+          // skip the disk read.
+          const ds = session.getOrParseDesignMd(loaded.content, parseDesignMd);
+          session.setBrand(manifest.activeBrand, loaded.content, ds);
+        }
+      }
+    } catch { /* best-effort */ }
   }
 
   // ─── Validate inputs ────────────────────────────────────────
@@ -210,6 +244,25 @@ export async function handleCompile(input: CompileInput) {
     sizes.push({
       width: input.width,
       height: input.height,
+      name: input.name ?? 'Scene',
+    });
+  } else if (useBlueprint && input.blueprint) {
+    // Blueprint path: pull dimensions from the blueprint root (w/h or width/height).
+    // Reject 0/negative/missing explicitly instead of falling through to the
+    // generic "provide width+height" error.
+    const bp = input.blueprint as any;
+    const bpW = bp.w ?? bp.width ?? 0;
+    const bpH = bp.h ?? bp.height ?? 0;
+    if (!bpW || !bpH || bpW <= 0 || bpH <= 0) {
+      return makeToolJsonErrorResult(
+        `Invalid blueprint dimensions: got width=${bpW}, height=${bpH}. Provide positive w/h on the blueprint root, or pass width+height at the top level.`,
+        'compile.blueprint_dimensions_invalid',
+        { width: bpW, height: bpH },
+      );
+    }
+    sizes.push({
+      width: bpW,
+      height: bpH,
       name: input.name ?? 'Scene',
     });
   } else if (input.html) {
@@ -387,13 +440,26 @@ export async function handleCompile(input: CompileInput) {
         }
       } else {
         // ── HTML PATH ──────────────────────────────────────
+        // When the caller explicitly passed sizes[] (multi-size compile), we
+        // treat the per-size width/height as a hard override on the root —
+        // otherwise inline `style="width:1440px"` on the source div wins and
+        // every size collapses to 1440. forceRootSize off means HTML import
+        // controls dimensions naturally for single-size calls.
+        const isMultiSize = Array.isArray(input.sizes) && input.sizes.length > 0;
         const importResult = await importFromHtml(input.html!, {
           name: input.name,
           width: size.width || undefined,
           height: size.height || undefined,
+          forceRootSize: isMultiSize,
         });
         graph = importResult.graph;
         rootId = importResult.rootId;
+        // Surface importer warnings inline (script/iframe/style stripping)
+        if (importResult.stats.unsupported.length > 0) {
+          for (const u of importResult.stats.unsupported) {
+            sections.push(`  [!] importer: ${u}`);
+          }
+        }
       }
     } catch (err: any) {
       sections.push(`## ${size.name} \u2014 ERROR`);
@@ -437,10 +503,26 @@ export async function handleCompile(input: CompileInput) {
 
       if (allFixed.length > 0) {
         // Collapse duplicate fixes: "contrast-minimum: auto-corrected" x6 → "contrast-minimum: auto-corrected (×6)"
+        // Per-rule grouping: noisy rules like spacing-grid produce hundreds of
+        // distinct messages ("left 124px → 128px", "left 292px → 296px", ...)
+        // that drown the log. Collapse those into "spacing-grid: 752 grid
+        // alignments" instead of listing every value pair.
+        const NOISY_RULES = new Set(['spacing-grid']);
         const fixCounts = new Map<string, number>();
-        for (const f of allFixed) fixCounts.set(f, (fixCounts.get(f) ?? 0) + 1);
-        const fixSummary = [...fixCounts].map(([f, n]) => n > 1 ? `${f} (×${n})` : f).join(', ');
-        auditSummary += `Auto-fixed: ${fixSummary}\n`;
+        const noisyCounts = new Map<string, number>();
+        for (const f of allFixed) {
+          const ruleName = f.split(':')[0];
+          if (NOISY_RULES.has(ruleName)) {
+            noisyCounts.set(ruleName, (noisyCounts.get(ruleName) ?? 0) + 1);
+          } else {
+            fixCounts.set(f, (fixCounts.get(f) ?? 0) + 1);
+          }
+        }
+        const parts = [...fixCounts].map(([f, n]) => n > 1 ? `${f} (×${n})` : f);
+        for (const [ruleName, n] of noisyCounts) {
+          parts.push(`${ruleName}: ${n} grid alignments`);
+        }
+        auditSummary += `Auto-fixed: ${parts.join(', ')}\n`;
       }
       const warnings = finalIssues.filter(i => i.severity === 'warning');
 
@@ -476,7 +558,20 @@ export async function handleCompile(input: CompileInput) {
       ? `${input.name ?? 'Scene'}-${size.name}`
       : (input.name ?? size.name ?? root.name);
 
-    const sceneId = storeScene(graph, rootId, undefined, { name: sceneName });
+    // Brand resolution for the scene metadata (persisted on saveScene). Priority:
+    //   1. Explicit brand passed to the compile call
+    //   2. Session's active brand (set earlier by reframe_design or by brand lookup above)
+    //   3. None — scene is brand-agnostic
+    // The hash pins the scene to the exact DESIGN.md content it was compiled against
+    // so subsequent loads can detect drift via detectBrandDrift().
+    const resolvedBrand = input.brand || session.activeBrand || undefined;
+    const resolvedBrandHash = input.designMd ? hashDesignMdContent(input.designMd) : undefined;
+
+    const sceneId = storeScene(graph, rootId, undefined, {
+      name: sceneName,
+      brand: resolvedBrand,
+      brandHash: resolvedBrandHash,
+    });
     sceneIds.push(sceneId);
     autoSaveScene(sceneId, graph, rootId);
 

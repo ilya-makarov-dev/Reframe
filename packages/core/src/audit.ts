@@ -88,8 +88,10 @@ interface DesignSystemLike {
   typography?: {
     hierarchy: Array<{ role: string; fontFamily?: string; fontSize: number; fontWeight: number; lineHeight: number; letterSpacing: number; fontFeatures?: string[] }>;
     fontFeatures?: Array<{ tag: string; scope: string }>;
+    /** Every font size found in the typography section, even when role dedup hides it. */
+    allSizes?: number[];
   };
-  layout?: { borderRadiusScale: number[]; spacingUnit: number; spacingScale?: number[] };
+  layout?: { borderRadiusScale: number[]; spacingUnit: number; spacingScale?: number[]; sectionPaddingRange?: [number, number] };
   components?: {
     button?: { borderRadius: number; style?: string; fontWeight?: number; variants?: Array<{ name: string; background?: string; color?: string; borderRadius?: number; paddingX?: number; paddingY?: number; minHeight?: number; hover?: { background?: string } }> };
     card?: { borderRadius: number; background?: string; borderColor?: string; padding?: number };
@@ -269,6 +271,11 @@ export function minFontSize(min = 10): AuditRule {
     if (node.type !== NodeType.Text) return [];
     const size = node.fontSize;
     if (typeof size !== 'number') return []; // MIXED — skip
+    // If the design system explicitly documents this size (e.g. Linear has
+    // Tiny=10px / Micro=11px in its hierarchy), it is legal regardless of
+    // the global floor — these label-role sizes are intentional.
+    const allSizes = ctx.designSystem?.typography?.allSizes;
+    if (allSizes && allSizes.includes(size)) return [];
     if (size < min) {
       return [{
         rule: 'min-font-size',
@@ -628,6 +635,13 @@ export function fontSizeRoleMatch(): AuditRule {
     if (typeof fontSize !== 'number') return [];
 
     const hierarchy = ctx.designSystem.typography.hierarchy;
+    // Authoritative size set: every size found in the typography table, not
+    // just the role-deduplicated hierarchy. Linear's table has Display 72/64/48
+    // all under role "hero" — without allSizes the parser keeps only 72 and
+    // legitimate 48px display headers get auto-fixed to 32px.
+    const allSizes = ctx.designSystem.typography.allSizes;
+    if (allSizes && allSizes.includes(fontSize)) return [];
+
     // Check if this font size is approximately in the hierarchy (±25%)
     const exactMatch = hierarchy.some(r => {
       const ratio = fontSize / r.fontSize;
@@ -636,7 +650,25 @@ export function fontSizeRoleMatch(): AuditRule {
 
     if (exactMatch) return [];
 
-    // Find closest match
+    // Also accept if within ±15% of any documented size (covers responsive
+    // scaling and small per-platform tweaks).
+    if (allSizes && allSizes.some(s => Math.abs(fontSize - s) / s <= 0.15)) return [];
+
+    // Brand DESIGN.md files often only document UI chrome sizes (largest entry is
+    // a "Section Title" at 24–48px for editorial brands like Ferrari/Tesla). Agents
+    // building marketing landings legitimately need display sizes well above that.
+    // Any size ≥ 1.5× the largest documented role is treated as hero/display and
+    // allowed silently — there is no authoritative remap target.
+    const sizes = hierarchy.map(r => r.fontSize).filter(n => typeof n === 'number');
+    if (sizes.length === 0) return [];
+    const maxDocSize = Math.max(...sizes);
+    const minDocSize = Math.min(...sizes);
+    if (fontSize >= maxDocSize * 1.5) return [];
+    // Tiny text (legal copy, footnotes) that's smaller than smallest-role × 0.6:
+    // leave alone — over-enlarging is also destructive.
+    if (fontSize <= minDocSize * 0.6) return [];
+
+    // Find closest match for the remaining "in-range but off" cases.
     const closest = findClosestTypoRule(hierarchy, fontSize);
     if (!closest) return [];
 
@@ -644,15 +676,28 @@ export function fontSizeRoleMatch(): AuditRule {
     const deviation = Math.abs(fontSize - closest.fontSize) / closest.fontSize;
     if (deviation <= 0.25) return [];
 
-    return [{
+    // Safety clamp: if the fix would shrink text by more than 2×, it's almost
+    // certainly a display-text false positive. Report as info but omit the fix
+    // so auto-fix won't apply it.
+    const wouldShrinkTooMuch = fontSize > closest.fontSize * 2;
+
+    const issue: AuditIssue = {
       rule: 'font-size-role',
       severity: 'info',
       message: `Font size ${fontSize}px on "${node.name}" doesn't match any design system role (closest: ${closest.role} at ${closest.fontSize}px)`,
       nodeId: node.id,
       nodeName: node.name,
       path: ctx.path,
-      fix: { property: 'font-size', current: `${fontSize}px`, suggested: `${closest.fontSize}px`, css: `font-size: ${closest.fontSize}px` },
-    }];
+    };
+    if (!wouldShrinkTooMuch) {
+      issue.fix = {
+        property: 'font-size',
+        current: `${fontSize}px`,
+        suggested: `${closest.fontSize}px`,
+        css: `font-size: ${closest.fontSize}px`,
+      };
+    }
+    return [issue];
   });
 }
 
@@ -870,6 +915,23 @@ export function ctaVisibility(): AuditRule {
     const realHeight = ctx.root.height;
     const minDim = Math.min(realWidth, realHeight);
 
+    // Detect scrollable / long-page context. If any element extends well past
+    // the declared root height, the page is intended to scroll — the clipping
+    // check must use the *content* bounds, not the declared frame height.
+    let contentBottom = realHeight;
+    if (ctx.root.children) {
+      const walkBounds = (n: INode) => {
+        const bottom = (n.y ?? 0) + (n.height ?? 0);
+        if (bottom > contentBottom) contentBottom = bottom;
+        if (n.children) for (const c of n.children) walkBounds(c);
+      };
+      walkBounds(ctx.root);
+    }
+    const isScrollable = contentBottom > realHeight * 1.25;
+    // Use content bottom for vertical clip check when scrollable; still use root
+    // width for horizontal (pages rarely scroll sideways).
+    const clipBottom = isScrollable ? contentBottom + 5 : realHeight + 5;
+
     for (const btn of buttons) {
       // CTA should be at least touchable size
       if (btn.width < 40 || btn.height < 20) {
@@ -882,23 +944,26 @@ export function ctaVisibility(): AuditRule {
         });
       }
 
-      // CTA should have sufficient area relative to frame
-      const btnArea = btn.width * btn.height;
-      const frameArea = realWidth * realHeight;
-      const areaRatio = btnArea / frameArea;
-
-      if (areaRatio < 0.005 && minDim > 200) {
-        issues.push({
-          rule: 'cta-visibility',
-          severity: 'info',
-          message: `CTA "${btn.name}" occupies only ${(areaRatio * 100).toFixed(1)}% of frame area. Consider making it more prominent.`,
-          nodeId: btn.id,
-          nodeName: btn.name,
-        });
+      // CTA should have sufficient area relative to frame — but only on fixed-size
+      // layouts. Area ratio is meaningless for a 7000px-tall scrollable landing.
+      if (!isScrollable) {
+        const btnArea = btn.width * btn.height;
+        const frameArea = realWidth * realHeight;
+        const areaRatio = btnArea / frameArea;
+        if (areaRatio < 0.005 && minDim > 200) {
+          issues.push({
+            rule: 'cta-visibility',
+            severity: 'info',
+            message: `CTA "${btn.name}" occupies only ${(areaRatio * 100).toFixed(1)}% of frame area. Consider making it more prominent.`,
+            nodeId: btn.id,
+            nodeName: btn.name,
+          });
+        }
       }
 
-      // CTA shouldn't be fully clipped (outside frame)
-      if (btn.x + btn.width > realWidth + 5 || btn.y + btn.height > realHeight + 5 ||
+      // CTA shouldn't be fully clipped (outside frame) — use content-bottom on
+      // scrollable pages so buttons below the fold don't all register as clipped.
+      if (btn.x + btn.width > realWidth + 5 || btn.y + btn.height > clipBottom ||
           btn.x < -5 || btn.y < -5) {
         issues.push({
           rule: 'cta-visibility',
@@ -1166,6 +1231,14 @@ export function spacingScaleCompliance(): AuditRule {
 
     const issues: AuditIssue[] = [];
     const unit = ctx.designSystem.layout.spacingUnit;
+    const sectionRange = ctx.designSystem.layout.sectionPaddingRange;
+
+    // Detect "section-class" containers — direct children of root with full or
+    // near-full width and big vertical padding. They legitimately use marketing
+    // padding (80–160px) that lives outside the micro spacing scale.
+    const isDirectRootChild = node.parent?.id === ctx.root?.id;
+    const isFullWidthish = (node.width ?? 0) >= (ctx.root?.width ?? 0) * 0.9;
+    const isSectionLike = isDirectRootChild && isFullWidthish && layoutMode !== 'NONE';
 
     const checkValue = (prop: string, val: number, cssProp: string) => {
       if (val === 0) return;
@@ -1173,7 +1246,17 @@ export function spacingScaleCompliance(): AuditRule {
       const inScale = scale.some(s => Math.abs(val - s) <= 1);
       // Also allow multiples of the spacing unit
       const isGridMultiple = unit > 0 && val % unit === 0;
-      if (!inScale && !isGridMultiple) {
+      // For section-class containers, allow vertical padding within the
+      // documented section padding range. Linear DESIGN.md says "Section: pad
+      // 80–100" but the parsed spacingScale (1, 4, 7, 8, 11... 35) tops out at
+      // 35px, so without this exemption every hero gets crushed.
+      const isSectionPadding =
+        isSectionLike &&
+        (cssProp === 'padding-top' || cssProp === 'padding-bottom') &&
+        sectionRange &&
+        val >= sectionRange[0] * 0.9 &&
+        val <= sectionRange[1] * 1.25;
+      if (!inScale && !isGridMultiple && !isSectionPadding) {
         const closest = scale.reduce((a, b) => Math.abs(b - val) < Math.abs(a - val) ? b : a);
         issues.push({
           rule: 'spacing-scale-compliance',
@@ -1339,9 +1422,29 @@ function findButtonElements(root: INode): INode[] {
   const walk = (node: INode) => {
     if (node.type === NodeType.Frame || node.type === NodeType.Instance) {
       const name = (node.name ?? '').toLowerCase();
-      const hasText = node.children?.some(c => c.type === NodeType.Text);
+      // Must contain a TEXT child with enough content to be a real label.
+      // Single character ("F", "×", "1") or very short strings indicate an icon,
+      // badge, avatar, or logo lozenge — not an interactive CTA.
+      const textChildren = (node.children ?? []).filter(c => c.type === NodeType.Text);
+      const labelText = textChildren.map(c => (c as any).characters ?? (c as any).text ?? '').join(' ').trim();
+      const hasMeaningfulLabel = labelText.length >= 3 && /[A-Za-z]/.test(labelText);
+
+      // Rough sizing sanity: CTA should not dominate the screen, but also should
+      // not be tiny (avatars 24×24, tiny icons 16×16 are not CTAs).
       const isSmall = node.width < root.width * 0.6 && node.height < root.height * 0.4;
-      if (hasText && isSmall && (/button|btn|cta/i.test(name) || node.cornerRadius != null && typeof node.cornerRadius === 'number' && node.cornerRadius > 0)) {
+      const isButtonSized = node.width >= 40 && node.height >= 24;
+
+      // Must either be explicitly named like a button OR actually look+behave like
+      // one: rounded corners AND a meaningful label AND button-sized.
+      const namedLikeButton = /button|btn|cta/i.test(name);
+      const shapedLikeButton =
+        node.cornerRadius != null &&
+        typeof node.cornerRadius === 'number' &&
+        node.cornerRadius > 0 &&
+        hasMeaningfulLabel &&
+        isButtonSized;
+
+      if (isSmall && hasMeaningfulLabel && (namedLikeButton || shapedLikeButton)) {
         buttons.push(node);
       }
     }

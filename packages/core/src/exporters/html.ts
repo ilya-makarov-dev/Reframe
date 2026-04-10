@@ -16,6 +16,28 @@ function gradientTransformToAngle(t: GradientTransform): number {
   return ((rad * 180 / Math.PI) + 90 + 360) % 360;
 }
 
+/**
+ * Guard against emitting Google Fonts <link> tags for obviously-invalid font names.
+ * This catches parser mis-extractions (e.g. "typeface for headings", "primary sans font")
+ * and generic descriptors that would produce a 400 from fonts.googleapis.com.
+ *
+ * Heuristics (reject if ANY):
+ *  - Contains generic descriptor words ("typeface", "font", "family", "for", "the", "with", "heading", "display")
+ *  - Contains more than 3 whitespace-separated tokens
+ *  - Contains characters that can't appear in a real font name (commas, quotes, parens, slashes, digits-at-start)
+ *  - Empty, only whitespace, or shorter than 2 chars
+ */
+export function isPlausibleWebFontName(family: string): boolean {
+  const name = family.trim();
+  if (name.length < 2 || name.length > 64) return false;
+  if (!/^[A-Za-z]/.test(name)) return false;
+  if (/[,"'`()/\\]/.test(name)) return false;
+  const tokens = name.split(/\s+/);
+  if (tokens.length > 3) return false;
+  if (/\b(?:typeface|font|family|for|the|with|heading|headings|display|primary|secondary|body|regular|fallback|stack)\b/i.test(name)) return false;
+  return true;
+}
+
 export interface HtmlExportOptions {
   /** Include a full HTML document wrapper (default: true) */
   fullDocument?: boolean;
@@ -251,7 +273,7 @@ export function exportToHtml(
     if (!n) return;
     if (n.type === 'TEXT' && n.fontFamily) {
       const family = n.fontFamily;
-      if (family !== 'monospace' && family !== 'serif' && family !== 'sans-serif') {
+      if (family !== 'monospace' && family !== 'serif' && family !== 'sans-serif' && isPlausibleWebFontName(family)) {
         usedFonts.add(family);
         if (!usedWeights.has(family)) usedWeights.set(family, new Set());
         usedWeights.get(family)!.add(n.fontWeight || 400);

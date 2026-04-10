@@ -43,6 +43,9 @@ coverage/
 # Generated files
 scripts/*.html
 
+# Internal dev scripts (brutal test harnesses, scratch experiments)
+scripts/internal/
+
 # NPM artifacts
 *.tgz
 

@@ -38,6 +38,13 @@ export interface HtmlImportOptions {
   width?: number;
   /** Viewport height when not specified in HTML (default: 1080) */
   height?: number;
+  /**
+   * When true, the supplied width/height are treated as a hard override and
+   * applied to the root element regardless of any inline `width:` CSS on the
+   * outermost div. Used by multi-size compile so a single source HTML can
+   * render at 375 / 768 / 1440 / 3840 without rewriting the root style.
+   */
+  forceRootSize?: boolean;
 }
 
 export interface HtmlImportResult {
@@ -93,7 +100,38 @@ export async function importFromHtml(
     throw new Error('No renderable HTML element found');
   }
 
+  // Surface dropped tags from the parser so callers can warn the agent
+  // that their <script>/<iframe>/<style display:none> got stripped.
+  const dropped = (parsed.dom as HtmlElement).attrs?._droppedTags;
+  if (dropped) {
+    for (const t of dropped.split(',')) stats.unsupported.push(`<${t}> stripped`);
+  }
+  // Detect <style> rules that hide the document body — common XSS-y or
+  // import-breaking pattern. linkedom drops <style> from the DOM tree we
+  // build, but its rules already applied via parseWithLinkedom; check the
+  // raw HTML so we don't silently render an invisible scene.
+  if (/<style\b[^>]*>[^<]*body\s*\{[^}]*display\s*:\s*none/i.test(html)) {
+    stats.unsupported.push('<style> rule hides body (display:none)');
+  }
+  if (/<style\b/i.test(html)) {
+    // Inform that <style> tags exist — they're respected for selectors but
+    // dropped from the visual tree. Many agents expect them to render.
+    if (!stats.unsupported.includes('<style> tags processed for selectors only')) {
+      stats.unsupported.push('<style> tags processed for selectors only');
+    }
+  }
+
   const rootId = convertElement(ctx, page.id, rootElement, null);
+
+  // Hard size override — multi-size compile passes the same HTML at multiple
+  // viewports and needs the root element to actually take the requested size,
+  // even when the source markup has an inline `style="width:1440px"`.
+  if (options.forceRootSize && (options.width || options.height)) {
+    const updates: any = {};
+    if (options.width) updates.width = options.width;
+    if (options.height) updates.height = options.height;
+    graph.updateNode(rootId, updates);
+  }
 
   return { graph, rootId, stats };
 }
@@ -125,7 +163,25 @@ function domNodeToHtml(node: any, idx: { i: number }): HtmlChild | null {
   if (node.nodeType !== 1 /* ELEMENT_NODE */) return null;
 
   const tag = (node.tagName || '').toLowerCase();
-  if (tag === 'script') return null;
+  // Strip executable / unsafe / out-of-band tags but record what we dropped
+  // so the caller can surface a warning. Without this trail, an agent feeding
+  // HTML containing <script>, <iframe javascript:...>, or <style>body{display:none}</style>
+  // gets a silently neutered import that doesn't match what they wrote.
+  if (tag === 'script') {
+    (idx as any).droppedTags = (idx as any).droppedTags || new Set<string>();
+    (idx as any).droppedTags.add('script');
+    return null;
+  }
+  if (tag === 'iframe') {
+    (idx as any).droppedTags = (idx as any).droppedTags || new Set<string>();
+    (idx as any).droppedTags.add('iframe');
+    return null;
+  }
+  if (tag === 'object' || tag === 'embed') {
+    (idx as any).droppedTags = (idx as any).droppedTags || new Set<string>();
+    (idx as any).droppedTags.add(tag);
+    return null;
+  }
 
   // Collect attributes
   const attrs: Record<string, string> = {};
@@ -235,7 +291,7 @@ async function parseWithLinkedom(html: string): Promise<{
   // linkedom's documentElement may be <html> or just the first element for fragments.
   // For fragments like `<style>...</style><div>...</div>`, documentElement is only
   // the first element — siblings are lost. Walk all document.childNodes instead.
-  const idx = { i: 0 };
+  const idx: { i: number; droppedTags?: Set<string> } = { i: 0 };
   const children: HtmlChild[] = [];
   for (const child of document.childNodes) {
     const converted = domNodeToHtml(child, idx);
@@ -245,6 +301,12 @@ async function parseWithLinkedom(html: string): Promise<{
     kind: 'element', tag: '__root__', attrs: {},
     children,
   };
+
+  // Stash dropped tag set on the dom root via attrs so the outer importer can
+  // surface them in stats.unsupported.
+  if (idx.droppedTags && idx.droppedTags.size > 0) {
+    dom.attrs._droppedTags = [...idx.droppedTags].join(',');
+  }
 
   return { dom, linkedomStyles, cssVars };
 }
@@ -453,14 +515,115 @@ function parseUnit(value: string): number {
   return isNaN(n) ? 0 : n;
 }
 
-/** Resolve a CSS length value, handling % relative to a reference dimension. */
+/** Length shorthand (e.g. "0", "0 0 0 0", "none") that parses to all-zero? */
+function isNonZeroLength(value: string | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim();
+  if (!v || v === 'none' || v === '0' || v === 'auto') return false;
+  // "0 0 0 0", "0px", "0em", etc. — any token that isn't zero counts as non-zero
+  return v.split(/\s+/).some(tok => {
+    const n = parseFloat(tok);
+    return !isNaN(n) && n !== 0;
+  });
+}
+
+/** Border shorthand that draws something, as opposed to "none" or "0 solid transparent". */
+function isNonZeroBorder(value: string | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim();
+  if (!v || v === 'none' || v === '0' || v === 'initial') return false;
+  // Require both a non-zero width and a non-"none" style.
+  const width = v.match(/(\d*\.?\d+)(px|em|rem)/)?.[1];
+  if (width && parseFloat(width) === 0) return false;
+  if (/\bnone\b/.test(v) && !/solid|dashed|dotted|double|groove|ridge|inset|outset/.test(v)) return false;
+  return true;
+}
+
+/** Background shorthand that actually paints something (not empty/transparent/none). */
+function isNonEmptyBackground(value: string | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim().toLowerCase();
+  if (!v || v === 'none' || v === 'transparent' || v === 'initial' || v === 'inherit') return false;
+  // rgba(…, 0) / rgb(…, 0) with zero alpha
+  const m = v.match(/rgba?\([^)]*\)/);
+  if (m) {
+    const parts = m[0].replace(/rgba?\(|\)/g, '').split(',').map(s => s.trim());
+    if (parts.length === 4 && parseFloat(parts[3]) === 0) return false;
+  }
+  return true;
+}
+
+/** Evaluate a single CSS length token (px/vw/vh/%/em/rem) relative to a reference dim. */
+function evalLengthToken(token: string, ref?: number): number {
+  const t = token.trim();
+  if (!t) return 0;
+  if (t.endsWith('%')) {
+    if (ref == null || ref <= 0) return 0;
+    return (parseFloat(t) / 100) * ref;
+  }
+  if (t.endsWith('vw')) return (parseFloat(t) / 100) * (ref ?? 1440);
+  if (t.endsWith('vh')) return (parseFloat(t) / 100) * (ref ?? 900);
+  // em/rem: approximate as 16px base
+  if (t.endsWith('rem') || t.endsWith('em')) return parseFloat(t) * 16;
+  return parseUnit(t);
+}
+
+/** Minimal calc() evaluator — handles +, -, *, / between length tokens. */
+function evalCalc(expr: string, ref?: number): number {
+  // Tokenize: split around + - * / while keeping operators
+  // Normalize spaces around operators so "100vw - 80px" → ["100vw","-","80px"]
+  const tokens = expr
+    .replace(/\s*([+\-*/])\s*/g, ' $1 ')
+    .trim()
+    .split(/\s+/);
+  if (tokens.length === 0) return 0;
+
+  // Shunting-yard-lite: left-to-right with * / precedence
+  // First pass: resolve * and /
+  const pass1: Array<string | number> = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const cur = tokens[i];
+    if (cur === '*' || cur === '/') {
+      const prev = pass1.pop();
+      const next = tokens[++i];
+      const a = typeof prev === 'number' ? prev : evalLengthToken(String(prev ?? '0'), ref);
+      const b = evalLengthToken(next ?? '0', ref);
+      pass1.push(cur === '*' ? a * b : (b === 0 ? 0 : a / b));
+    } else {
+      pass1.push(cur);
+    }
+    i++;
+  }
+  // Second pass: + and - (left to right)
+  let acc = 0;
+  let op: '+' | '-' = '+';
+  for (const tok of pass1) {
+    if (tok === '+' || tok === '-') {
+      op = tok;
+    } else {
+      const v = typeof tok === 'number' ? tok : evalLengthToken(String(tok), ref);
+      acc = op === '+' ? acc + v : acc - v;
+    }
+  }
+  return acc;
+}
+
+/** Resolve a CSS length value, handling %, calc(), vw/vh, em/rem. */
 function resolveLength(value: string, ref?: number): number {
   if (!value) return 0;
   value = value.trim();
+  // calc(...) — evaluate the expression
+  if (value.startsWith('calc(') && value.endsWith(')')) {
+    return evalCalc(value.slice(5, -1), ref);
+  }
   if (value.endsWith('%')) {
-    if (ref == null || ref <= 0) return 0; // no reference = can't resolve %
+    if (ref == null || ref <= 0) return 0;
     return (parseFloat(value) / 100) * ref;
   }
+  if (value.endsWith('vw')) return (parseFloat(value) / 100) * (ref ?? 1440);
+  if (value.endsWith('vh')) return (parseFloat(value) / 100) * (ref ?? 900);
+  if (value.endsWith('rem') || value.endsWith('em')) return parseFloat(value) * 16;
   return parseUnit(value);
 }
 
@@ -712,7 +875,20 @@ function getTextContent(el: HtmlElement): string {
       }
     }
   }
-  return parts.join('').replace(/[ \t]+/g, ' ').replace(/^ | $/gm, '').trim();
+  return sanitizeText(parts.join('').replace(/[ \t]+/g, ' ').replace(/^ | $/gm, '').trim());
+}
+
+/**
+ * Strip NUL and other C0/C1 control characters that are illegal in XML/HTML
+ * content and would otherwise flow into exports, breaking downstream parsers.
+ * Keeps whitespace controls (\t \n \r) that are meaningful for text layout.
+ */
+function sanitizeText(s: string): string {
+  if (!s) return s;
+  // Remove: NUL, BEL, ESC, DEL and the rest of C0/C1 except \t \n \r.
+  // Also strips ANSI CSI sequences like \u001b[31m.
+  return s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+          .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
 }
 
 /** Check if element has <br> children (inline line break, not block element) */
@@ -724,6 +900,26 @@ function hasElementChildren(el: HtmlElement): boolean {
   return el.children.some(c => c.kind === 'element' && c.tag !== 'style' && c.tag !== 'script' && c.tag !== 'br');
 }
 
+// CSS properties that inherit from parent per the CSS spec.
+// Without inheritance, nested text nodes lose the font-family declared on an ancestor
+// container — e.g. setting font-family on <body> never reaches a deeply nested span,
+// which would then fall back to the engine default 'Inter' and mask the user's intent.
+const INHERITABLE_TEXT_PROPS = [
+  'font-family',
+  'font-size',
+  'font-weight',
+  'font-style',
+  'font-variant',
+  'line-height',
+  'letter-spacing',
+  'text-align',
+  'text-transform',
+  'text-decoration',
+  'color',
+  'word-spacing',
+  'white-space',
+] as const;
+
 function convertElement(
   ctx: ConvertContext,
   parentId: string,
@@ -731,6 +927,14 @@ function convertElement(
   parentStyles: Record<string, string> | null,
 ): string {
   const styles = resolveStyles(el, ctx.cssVars, ctx.linkedomStyles);
+  // Inherit typographic properties from parent when this element hasn't overridden them.
+  if (parentStyles) {
+    for (const prop of INHERITABLE_TEXT_PROPS) {
+      if (!styles[prop] && parentStyles[prop]) {
+        styles[prop] = parentStyles[prop];
+      }
+    }
+  }
   ctx.stats.elements++;
 
   // Determine node type
@@ -770,9 +974,15 @@ function convertElement(
 
     // If this text node has visual container styling (background, border, padding),
     // create a FRAME wrapper with a TEXT child instead of a flat TEXT node.
-    const hasBackground = styles.background || styles['background-color'];
-    const hasBorder = styles.border && styles.border !== 'none' && styles.border !== '0';
-    const hasPadding = styles.padding || styles['padding-top'] || styles['padding-left'];
+    //
+    // Guard against CSS resets (e.g. `* { padding: 0 }`) that resolve to zero —
+    // those should NOT promote a leaf text element to a frame. Only treat a
+    // property as "meaningful" when it resolves to a non-zero value.
+    const hasBackground = isNonEmptyBackground(styles.background) || isNonEmptyBackground(styles['background-color']);
+    const hasBorder = isNonZeroBorder(styles.border);
+    const hasPadding = isNonZeroLength(styles.padding) || isNonZeroLength(styles['padding-top'])
+      || isNonZeroLength(styles['padding-right']) || isNonZeroLength(styles['padding-bottom'])
+      || isNonZeroLength(styles['padding-left']);
     const needsWrapper = hasBackground || hasBorder || hasPadding;
 
     if (needsWrapper) {
@@ -827,19 +1037,22 @@ function convertElement(
     }
   }
 
-  // Set name: prefer data-name, then id, then class, then tag
+  // Set name: prefer explicit name= / data-name, then id, then class, then tag
   if (!overrides.name) {
-    overrides.name = el.attrs['data-name']
+    overrides.name = el.attrs.name
+      || el.attrs['data-name']
       || el.attrs.id
       || (el.attrs.class ? el.attrs.class.split(/\s+/)[0] : '')
       || el.tag;
   }
 
   // For wrapper frames (text node promoted to frame), set up flex centering
-  const hasBackground = styles.background || styles['background-color'];
-  const hasBorder = styles.border && styles.border !== 'none' && styles.border !== '0';
-  const hasPadding = styles.padding || styles['padding-top'] || styles['padding-left'];
-  const wasPromotedToFrame = nodeType === 'FRAME' && (hasBackground || hasBorder || hasPadding) && !hasElementChildren(el) && el.children.some(c => c.kind === 'text');
+  const hasBackground2 = isNonEmptyBackground(styles.background) || isNonEmptyBackground(styles['background-color']);
+  const hasBorder2 = isNonZeroBorder(styles.border);
+  const hasPadding2 = isNonZeroLength(styles.padding) || isNonZeroLength(styles['padding-top'])
+    || isNonZeroLength(styles['padding-right']) || isNonZeroLength(styles['padding-bottom'])
+    || isNonZeroLength(styles['padding-left']);
+  const wasPromotedToFrame = nodeType === 'FRAME' && (hasBackground2 || hasBorder2 || hasPadding2) && !hasElementChildren(el) && el.children.some(c => c.kind === 'text');
 
   if (wasPromotedToFrame && !overrides.layoutMode) {
     // Set up flex layout so text child is centered
@@ -943,8 +1156,45 @@ function convertElement(
         } else {
           updates.counterAxisSizing = 'HUG';
         }
-        // Set a reasonable default instead of 100
-        updates.width = ctx.defaultWidth ?? 1440;
+        // Width default: for any child without explicit width, inherit from the
+        // parent's inner width. The viewport default (ctx.defaultWidth, typically
+        // 1920) is ONLY correct for the root element. Slapping it on descendants
+        // produces 1440px-root / 1920px-child mismatches that overflow horizontally
+        // and cascade into broken layout heights downstream.
+        const childGrow = (createdNode as any).layoutGrow ?? 0;
+        if (parentIsRow && parentNode && childGrow > 0) {
+          // Flex row child with grow — compute its share of available space.
+          const pPadL = parentNode.paddingLeft ?? 0;
+          const pPadR = parentNode.paddingRight ?? 0;
+          const pGap = parentNode.itemSpacing ?? 0;
+          const siblings = parentNode.childIds
+            .map(cid => ctx.graph.getNode(cid))
+            .filter(n => n && n.id !== createdNode.id) as Array<{ width: number; layoutGrow?: number }>;
+          const siblingCount = parentNode.childIds.length;
+          const fixedSiblingW = siblings
+            .filter(s => !(s.layoutGrow && s.layoutGrow > 0))
+            .reduce((sum, s) => sum + (s.width || 0), 0);
+          const growingSiblings = siblings.filter(s => s.layoutGrow && s.layoutGrow > 0).length;
+          const totalGrow = childGrow + siblings.reduce((sum, s) => sum + (s.layoutGrow ?? 0), 0);
+          const innerW = Math.max(0, (parentNode.width || ctx.defaultWidth) - pPadL - pPadR - pGap * Math.max(0, siblingCount - 1));
+          const available = Math.max(0, innerW - fixedSiblingW);
+          const myShare = totalGrow > 0 ? available * (childGrow / totalGrow) : available / Math.max(1, growingSiblings + 1);
+          updates.width = Math.max(40, Math.floor(myShare));
+        } else if (parentNode && parentNode.width > 0) {
+          // Any other descendant without explicit width: cap at parent's inner width.
+          // This is correct for BOTH directions:
+          //  · VERTICAL parent, any child  → fills parent width (CSS block default).
+          //  · HORIZONTAL parent, non-grow child → would normally hug content; we
+          //    don't know content width at import-time so cap at parent inner as
+          //    a safe upper bound (Yoga layout will shrink it later if needed).
+          const pPadL = parentNode.paddingLeft ?? 0;
+          const pPadR = parentNode.paddingRight ?? 0;
+          const innerW = Math.max(40, parentNode.width - pPadL - pPadR);
+          updates.width = innerW;
+        } else {
+          // No parent context (root element or orphan) — use viewport default.
+          updates.width = ctx.defaultWidth ?? 1440;
+        }
       } else {
         // Estimate from children
         let maxW = 0, sumW = 0;
@@ -1056,9 +1306,34 @@ function cssToOverrides(
   if (styles['max-width']) o.maxWidth = resolveLength(styles['max-width'], parentW);
   if (styles['max-height']) o.maxHeight = resolveLength(styles['max-height'], parentH);
 
-  // Default root dimensions
-  if (!parentStyles && !o.width) o.width = ctx.defaultWidth;
-  if (!parentStyles && !o.height) o.height = ctx.defaultHeight;
+  // Default root dimensions — only when the CSS did not set width/height at all.
+  // An explicit `width: 0` (or huge value) must NOT fall through to the default.
+  if (!parentStyles && o.width == null && !styles.width) o.width = ctx.defaultWidth;
+  if (!parentStyles && o.height == null && !styles.height) o.height = ctx.defaultHeight;
+
+  // DoS cap: ridiculous dimensions corrupt layout and hang exporters.
+  // CSS allowed up to 99999px in tests; clamp at 16384px (max texture/canvas on most platforms).
+  const MAX_DIM = 16384;
+  if (o.width != null && o.width > MAX_DIM) o.width = MAX_DIM;
+  if (o.height != null && o.height > MAX_DIM) o.height = MAX_DIM;
+  // Negative dims are not meaningful; clamp to 0.
+  if (o.width != null && o.width < 0) o.width = 0;
+  if (o.height != null && o.height < 0) o.height = 0;
+
+  // Apply min/max clamping to the computed width/height so that CSS constraints
+  // (e.g. `width: calc(100vw - 80px); max-width: 1440px`) land in the scene graph.
+  if (o.width != null && o.maxWidth != null && o.maxWidth > 0 && o.width > o.maxWidth) {
+    o.width = o.maxWidth;
+  }
+  if (o.width != null && o.minWidth != null && o.minWidth > 0 && o.width < o.minWidth) {
+    o.width = o.minWidth;
+  }
+  if (o.height != null && o.maxHeight != null && o.maxHeight > 0 && o.height > o.maxHeight) {
+    o.height = o.maxHeight;
+  }
+  if (o.height != null && o.minHeight != null && o.minHeight > 0 && o.height < o.minHeight) {
+    o.height = o.minHeight;
+  }
 
   // Flex child sizing: stretch to parent in cross-axis direction
   // Only stretch when parent uses default align-items (stretch) or explicit stretch
@@ -1412,19 +1687,8 @@ function cssToOverrides(
       else o.rotation = parseFloat(val);
     }
 
-    // scale() / scaleX() / scaleY()
-    const scaleMatch = tf.match(/scale\(([^)]+)\)/);
-    if (scaleMatch) {
-      const parts = scaleMatch[1].split(',').map(s => parseFloat(s.trim()));
-      const sx = parts[0] ?? 1;
-      const sy = parts[1] ?? sx;
-      if (o.width) o.width = Math.round(o.width * sx);
-      if (o.height) o.height = Math.round(o.height * sy);
-    }
-    const scaleXMatch = tf.match(/scaleX\(([^)]+)\)/);
-    if (scaleXMatch && o.width) o.width = Math.round(o.width * parseFloat(scaleXMatch[1]));
-    const scaleYMatch = tf.match(/scaleY\(([^)]+)\)/);
-    if (scaleYMatch && o.height) o.height = Math.round(o.height * parseFloat(scaleYMatch[1]));
+    // scale() / scaleX() / scaleY() — CSS transforms are visual-only and do NOT
+    // affect the layout box. Intentionally do not mutate width/height here.
 
     // translate() / translateX() / translateY()
     const translateMatch = tf.match(/translate\(([^)]+)\)/);
@@ -1463,11 +1727,7 @@ function cssToOverrides(
       // Extract rotation from matrix
       const angle = Math.atan2(b, a) * (180 / Math.PI);
       if (Math.abs(angle) > 0.1) o.rotation = angle;
-      // Extract scale
-      const sx = Math.sqrt(a * a + b * b);
-      const sy = Math.sqrt(c * c + d * d);
-      if (Math.abs(sx - 1) > 0.01 && o.width) o.width = Math.round(o.width * sx);
-      if (Math.abs(sy - 1) > 0.01 && o.height) o.height = Math.round(o.height * sy);
+      // Scale components of the matrix are visual-only; do not mutate layout box.
       // Extract translation
       if (tx) o.x = (o.x ?? 0) + tx;
       if (ty) o.y = (o.y ?? 0) + ty;

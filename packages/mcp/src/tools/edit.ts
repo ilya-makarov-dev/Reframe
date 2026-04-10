@@ -16,13 +16,15 @@ import type { SceneNode } from '../../../core/src/engine/types.js';
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
 import { setHost } from '../../../core/src/host/context.js';
-import { storeScene, getScene, resolveScene, setTokenIndex, getTokenIndex, findSessionId, bumpSceneSessionRevision } from '../store.js';
+import { storeScene, getScene, resolveScene, setTokenIndex, getTokenIndex, findSessionId, bumpSceneSessionRevision, getWorkspaceRoot } from '../store.js';
+import { coreProjectIo } from '../project-io.js';
+import { autoSaveScene } from './project.js';
 import { exportScene, inspectScene } from '../engine.js';
 import { getSession } from '../session.js';
 import { parseDesignMd } from '../../../core/src/design-system/index.js';
 import {
   tokenizeDesignSystem, resolveColorToken, resolveNumberToken,
-  bindTokenToNode, switchTokenMode, listTokens, colorToHex,
+  bindTokenToNode, autoBindTokensFromGraph, switchTokenMode, listTokens, colorToHex,
   type TokenIndex,
 } from '../../../core/src/design-system/tokens.js';
 import { autoDetectRoles } from '../../../core/src/semantic.js';
@@ -631,8 +633,25 @@ export async function handleEdit(input: {
   const session = getSession();
   session.recordToolCall('edit');
 
-  // Use explicit designMd, or fall back to session brand
-  const effectiveDesignMd = input.designMd ?? session.activeDesignMd ?? undefined;
+  // Use explicit designMd, or fall back to session brand, or last-resort to
+  // project.json's activeBrand. The session singleton may be empty if the
+  // process forked between extract and edit (MCP stdio harness behavior),
+  // in which case the persisted brand on disk is the source of truth.
+  let effectiveDesignMd = input.designMd ?? session.activeDesignMd ?? undefined;
+  if (!effectiveDesignMd) {
+    try {
+      const projectDir = getWorkspaceRoot();
+      const manifest = coreProjectIo().loadProject(projectDir);
+      if (manifest.activeBrand) {
+        const loaded = coreProjectIo().loadBrandFromProject(projectDir, manifest.activeBrand);
+        if (loaded) {
+          effectiveDesignMd = loaded.content;
+          const ds2 = session.getOrParseDesignMd(loaded.content, parseDesignMd);
+          session.setBrand(manifest.activeBrand, loaded.content, ds2);
+        }
+      }
+    } catch { /* best-effort */ }
+  }
   const ds = effectiveDesignMd
     ? session.getOrParseDesignMd(effectiveDesignMd, parseDesignMd)
     : undefined;
@@ -640,6 +659,10 @@ export async function handleEdit(input: {
   const results: string[] = [];
   let lastSceneId: string | undefined;
   const touchedScenes = new Set<string>();
+  /** Resize ops record their final dims here so the post-audit sync can re-pin
+   *  stored.width/height from the explicit user value, ignoring whatever Yoga
+   *  recomputed during ensureSceneLayout / runAutoFixLoop. */
+  const resizedScenes = new Map<string, { width: number; height: number }>();
 
   /** Get token index for the current scene context. */
   function getActiveTokenIndex(sceneId?: string): TokenIndex | undefined {
@@ -763,6 +786,61 @@ export async function handleEdit(input: {
         const tokenIdx = getActiveTokenIndex(sceneId);
         const changes: any = { ...op.props };
 
+        // ── Input sanitisation ───────────────────────────────────
+        // Reject / clamp obviously invalid values before they hit the graph.
+        // Without this, an agent passing `opacity: -5, rotation: 99999,
+        // width: -200` corrupts the scene silently and downstream layout /
+        // export code crashes far away from the offending edit.
+        const sanitizeWarnings: string[] = [];
+        const clampInPlace = (key: string, min: number, max: number) => {
+          if (changes[key] === undefined || changes[key] === null) return;
+          if (typeof changes[key] !== 'number' || !Number.isFinite(changes[key])) {
+            sanitizeWarnings.push(`${key} must be a finite number`);
+            delete changes[key];
+            return;
+          }
+          if (changes[key] < min || changes[key] > max) {
+            const original = changes[key];
+            changes[key] = Math.min(Math.max(changes[key], min), max);
+            sanitizeWarnings.push(`${key} ${original} → ${changes[key]} (clamped to [${min}, ${max}])`);
+          }
+        };
+        clampInPlace('opacity', 0, 1);
+        clampInPlace('rotation', -360, 360);
+        clampInPlace('width', 0, 16384);
+        clampInPlace('height', 0, 16384);
+        clampInPlace('minWidth', 0, 16384);
+        clampInPlace('minHeight', 0, 16384);
+        clampInPlace('maxWidth', 0, 16384);
+        clampInPlace('maxHeight', 0, 16384);
+        for (const k of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'padding', 'itemSpacing', 'counterAxisSpacing']) {
+          if (typeof changes[k] === 'number' && changes[k] < 0) {
+            sanitizeWarnings.push(`${k} ${changes[k]} → 0 (negative spacing not allowed)`);
+            changes[k] = 0;
+          }
+        }
+        for (const k of ['cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius']) {
+          if (typeof changes[k] === 'number' && changes[k] < 0) {
+            sanitizeWarnings.push(`${k} ${changes[k]} → 0 (negative radius not allowed)`);
+            changes[k] = 0;
+          }
+        }
+        // RGB channel range: each component must be in [0, 1]. Catch object
+        // fills passed directly (e.g. {type:"SOLID", color:{r:2, g:-1, b:0.5}}).
+        if (Array.isArray(changes.fills)) {
+          for (const f of changes.fills) {
+            if (f && typeof f === 'object' && f.color && typeof f.color === 'object') {
+              for (const ch of ['r', 'g', 'b', 'a'] as const) {
+                if (typeof f.color[ch] === 'number' && (f.color[ch] < 0 || f.color[ch] > 1)) {
+                  const orig = f.color[ch];
+                  f.color[ch] = Math.min(Math.max(f.color[ch], 0), 1);
+                  sanitizeWarnings.push(`fill.color.${ch} ${orig} → ${f.color[ch]} (clamped to [0,1])`);
+                }
+              }
+            }
+          }
+        }
+
         // Handle fills shorthand with token support
         if (changes.fills) {
           const { fills, tokenBindings } = parseFillsWithTokens(changes.fills, stored.graph, tokenIdx);
@@ -820,7 +898,8 @@ export async function handleEdit(input: {
 
         stored.graph.updateNode(target.id, changes);
         touchedScenes.add(sceneId);
-        results.push(`UPDATE "${target.name}" — ${Object.keys(op.props).join(', ')}`);
+        const warnSuffix = sanitizeWarnings.length > 0 ? ` [sanitized: ${sanitizeWarnings.join('; ')}]` : '';
+        results.push(`UPDATE "${target.name}" — ${Object.keys(op.props).join(', ')}${warnSuffix}`);
         break;
       }
 
@@ -869,9 +948,51 @@ export async function handleEdit(input: {
         const stored = getScene(sceneId);
         if (!stored) { results.push(`RESIZE ERROR: scene "${sceneId}" not found`); break; }
 
-        stored.graph.updateNode(stored.rootId, { width: op.width, height: op.height });
+        // Guard against nonsense values: negatives, zero, and DoS-sized dims.
+        const MIN = 1;
+        const MAX = 16384;
+        const w = typeof op.width === 'number' ? op.width : NaN;
+        const h = typeof op.height === 'number' ? op.height : NaN;
+        if (!Number.isFinite(w) || !Number.isFinite(h)) {
+          results.push(`RESIZE ERROR: width and height must be finite numbers (got ${op.width}×${op.height})`);
+          break;
+        }
+        if (w < MIN || h < MIN) {
+          results.push(`RESIZE ERROR: width/height must be >= ${MIN} (got ${w}×${h})`);
+          break;
+        }
+        const cw = Math.min(w, MAX);
+        const ch = Math.min(h, MAX);
+        // Force FIXED sizing on the root so the post-audit Yoga pass cannot
+        // shrink the user's explicit canvas back to the natural content size.
+        // Without this, resizing a HUG-sized imported scene from 1440 → 16384
+        // updates the graph node, but ensureSceneLayout immediately runs Yoga
+        // which computes the HUG width from children (= 1440) and writes it
+        // back via applyFrameSize → graph.updateNode. The Active footer reads
+        // a stale snapshot and reports 16384, while listScenes' next call
+        // reads the post-Yoga graph and reports 1440. Pinning sizing fixes
+        // both views consistently.
+        stored.graph.updateNode(stored.rootId, {
+          width: cw,
+          height: ch,
+          primaryAxisSizing: 'FIXED',
+          counterAxisSizing: 'FIXED',
+        });
+        // Sync the StoredScene's cached dimensions so listScenes / session
+        // overview / project event consumers see the new size.
+        stored.width = cw;
+        stored.height = ch;
+        stored.sessionRevision = (stored.sessionRevision ?? 0) + 1;
+        const sessId = findSessionId(sceneId) ?? sceneId;
+        try { bumpSceneSessionRevision(sessId); } catch {}
+        try { session.trackImport(sessId, stored.name, cw, ch, !!ds); } catch {}
+        // Mark this scene as having been hard-resized so the post-loop sync
+        // can rewrite stored.width from cw rather than reading the graph
+        // (which the auto-audit may have re-run Yoga on).
+        resizedScenes.set(sceneId, { width: cw, height: ch });
         touchedScenes.add(sceneId);
-        results.push(`RESIZE ${sceneId} → ${op.width}×${op.height}`);
+        const clamped = (cw !== w || ch !== h) ? ` (clamped from ${w}×${h})` : '';
+        results.push(`RESIZE ${sceneId} → ${cw}×${ch}${clamped}`);
         break;
       }
 
@@ -885,6 +1006,29 @@ export async function handleEdit(input: {
         const newParent = findNode(stored.graph, stored.rootId, op.newParent);
         if (!node) { results.push(`MOVE ERROR: "${op.path}" not found`); break; }
         if (!newParent) { results.push(`MOVE ERROR: parent "${op.newParent}" not found`); break; }
+        if (node.id === newParent.id) {
+          results.push(`MOVE ERROR: cannot reparent "${node.name}" into itself`);
+          break;
+        }
+        if (node.id === stored.rootId) {
+          results.push('MOVE ERROR: cannot move the scene root');
+          break;
+        }
+        // Cycle detection — refuse if newParent is a descendant of node.
+        // Without this `move A→B; move B→A` silently invalidates the tree
+        // (B is now under A, then A becomes child of B → orphan cycle).
+        const isDescendantOfNode = (() => {
+          let c: SceneNode | undefined = newParent;
+          while (c) {
+            if (c.id === node.id) return true;
+            c = c.parentId ? stored.graph.getNode(c.parentId) : undefined;
+          }
+          return false;
+        })();
+        if (isDescendantOfNode) {
+          results.push(`MOVE ERROR: would create cycle ("${newParent.name}" is a descendant of "${node.name}")`);
+          break;
+        }
 
         stored.graph.reparentNode(node.id, newParent.id);
         if (op.index !== undefined) {
@@ -902,7 +1046,9 @@ export async function handleEdit(input: {
         if (!stored) { results.push(`DEFINE_TOKENS ERROR: scene "${sceneId}" not found`); break; }
 
         // Parse DESIGN.md (use op-level or input-level)
-        const designMdStr = op.designMd ?? input.designMd ?? session.activeDesignMd;
+        // Order: per-op explicit → call-level explicit → resolved effective
+        // (session + project.json fallback computed at top of handler).
+        const designMdStr = op.designMd ?? input.designMd ?? effectiveDesignMd ?? session.activeDesignMd;
         if (!designMdStr) { results.push('DEFINE_TOKENS ERROR: designMd required (load with reframe_design first)'); break; }
 
         const parsedDs = session.getOrParseDesignMd(designMdStr, parseDesignMd);
@@ -910,13 +1056,20 @@ export async function handleEdit(input: {
         const sessId = findSessionId(sceneId);
         if (sessId) setTokenIndex(sessId, tokenIndex);
 
+        // Auto-bind every node property whose value matches a token. Without
+        // this defineTokens registers tokens but no node references them, so
+        // a subsequent setMode call walks an empty bindings table and reports
+        // "0 properties updated" — defeating the entire token system.
+        const boundCount = autoBindTokensFromGraph(stored.graph, stored.rootId, tokenIndex);
+
         const tokenList = listTokens(stored.graph, tokenIndex);
         const colorCount = tokenList.filter(t => t.type === 'COLOR').length;
         const numCount = tokenList.filter(t => t.type === 'FLOAT').length;
         const strCount = tokenList.filter(t => t.type === 'STRING').length;
         const modeCount = stored.graph.variableCollections.get(tokenIndex.collectionId)?.modes.length ?? 1;
 
-        results.push(`DEFINE_TOKENS ${tokenList.length} tokens (${colorCount} colors, ${numCount} numbers, ${strCount} strings, ${modeCount} mode(s))`);
+        touchedScenes.add(sceneId);
+        results.push(`DEFINE_TOKENS ${tokenList.length} tokens (${colorCount} colors, ${numCount} numbers, ${strCount} strings, ${modeCount} mode(s)) — ${boundCount} bindings`);
         break;
       }
 
@@ -1102,8 +1255,36 @@ export async function handleEdit(input: {
     }
   }
 
+  // Re-pin user-resized scenes after the auto-audit. The audit's runAutoFixLoop
+  // re-runs Yoga internally, which on a HUG-rooted scene reverts the explicit
+  // resize back to the natural content size. Since the user explicitly asked
+  // for this canvas, force-write both the cached metadata and the live graph
+  // node to the requested dimensions one last time.
+  for (const [sceneId, dims] of resizedScenes) {
+    const stored = getScene(sceneId);
+    if (!stored) continue;
+    stored.graph.updateNode(stored.rootId, {
+      width: dims.width,
+      height: dims.height,
+      primaryAxisSizing: 'FIXED',
+      counterAxisSizing: 'FIXED',
+    });
+    stored.width = dims.width;
+    stored.height = dims.height;
+  }
+
   for (const sceneId of touchedScenes) {
     bumpSceneSessionRevision(sceneId);
+  }
+
+  // Persist every mutated scene to .reframe/scenes/<slug>.scene.json so the
+  // edits survive across MCP transport process boundaries. The stdio harness
+  // can fork a fresh interpreter per request, in which case the next call
+  // re-loads scenes from disk via loadProjectScenes — without an explicit
+  // save here, every resize/update/move/clone vanishes the moment the
+  // session ends.
+  for (const sceneId of touchedScenes) {
+    try { autoSaveScene(sceneId); } catch { /* best-effort */ }
   }
 
   // ── Build response with context ────────────────────────────

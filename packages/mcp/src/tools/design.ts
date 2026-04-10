@@ -22,7 +22,8 @@ import {
   getButtonBorderRadius,
 } from '../../../core/src/design-system/index.js';
 import type { DesignSystem } from '../../../core/src/design-system/index.js';
-import { saveDesignSystem } from '../../../core/src/project/io.js';
+import { registerBrand, saveDesignSystem } from '../../../core/src/project/io.js';
+import { toSlug } from '../../../core/src/project/slug.js';
 import { getSession } from '../session.js';
 import { getReframeDir } from '../store.js';
 import { getProjectDir } from './project.js';
@@ -105,13 +106,36 @@ async function handleList(search?: string) {
 
 // ─── Extract ───────────────────────────────────────────────────
 
-/** Canonical DESIGN.md on disk — same as reframe_project save_design. */
-function persistCanonicalDesignMd(designMd: string): 'manifest' | 'file' {
+/**
+ * Persist a DESIGN.md to the project. When a slug is provided, the content is
+ * registered in the brand registry at `.reframe/brands/<slug>/DESIGN.md` and
+ * becomes the active brand (mirrored to legacy `.reframe/design.md`).
+ *
+ * Return value tells the caller how the file was stored so the status message
+ * can be informative:
+ *   - 'registered'  — written to brands/<slug>/ AND mirrored to legacy
+ *   - 'legacy'      — only legacy .reframe/design.md (no slug or no project)
+ *   - 'file'        — workspace fallback (no .reframe/project.json)
+ */
+function persistBrandDesignMd(
+  designMd: string,
+  slug: string | undefined,
+  label: string | undefined,
+): { mode: 'registered' | 'legacy' | 'file'; slug?: string; path?: string } {
   const projectDir = getProjectDir();
   if (projectDir) {
+    if (slug && slug.trim()) {
+      try {
+        const normalizedSlug = toSlug(slug);
+        const entry = registerBrand(projectDir, normalizedSlug, designMd, { label, setActive: true });
+        return { mode: 'registered', slug: normalizedSlug, path: entry.path };
+      } catch {
+        /* fall through to legacy save */
+      }
+    }
     try {
       saveDesignSystem(projectDir, designMd);
-      return 'manifest';
+      return { mode: 'legacy' };
     } catch {
       /* fall through to workspace file */
     }
@@ -119,7 +143,7 @@ function persistCanonicalDesignMd(designMd: string): 'manifest' | 'file' {
   const rd = getReframeDir();
   if (!existsSync(rd)) mkdirSync(rd, { recursive: true });
   writeFileSync(join(rd, 'design.md'), designMd, 'utf-8');
-  return 'file';
+  return { mode: 'file' };
 }
 
 async function handleExtract(input: {
@@ -148,12 +172,14 @@ async function handleExtract(input: {
     const brandLabel = (ds.brand && ds.brand.trim()) || input.brand.trim();
     session.setBrand(brandLabel, designMd, ds);
 
-    const persisted = persistCanonicalDesignMd(designMd);
+    const persisted = persistBrandDesignMd(designMd, input.brand, brandLabel);
 
     const persistNote =
-      persisted === 'manifest'
-        ? 'Saved to .reframe/design.md and linked in project.json.'
-        : 'Saved to .reframe/design.md.';
+      persisted.mode === 'registered'
+        ? `Registered brand "${persisted.slug}" at .reframe/${persisted.path}. Active brand set in project.json.`
+        : persisted.mode === 'legacy'
+          ? 'Saved to .reframe/design.md and linked in project.json (legacy layout — slug not provided).'
+          : 'Saved to .reframe/design.md (no project found).';
 
     // Return the FULL DESIGN.md — it IS the prompt.
     // awesome-design-md files are 300+ lines of prose with exact values,
@@ -280,12 +306,16 @@ async function handleExtract(input: {
   }
 
   const designMd = exportDesignMd(ds);
-  session.setBrand(ds.brand || 'extracted', designMd, ds);
+  const extractedSlug = ds.brand || input.brand || 'extracted';
+  session.setBrand(extractedSlug, designMd, ds);
 
-  const persisted = persistCanonicalDesignMd(designMd);
-  const persistNote = persisted === 'manifest'
-    ? 'Saved to .reframe/design.md and linked in project.json.'
-    : 'Saved to .reframe/design.md.';
+  const persisted = persistBrandDesignMd(designMd, extractedSlug, ds.brand);
+  const persistNote =
+    persisted.mode === 'registered'
+      ? `Registered brand "${persisted.slug}" at .reframe/${persisted.path}. Active brand set in project.json.`
+      : persisted.mode === 'legacy'
+        ? 'Saved to .reframe/design.md and linked in project.json (legacy layout).'
+        : 'Saved to .reframe/design.md (no project found).';
 
   // Return a PROMPT-format summary — actionable instructions for the agent,
   // not just raw values. Full DESIGN.md is on disk for audit/parser.

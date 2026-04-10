@@ -7,7 +7,7 @@
  */
 
 import type { SceneGraph } from '../engine/scene-graph.js';
-import { exportToHtml } from './html.js';
+import { exportToHtml, isPlausibleWebFontName } from './html.js';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -265,7 +265,7 @@ function collectFonts(graph: SceneGraph, rootId: string, fonts: Set<string>) {
   if (!node) return;
   if (node.type === 'TEXT' && node.fontFamily) {
     const family = node.fontFamily.split(',')[0].trim().replace(/['"]/g, '');
-    if (family && !SYSTEM_FONTS.has(family.toLowerCase())) {
+    if (family && !SYSTEM_FONTS.has(family.toLowerCase()) && isPlausibleWebFontName(family)) {
       fonts.add(family);
     }
   }

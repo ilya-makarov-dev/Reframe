@@ -335,6 +335,33 @@ function parseNumber(s: string): number | null {
  *   | Hero    | 72px  | 700  | 1.07 | -2.16px |
  *   | Body    | 16px  | 400  | 1.5  | 0       |
  */
+/**
+ * Companion to parseTypographyTable: returns every numeric font size found in
+ * the table body, even when its role collides with an earlier row. Used by
+ * audit rules so display sizes (Display XL 72px, Display Large 64px, Display
+ * 48px) survive role-deduplication and are recognised as legal.
+ */
+export function collectAllTypographySizes(text: string): number[] {
+  const found = new Set<number>();
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.includes('|')) continue;
+    if (/^\s*\|[\s-|]+\|\s*$/.test(line)) continue;
+    const cells = line.split('|').map(c => c.trim()).filter(Boolean);
+    if (cells.length < 2) continue;
+    for (const cell of cells) {
+      // px size match — must end in px to avoid catching weights like 510
+      const m = cell.match(/(\d+(?:\.\d+)?)\s*px\b/i);
+      if (!m) continue;
+      // skip cells that are clearly tracking/letter-spacing (negative + px)
+      if (cell.includes('-') && /spac|track/i.test(cell)) continue;
+      const v = parseNumber(m[1]);
+      if (v && v >= 6 && v <= 200) found.add(v);
+    }
+  }
+  return [...found].sort((a, b) => b - a);
+}
+
 function parseTypographyTable(text: string): TypographyRule[] {
   const rules: TypographyRule[] = [];
   const lines = text.split(/\r?\n/);
@@ -627,13 +654,22 @@ function extractFontFeaturesForLine(line: string): string[] | undefined {
 function parseTypography(section: Section | undefined): DesignSystem['typography'] {
   if (!section) return { hierarchy: [] };
 
-  // Extract primary font family from "### Font Family" or "**Primary**: fontName" patterns
+  // Extract primary font family from "### Font Family" or "**Primary**: fontName" patterns.
+  // The non-bold fallback requires a bullet/line-start anchor and a strict ":" so it
+  // cannot match the English word "Primary" used as an adjective inside prose like
+  // "FerrariSans: Primary typeface for headings" (which previously captured the bogus
+  // font-family "typeface for headings").
   let primaryFont: string | undefined;
   let secondaryFont: string | undefined;
-  const fontFamilyMatch = section.body.match(/\*\*Primary\*\*[:\s]*`?([A-Za-z][\w\s-]+?)`?(?:\s*,|\s*with|\s*\n)/i)
-    || section.body.match(/Primary[:\s]+`?([A-Za-z][\w\s-]+?)`?\s*(?:,|with|\n)/i);
+  const fontFamilyMatch = section.body.match(/\*\*Primary\*\*\s*:?\s*`?([A-Za-z][\w\s-]+?)`?(?:\s*,|\s*with|\s*\n)/i)
+    || section.body.match(/(?:^|\n)[-*\s]{0,4}Primary\s*:\s*`?([A-Za-z][\w\s-]+?)`?\s*(?:,|with|\n)/i);
   if (fontFamilyMatch) {
     primaryFont = fontFamilyMatch[1].trim();
+  }
+
+  // Reject obviously-wrong captures (common descriptor phrases rather than font names).
+  if (primaryFont && /\b(?:typeface|font|family|heading|for|with)\b/i.test(primaryFont)) {
+    primaryFont = undefined;
   }
 
   // Fallback: first bold name in "### Font Family" subsection — e.g. "- **NouvelR**: The sole typeface"
@@ -695,9 +731,16 @@ function parseTypography(section: Section | undefined): DesignSystem['typography
   // Parse global font features
   const fontFeatures = parseFontFeatures(section.body);
 
+  // Capture every documented font size for audit lookups, even when role dedup
+  // would have hidden them. Add hierarchy sizes too so freeform sections still
+  // contribute when no table is present.
+  const allSizes = new Set<number>(collectAllTypographySizes(section.body));
+  for (const r of rules) if (r.fontSize) allSizes.add(r.fontSize);
+
   return {
     hierarchy: rules,
     fontFeatures: fontFeatures.length > 0 ? fontFeatures : undefined,
+    allSizes: allSizes.size > 0 ? [...allSizes].sort((a, b) => b - a) : undefined,
     primaryFont,
     secondaryFont,
   };
@@ -995,6 +1038,32 @@ function parseLayout(section: Section | undefined): DesignSystemLayout {
   // Section spacing
   const ssMatch = text.match(/(?:section[- ]?spacing|section[- ]?gap|vertical[- ]?rhythm)[:\s]*(\d+)\s*(?:px)?[+]?/i);
   if (ssMatch) defaults.sectionSpacing = parseNumber(ssMatch[1]) ?? undefined;
+
+  // Section padding range — picks up phrases like:
+  //   "Section: pad [80-100, 80]"
+  //   "Hero: pad [120-160, 80]"
+  //   "vertical padding (80px+)" / "padding: 80px+"
+  // Without this, marketing-grade hero/section padding (80–160px) gets snapped
+  // to micro-scale spacing tokens by the spacing-scale audit rule.
+  const sectionPadValues = new Set<number>();
+  const padRangeRegexes = [
+    /(?:section|hero)[^[\n]*\[\s*(\d+)\s*[-–—]\s*(\d+)/gi,
+    /(?:vertical\s+padding|section\s+padding|padding)[^.\n]*?(\d+)\s*[-–—]\s*(\d+)\s*px/gi,
+    /(\d+)\s*px\s*\+/g, // "80px+" pattern from Linear's "padding (80px+)"
+  ];
+  for (const re of padRangeRegexes) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const a = parseNumber(m[1]);
+      const b = m[2] ? parseNumber(m[2]) : undefined;
+      if (a && a >= 40 && a <= 400) sectionPadValues.add(a);
+      if (b && b >= 40 && b <= 400) sectionPadValues.add(b);
+    }
+  }
+  if (sectionPadValues.size >= 1) {
+    const arr = [...sectionPadValues].sort((a, b) => a - b);
+    defaults.sectionPaddingRange = [arr[0], arr[arr.length - 1]];
+  }
 
   // Border radius scale: look for scale within radius context
   // Match "radius scale: 0 4 8 12" or lines with "button: N  card: N  badge: N"

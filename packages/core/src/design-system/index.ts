@@ -35,6 +35,7 @@ export {
   resolveColorToken,
   resolveNumberToken,
   bindTokenToNode,
+  autoBindTokensFromGraph,
   switchTokenMode,
   listTokens,
   collectCssTokens,

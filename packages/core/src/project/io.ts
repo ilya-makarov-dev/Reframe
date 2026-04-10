@@ -19,9 +19,11 @@ import type { SceneJSON } from '../serialize.js';
 import {
   type ProjectManifest,
   type SceneEntry,
+  type BrandRegistryEntry,
   PROJECT_VERSION,
   createManifest,
   createSceneEntry,
+  hashDesignMdContent,
 } from './types.js';
 import { toSlug, uniqueSlug } from './slug.js';
 
@@ -96,6 +98,10 @@ export function saveScene(
     group?: string;
     source?: string;
     timeline?: ITimeline;
+    /** Brand slug this scene was compiled against (persisted on SceneEntry). */
+    brand?: string;
+    /** DESIGN.md hash at compile time — for drift detection. */
+    brandHash?: string;
   },
 ): SceneEntry {
   const manifest = loadProject(projectDir);
@@ -128,10 +134,14 @@ export function saveScene(
     if (options?.tags) entry.tags = options.tags;
     if (options?.group) entry.group = options.group;
     if (options?.source) entry.source = options.source;
+    if (options?.brand !== undefined) entry.brand = options.brand;
+    if (options?.brandHash !== undefined) entry.brandHash = options.brandHash;
   } else {
     entry = createSceneEntry(slug, name, width, height, { nodes: options?.nodes, tags: options?.tags });
     if (options?.group) entry.group = options.group;
     if (options?.source) entry.source = options.source;
+    if (options?.brand) entry.brand = options.brand;
+    if (options?.brandHash) entry.brandHash = options.brandHash;
     manifest.scenes.push(entry);
   }
 
@@ -200,9 +210,16 @@ export function deleteScene(projectDir: string, sceneId: string): boolean {
   return true;
 }
 
-// ─── Design System ───────────────────────────────────────────
+// ─── Design System (legacy v1 single-file) ──────────────────
 
-/** Save DESIGN.md content to the project. */
+/**
+ * @deprecated — writes the single global `.reframe/design.md`. Prefer
+ * {@link registerBrand} which stores per-brand files under
+ * `.reframe/brands/<slug>/DESIGN.md` and registers them in the manifest.
+ *
+ * This function is still called by older code paths and acts as a
+ * convenience mirror of the active brand so v1 consumers keep working.
+ */
 export function saveDesignSystem(projectDir: string, content: string): string {
   const manifest = loadProject(projectDir);
   const relPath = 'design.md';
@@ -214,14 +231,124 @@ export function saveDesignSystem(projectDir: string, content: string): string {
   return filePath;
 }
 
-/** Load DESIGN.md from the project (if any). */
+/**
+ * Load DESIGN.md from the project. Prefers the active registered brand if
+ * one exists; otherwise falls back to the legacy single-file location.
+ */
 export function loadDesignSystem(projectDir: string): string | null {
   const manifest = loadProject(projectDir);
-  if (!manifest.designSystem) return null;
 
-  const filePath = path.join(reframeDir(projectDir), manifest.designSystem);
+  // v2 path: active brand from registry
+  if (manifest.activeBrand && manifest.brands?.[manifest.activeBrand]) {
+    const entry = manifest.brands[manifest.activeBrand];
+    const filePath = path.join(reframeDir(projectDir), entry.path);
+    if (fs.existsSync(filePath)) return fs.readFileSync(filePath, 'utf-8');
+  }
+
+  // v1 fallback
+  if (manifest.designSystem) {
+    const filePath = path.join(reframeDir(projectDir), manifest.designSystem);
+    if (fs.existsSync(filePath)) return fs.readFileSync(filePath, 'utf-8');
+  }
+
+  return null;
+}
+
+// ─── Brand Registry (v2) ────────────────────────────────────
+
+/**
+ * Register a brand DESIGN.md in the project. Writes the content to
+ * `.reframe/brands/<slug>/DESIGN.md`, adds/updates a {@link BrandRegistryEntry}
+ * in the manifest, and mirrors the content to `.reframe/design.md` so legacy
+ * consumers continue to work.
+ *
+ * If `setActive` is true (default), this brand becomes the active brand for
+ * the project — used by scenes that don't pin their own.
+ */
+export function registerBrand(
+  projectDir: string,
+  slug: string,
+  content: string,
+  options?: { label?: string; setActive?: boolean },
+): BrandRegistryEntry {
+  const manifest = loadProject(projectDir);
+
+  const relPath = `brands/${slug}/DESIGN.md`;
+  const filePath = path.join(reframeDir(projectDir), relPath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content, 'utf-8');
+
+  const now = new Date().toISOString();
+  const entry: BrandRegistryEntry = {
+    slug,
+    path: relPath,
+    hash: hashDesignMdContent(content),
+    label: options?.label,
+    updated: now,
+  };
+
+  if (!manifest.brands) manifest.brands = {};
+  manifest.brands[slug] = entry;
+
+  if (options?.setActive !== false) {
+    manifest.activeBrand = slug;
+    // Mirror to legacy .reframe/design.md so v1 consumers keep working.
+    manifest.designSystem = 'design.md';
+    fs.writeFileSync(
+      path.join(reframeDir(projectDir), 'design.md'),
+      content,
+      'utf-8',
+    );
+  }
+
+  writeManifest(projectDir, manifest);
+  return entry;
+}
+
+/** Read a registered brand's DESIGN.md. Returns null if not registered. */
+export function loadBrandFromProject(
+  projectDir: string,
+  slug: string,
+): { content: string; entry: BrandRegistryEntry } | null {
+  const manifest = loadProject(projectDir);
+  const entry = manifest.brands?.[slug];
+  if (!entry) return null;
+  const filePath = path.join(reframeDir(projectDir), entry.path);
   if (!fs.existsSync(filePath)) return null;
-  return fs.readFileSync(filePath, 'utf-8');
+  return { content: fs.readFileSync(filePath, 'utf-8'), entry };
+}
+
+/**
+ * Change the active brand. Updates {@link ProjectManifest.activeBrand} and
+ * mirrors the corresponding DESIGN.md to `.reframe/design.md` for legacy
+ * consumers. Throws if the slug isn't registered.
+ */
+export function setActiveBrand(projectDir: string, slug: string): BrandRegistryEntry {
+  const manifest = loadProject(projectDir);
+  const entry = manifest.brands?.[slug];
+  if (!entry) {
+    const known = Object.keys(manifest.brands ?? {}).join(', ') || 'none';
+    throw new Error(`Brand "${slug}" is not registered in this project. Known: ${known}`);
+  }
+  manifest.activeBrand = slug;
+  manifest.designSystem = 'design.md';
+  // Mirror content to legacy file
+  const srcPath = path.join(reframeDir(projectDir), entry.path);
+  if (fs.existsSync(srcPath)) {
+    fs.writeFileSync(
+      path.join(reframeDir(projectDir), 'design.md'),
+      fs.readFileSync(srcPath, 'utf-8'),
+      'utf-8',
+    );
+  }
+  writeManifest(projectDir, manifest);
+  return entry;
+}
+
+/** List all registered brands in the project. */
+export function listRegisteredBrands(projectDir: string): BrandRegistryEntry[] {
+  const manifest = loadProject(projectDir);
+  return Object.values(manifest.brands ?? {});
 }
 
 // ─── Scene JSON direct access ────────────────────────────────

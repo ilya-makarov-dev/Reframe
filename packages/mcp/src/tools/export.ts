@@ -220,16 +220,20 @@ export async function handleExport(input: {
     }
 
     if (errors.length > 0) {
+      sections.unshift(`✗ EXPORT FAILED (${format})`);
       sections.push(`Timeline validation errors: ${errors.join(', ')}`);
+      sections.push('No file was written. Fix the animation config above and re-run.');
       return {
-        content: [{ type: 'text' as const, text: sections.join('\n') }],
+        content: [{ type: 'text' as const, text: sections.join('\n'), isError: true } as any],
       };
     }
 
     if (built.timeline.animations.length === 0) {
+      sections.unshift(`✗ EXPORT FAILED (${format})`);
       sections.push('No valid animations produced (check node names and preset names above).');
+      sections.push('No file was written.');
       return {
-        content: [{ type: 'text' as const, text: sections.join('\n') }],
+        content: [{ type: 'text' as const, text: sections.join('\n'), isError: true } as any],
       };
     }
 
