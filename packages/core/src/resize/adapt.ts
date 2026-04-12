@@ -10,7 +10,7 @@
 
 import type { INode } from '../host/types';
 import { NodeType } from '../host/types';
-import { setHost } from '../host/context';
+import { setHost, runWithHostAsync } from '../host/context';
 import { SceneGraph } from '../engine/scene-graph';
 import { StandaloneHost } from '../adapters/standalone/adapter';
 import { StandaloneNode, getStandaloneNode } from '../adapters/standalone/node';
@@ -288,18 +288,22 @@ export async function adaptFromGraph(
   targetHeight: number,
   options: AdaptOptions = {},
 ): Promise<AdaptResult> {
+  // Phase 5b Bug #4: run adapt in a host-scoped async context instead of
+  // mutating the global host. Previously two parallel `refreshVariants`
+  // calls (Phase 4 auto-refresh over N variants) would trample each
+  // other's global host — `getHost()` inside adapt would return whichever
+  // StandaloneHost was most recently set, so node lookups could escape
+  // the calling graph and yield cross-graph contamination.
+  //
+  // runWithHostAsync uses AsyncLocalStorage on Node to make the host
+  // visible to every await-dependent call inside `fn` without touching
+  // module-level state. Parallel invocations each see their own host.
   const host = new StandaloneHost(graph);
-  setHost(host);
-
-  // Use the cached factory — `new StandaloneNode(...)` would create an
-  // instance separate from the cache, then descendants reached through
-  // `child.parent` (which goes through the cache) would never be `===`
-  // to it. That silently broke `isDirectChild(node, frame)` checks
-  // throughout the resize subsystem.
-  const source = getStandaloneNode(graph, rootId);
-  if (!source) throw new Error(`Node ${rootId} not found`);
-
-  return adapt(source, targetWidth, targetHeight, options);
+  return runWithHostAsync(host, async () => {
+    const source = getStandaloneNode(graph, rootId);
+    if (!source) throw new Error(`Node ${rootId} not found`);
+    return adapt(source, targetWidth, targetHeight, options);
+  });
 }
 
 // ─── Helpers ───────────────────────────────────────────────────

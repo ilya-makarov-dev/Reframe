@@ -459,6 +459,11 @@ export async function handleCompile(input: CompileInput) {
           width: size.width || undefined,
           height: size.height || undefined,
           forceRootSize: isMultiSize,
+          // Phase 1 round-trip: deterministic h:<hash> ids derived from DOM path.
+          // Re-compiling the same source HTML yields the same node ids, so
+          // reframe_edit operations survive source edits — the whole point of
+          // having a programmable design runtime instead of a one-shot compiler.
+          stableIds: true,
         });
         graph = importResult.graph;
         rootId = importResult.rootId;

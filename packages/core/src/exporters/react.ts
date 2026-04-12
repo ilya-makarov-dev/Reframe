@@ -7,7 +7,10 @@
  */
 
 import { type INode, NodeType, MIXED, type ISolidPaint } from '../host';
-import type { StateOverride, ResponsiveRule } from '../engine/types';
+import type { StateOverride, ResponsiveRule, TokenBindings } from '../engine/types';
+import type { DesignSystem } from '../design-system/types';
+import type { ITimeline } from '../animation/types';
+import { timelineToCss } from '../animation/to-css';
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -22,6 +25,93 @@ export interface ReactExportOptions {
   cssModules?: boolean;
   /** Include image placeholders as <img> tags (default: true) */
   images?: boolean;
+  /**
+   * Phase 5: optional ITimeline to emit as CSS keyframes. When the caller
+   * passes a graph-backed INode, they can read `graph.timeline` and hand it
+   * here to get animation export out of the react path too. Without this,
+   * React components never see animation state.
+   */
+  timeline?: ITimeline | null;
+  /**
+   * Phase 3b: when provided, the exporter walks `node.meta.tokenBindings`
+   * and emits a `:root` CSS block at the top of the rendered component with
+   * `--color-*`, `--font-size-*`, `--radius-*` variables resolved against
+   * this DesignSystem. Node-level substitution is opt-in via `useTokenVars`
+   * (default true when a designSystem is supplied) — without it you still
+   * get the :root block which can then be referenced manually from a theme
+   * wrapper, useful for pairing with a CSS-in-JS theme provider.
+   */
+  designSystem?: DesignSystem;
+  /**
+   * When true, token-bound node styles are emitted as `var(--color-xyz)`
+   * instead of the hardcoded hex. Default: true when designSystem is set.
+   */
+  useTokenVars?: boolean;
+}
+
+// ─── Phase 3b helpers (mirrors html.ts::collectPhase3Tokens) ─
+
+interface ReactPhase3Tables {
+  byNode: Map<string, Map<keyof TokenBindings, string>>;
+  rootVars: Map<string, string>;
+}
+
+function walkINode(node: INode, cb: (n: INode) => void): void {
+  cb(node);
+  if (node.children) for (const c of node.children) walkINode(c, cb);
+}
+
+function collectPhase3ReactTokens(root: INode, ds: DesignSystem): ReactPhase3Tables {
+  const byNode = new Map<string, Map<keyof TokenBindings, string>>();
+  const rootVars = new Map<string, string>();
+
+  const resolveColor = (role: string): string | undefined =>
+    (role === 'primary' && ds.colors.primary)
+    || (role === 'background' && ds.colors.background)
+    || (role === 'text' && ds.colors.text)
+    || (role === 'accent' && ds.colors.accent)
+    || ds.colors.roles?.get(role) || undefined;
+
+  const resolveFontSize = (role: string): number | undefined =>
+    ds.typography.hierarchy.find(r => r.role === role)?.fontSize;
+  const resolveFontFamily = (slot: string): string | undefined =>
+    slot === 'primary' ? ds.typography.primaryFont
+    : slot === 'secondary' ? ds.typography.secondaryFont
+    : undefined;
+  const resolveRadius = (idxStr: string): number | undefined => {
+    const i = parseInt(idxStr, 10);
+    return Number.isFinite(i) ? ds.layout?.borderRadiusScale?.[i] : undefined;
+  };
+
+  walkINode(root, (n: INode) => {
+    // INode exposes meta via the adapter layer as `meta` — when absent we just skip.
+    const bindings = (n as any).meta?.tokenBindings as TokenBindings | undefined;
+    if (!bindings) return;
+    const fields = new Map<keyof TokenBindings, string>();
+    if (bindings.fill) {
+      const hex = resolveColor(bindings.fill);
+      if (hex) { const v = `--color-${bindings.fill}`; rootVars.set(v, hex); fields.set('fill', v); }
+    }
+    if (bindings.stroke) {
+      const hex = resolveColor(bindings.stroke);
+      if (hex) { const v = `--color-${bindings.stroke}`; rootVars.set(v, hex); fields.set('stroke', v); }
+    }
+    if (bindings.fontSize) {
+      const px = resolveFontSize(bindings.fontSize);
+      if (px !== undefined) { const v = `--font-size-${bindings.fontSize}`; rootVars.set(v, `${px}px`); fields.set('fontSize', v); }
+    }
+    if (bindings.fontFamily) {
+      const fam = resolveFontFamily(bindings.fontFamily);
+      if (fam) { const v = `--font-family-${bindings.fontFamily}`; rootVars.set(v, `'${fam}', sans-serif`); fields.set('fontFamily', v); }
+    }
+    if (bindings.cornerRadius) {
+      const r = resolveRadius(bindings.cornerRadius);
+      if (r !== undefined) { const v = `--radius-${bindings.cornerRadius}`; rootVars.set(v, `${r}px`); fields.set('cornerRadius', v); }
+    }
+    if (fields.size > 0) byNode.set(n.id, fields);
+  });
+
+  return { byNode, rootVars };
 }
 
 export interface ReactExportResult {
@@ -52,6 +142,19 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
 
   const cssClasses = new Map<string, Record<string, string | number>>();
   let classCounter = 0;
+
+  // Phase 3b: collect :root CSS vars from meta.tokenBindings when a DS is supplied.
+  // These are appended to the behaviorStyles block so we get one <style> tag.
+  const phase3 = options?.designSystem
+    ? collectPhase3ReactTokens(node, options.designSystem)
+    : { byNode: new Map(), rootVars: new Map() };
+
+  // Phase 5: timeline → @keyframes + per-node animation classes.
+  // Prefer an explicit options.timeline; otherwise try the graph attached to
+  // the root INode (StandaloneNode exposes it via the adapter). Falling back
+  // through the adapter path keeps the API symmetric with html.ts.
+  const timelineFromNode = options?.timeline ?? ((node as any).graph?.timeline as ITimeline | null | undefined) ?? null;
+  const timelineCss = timelineToCss(timelineFromNode);
 
   // Collect behavioral CSS (states + responsive) from the tree
   const behaviorStyles: string[] = [];
@@ -97,7 +200,29 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   }
   collectBehavior(node);
 
-  const jsx = renderNode(node, true, indentSize, 1, useCssModules, cssClasses, () => `node${classCounter++}`, useImages, behaviorClassMap);
+  // Phase 5: merge timeline animation classes into the behavior class map so
+  // renderNode emits them on the element. Uses `nodeKey` (the same key
+  // function collectBehavior uses) so state classes and animation classes
+  // coexist on the same map entry. Unlike html.ts the nodeKey may not be
+  // the raw node id — walk the tree to find INode whose id matches each
+  // timeline-targeted id, then merge its key.
+  if (timelineCss.perNodeClasses.size > 0) {
+    const idToKey = new Map<string, string>();
+    const walk = (n: INode) => {
+      idToKey.set(n.id, nodeKey(n));
+      if (n.children) for (const c of n.children) walk(c);
+    };
+    walk(node);
+    for (const [nid, classes] of timelineCss.perNodeClasses) {
+      const key = idToKey.get(nid);
+      if (!key) continue;
+      const existing = behaviorClassMap.get(key);
+      const joined = classes.join(' ');
+      behaviorClassMap.set(key, existing ? `${existing} ${joined}` : joined);
+    }
+  }
+
+  const jsx = renderNode(node, true, indentSize, 1, useCssModules, cssClasses, () => `node${classCounter++}`, useImages, behaviorClassMap, phase3.byNode);
 
   const typeAnnotation = ts ? ': React.FC' : '';
   const imports: string[] = [`import React from 'react';`];
@@ -105,9 +230,16 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     imports.push(`import styles from './${name}.module.css';`);
   }
 
-  // Build style tag for states/responsive if any
-  const styleJsx = behaviorStyles.length > 0
-    ? `\n      <style>{\`\n        ${behaviorStyles.join('\n        ')}\n      \`}</style>`
+  // Build style tag for :root tokens + states + responsive + animations, if any.
+  const rootBlock = phase3.rootVars.size > 0
+    ? `:root { ${[...phase3.rootVars].map(([k, v]) => `${k}: ${v}`).join('; ')} }`
+    : '';
+  const animationBlocks: string[] = [];
+  if (timelineCss.keyframes) animationBlocks.push(timelineCss.keyframes);
+  for (const rule of timelineCss.classRules.values()) animationBlocks.push(rule);
+  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks].filter(Boolean);
+  const styleJsx = combinedStyles.length > 0
+    ? `\n      <style>{\`\n        ${combinedStyles.join('\n        ')}\n      \`}</style>`
     : '';
 
   const lines: string[] = [
@@ -151,9 +283,35 @@ function renderNode(
   useCssModules: boolean, cssClasses: Map<string, Record<string, string | number>>,
   genClassName: () => string, useImages: boolean,
   behaviorClassMap?: Map<string, string>,
+  phase3ByNode?: Map<string, Map<keyof TokenBindings, string>>,
 ): string {
   const pad = ' '.repeat(indentSize * (depth + 2));
   const style = computeStyle(node, isRoot);
+
+  // Phase 3b: substitute hardcoded values with var(--token) references.
+  // Operates on the already-computed style object so we don't duplicate the
+  // switch-on-node-type logic that computeStyle/applyTextStyles carry.
+  const tokenFields = phase3ByNode?.get(node.id);
+  if (tokenFields) {
+    if (tokenFields.has('fill')) {
+      const v = `var(${tokenFields.get('fill')})`;
+      // Text nodes bind fill → `color`, everything else → `background`.
+      if (node.type === NodeType.Text) style.color = v;
+      else style.background = v;
+    }
+    if (tokenFields.has('stroke') && style.borderColor !== undefined) {
+      style.borderColor = `var(${tokenFields.get('stroke')})`;
+    }
+    if (tokenFields.has('cornerRadius')) {
+      style.borderRadius = `var(${tokenFields.get('cornerRadius')})`;
+    }
+    if (tokenFields.has('fontSize')) {
+      style.fontSize = `var(${tokenFields.get('fontSize')})`;
+    }
+    if (tokenFields.has('fontFamily')) {
+      style.fontFamily = `var(${tokenFields.get('fontFamily')})`;
+    }
+  }
 
   const behaviorCls = behaviorClassMap?.get(nodeKey(node));
   let styleAttr: string;
@@ -197,7 +355,7 @@ function renderNode(
   }
 
   const childJsx = children
-    .map(c => renderNode(c, false, indentSize, depth + 1, useCssModules, cssClasses, genClassName, useImages, behaviorClassMap))
+    .map(c => renderNode(c, false, indentSize, depth + 1, useCssModules, cssClasses, genClassName, useImages, behaviorClassMap, phase3ByNode))
     .join('\n');
 
   return `${pad}<div ${styleAttr}>\n${childJsx}\n${pad}</div>`;

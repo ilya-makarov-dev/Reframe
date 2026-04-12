@@ -364,3 +364,47 @@ export { buildAll } from './config/build';
 export { testAll } from './config/test';
 export { findConfig, loadConfigJson, resolveDesignMd } from './config/loader';
 export type { ReframeConfig, BuildOutput, TestOutput } from './config/types';
+
+// -- Variations (design space explorer) --
+export {
+  scaleSpacing,
+  scaleRadius,
+  scaleShadows,
+  rotateColors,
+  applyTypographyPreset,
+  generateVariationGrid,
+} from './variations/index';
+export type {
+  ScaleSpacingOptions,
+  RadiusStrategy,
+  ShadowStrategy,
+  ColorRotation,
+  TypographyPreset,
+  VariationAxes,
+  VariationRecipe,
+} from './variations/index';
+
+// ── Scene graph + standalone adapter (for CLI and downstream consumers) ──
+export { SceneGraph } from './engine/scene-graph';
+export type { SceneNode } from './engine/types';
+export { StandaloneHost } from './adapters/standalone/adapter';
+export { StandaloneNode } from './adapters/standalone/node';
+
+// ── Engine layout + fonts + yoga init ──
+export {
+  computeLayout,
+  computeAllLayouts,
+  ensureSceneLayout,
+  setTextMeasurer,
+} from './engine/layout';
+export {
+  loadFont,
+  ensureNodeFont,
+  collectFontKeys,
+  setFontRegistrar,
+} from './engine/fonts';
+export { initYoga } from './engine/yoga-init';
+
+// ── Config types (CLI logger interfaces) ──
+export type { BuildLogger } from './config/build';
+export type { TestLogger } from './config/test';

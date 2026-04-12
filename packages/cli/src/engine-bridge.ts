@@ -6,39 +6,44 @@
  */
 
 // Re-export engine types for convenience
-export { SceneGraph } from '../../core/src/engine/scene-graph';
-export { StandaloneHost } from '../../core/src/adapters/standalone/adapter';
-export { StandaloneNode } from '../../core/src/adapters/standalone/node';
-export { setHost, getHost } from '../../core/src/host/context';
-export { computeLayout, computeAllLayouts, ensureSceneLayout, setTextMeasurer } from '../../core/src/engine/layout';
-export { loadFont, ensureNodeFont, collectFontKeys, setFontRegistrar } from '../../core/src/engine/fonts';
-export { initYoga } from '../../core/src/engine/yoga-init';
-
-// Engine types
-export type { SceneNode } from '../../core/src/engine/types';
-export type { INode, IHost } from '../../core/src/host/types';
-
-// Scaling pipeline
 export {
+  SceneGraph,
+  StandaloneHost,
+  StandaloneNode,
+  setHost,
+  getHost,
+  computeLayout,
+  computeAllLayouts,
+  ensureSceneLayout,
+  setTextMeasurer,
+  loadFont,
+  ensureNodeFont,
+  collectFontKeys,
+  setFontRegistrar,
+  initYoga,
   uniformScaleForLetterbox,
   centeredLetterboxOffsets,
   rectCenterLocal,
-} from '../../core/src/resize/geometry/fit';
+  applyConstraints,
+  computeConstrainedPosition,
+  importFromFigma,
+  importFromFigmaResponse,
+  importFromSvg,
+  exportToSvg,
+  exportSceneGraphToSvg,
+} from '@reframe/core';
 
-// Constraints
-export { applyConstraints, computeConstrainedPosition } from '../../core/src/engine/constraints';
+// Engine types
+export type { SceneNode, INode, IHost } from '@reframe/core';
 
-// Importers & Exporters
-export { importFromFigma, importFromFigmaResponse } from '../../core/src/importers/figma-rest';
-export { importFromSvg } from '../../core/src/importers/svg';
-export { exportToSvg, exportSceneGraphToSvg } from '../../core/src/exporters/svg';
-
-import { SceneGraph } from '../../core/src/engine/scene-graph';
-import { StandaloneHost } from '../../core/src/adapters/standalone/adapter';
-import { StandaloneNode } from '../../core/src/adapters/standalone/node';
-import { setHost } from '../../core/src/host/context';
-import { ensureSceneLayout } from '../../core/src/engine/layout';
-import { applyConstraints } from '../../core/src/engine/constraints';
+import {
+  SceneGraph,
+  StandaloneHost,
+  StandaloneNode,
+  setHost,
+  ensureSceneLayout,
+  applyConstraints,
+} from '@reframe/core';
 
 // ─── Target Size ────────────────────────────────────────────────
 

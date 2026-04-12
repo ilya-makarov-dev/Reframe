@@ -18,7 +18,7 @@
  */
 
 import { SceneGraph } from '../engine/scene-graph';
-import type { SceneNode, Color, Fill, Stroke, Effect, NodeType } from '../engine/types';
+import type { SceneNode, Color, Fill, Stroke, Effect, NodeType, SemanticRole, NodeMeta, ResponsiveRule } from '../engine/types';
 // Dynamic import — linkedom is ESM-only
 let _parseHTML: ((html: string) => { document: any }) | null = null;
 async function getParseHTML() {
@@ -45,6 +45,17 @@ export interface HtmlImportOptions {
    * render at 375 / 768 / 1440 / 3840 without rewriting the root style.
    */
   forceRootSize?: boolean;
+  /**
+   * When true, node ids are derived deterministically from DOM paths so
+   * re-importing the same HTML produces identical ids. Required for
+   * round-trip workflows where an agent edits the source HTML and expects
+   * prior reframe_edit operations to still resolve.
+   *
+   * Default: false — to preserve legacy snapshot and serialization tests
+   * that depend on the existing counter-based id format. New callers
+   * (reframe_compile, MCP session) should opt in.
+   */
+  stableIds?: boolean;
 }
 
 export interface HtmlImportResult {
@@ -72,16 +83,18 @@ export async function importFromHtml(
 ): Promise<HtmlImportResult> {
   let parsed = await parseWithLinkedom(html);
   let dom = parsed.dom;
-  let { linkedomStyles, cssVars } = parsed;
+  let { linkedomStyles, cssVars, mediaRules } = parsed;
 
   const graph = new SceneGraph();
   const page = graph.addPage(options.name ?? 'HTML Import');
 
   const stats = { elements: 0, textNodes: 0, images: 0, unsupported: [] as string[] };
   let ctx: ConvertContext = {
-    graph, stats, cssVars, linkedomStyles,
+    graph, stats, cssVars, linkedomStyles, mediaRules,
     defaultWidth: options.width ?? 1920,
     defaultHeight: options.height ?? 1080,
+    stableIds: options.stableIds === true,
+    usedIds: new Set<string>(),
   };
 
   // Find the outermost element (skip doctype, html/head/body wrappers)
@@ -93,7 +106,12 @@ export async function importFromHtml(
     dom = parsed.dom;
     linkedomStyles = parsed.linkedomStyles;
     cssVars = parsed.cssVars;
-    ctx = { graph, stats, cssVars, linkedomStyles, defaultWidth: ctx.defaultWidth, defaultHeight: ctx.defaultHeight };
+    mediaRules = parsed.mediaRules;
+    ctx = {
+      graph, stats, cssVars, linkedomStyles, mediaRules,
+      defaultWidth: ctx.defaultWidth, defaultHeight: ctx.defaultHeight,
+      stableIds: ctx.stableIds, usedIds: ctx.usedIds,
+    };
     rootElement = findRootElement(dom);
   }
   if (!rootElement) {
@@ -121,7 +139,7 @@ export async function importFromHtml(
     }
   }
 
-  const rootId = convertElement(ctx, page.id, rootElement, null);
+  const rootId = convertElement(ctx, page.id, rootElement, null, rootElement.tag);
 
   // Hard size override — multi-size compile passes the same HTML at multiple
   // viewports and needs the root element to actually take the requested size,
@@ -346,12 +364,15 @@ async function parseWithLinkedom(html: string): Promise<{
   dom: HtmlElement;
   linkedomStyles: Map<string, Record<string, string>>;
   cssVars: Map<string, string>;
+  /** Responsive rules extracted from @media queries: idx → list of {maxWidth, props} */
+  mediaRules: Map<string, Array<{ maxWidth: number; properties: Record<string, string> }>>;
 }> {
   const parseHTML = await getParseHTML();
   const { document } = parseHTML(html);
 
   // ── Build style map (CSS specificity + combinators) ──
   const linkedomStyles = new Map<string, Record<string, string>>();
+  const mediaRules = new Map<string, Array<{ maxWidth: number; properties: Record<string, string> }>>();
 
   // Tag every element for cross-referencing
   const allEls = document.querySelectorAll('*');
@@ -365,6 +386,38 @@ async function parseWithLinkedom(html: string): Promise<{
 
   for (const styleEl of Array.from(styleEls) as any[]) {
     const css = styleEl.textContent || '';
+
+    // Extract @media blocks first — each becomes a list of responsive overrides.
+    // Pattern: @media <condition> { <inner rules> }. We only honor max-width queries
+    // because that's the mobile-first pattern agents produce 99% of the time, and
+    // the responsive model on SceneNode is max-width based.
+    const mediaBlocks = extractMediaBlocks(css);
+    for (const block of mediaBlocks) {
+      const maxWidth = parseMaxWidthFromCondition(block.condition);
+      if (maxWidth == null) continue;
+      const innerRe = /([^{}]+)\{([^}]*)\}/g;
+      let im: RegExpExecArray | null;
+      while ((im = innerRe.exec(block.body)) !== null) {
+        const selectors = im[1].split(',').map(s => s.trim()).filter(Boolean);
+        const properties = parseInlineStyle(im[2]);
+        for (const selector of selectors) {
+          if (selector.includes(':') && !selector.includes('[')) continue;
+          try {
+            const matched = document.querySelectorAll(selector);
+            for (const el of Array.from(matched) as any[]) {
+              const idx = el.getAttribute('data-reframe-idx');
+              if (!idx) continue;
+              const list = mediaRules.get(idx) ?? [];
+              list.push({ maxWidth, properties });
+              mediaRules.set(idx, list);
+            }
+          } catch { /* invalid selector — skip */ }
+        }
+      }
+    }
+
+    // Strip all remaining @rules (keyframes, supports, font-face, etc.) so the
+    // plain-selector regex below doesn't trip on them.
     const cleaned = css.replace(/@[^{]+\{(?:[^{}]*\{[^}]*\})*[^}]*\}/g, '');
     const re = /([^{]+)\{([^}]*)\}/g;
     let m: RegExpExecArray | null;
@@ -435,7 +488,56 @@ async function parseWithLinkedom(html: string): Promise<{
     dom.attrs._droppedTags = [...idx.droppedTags].join(',');
   }
 
-  return { dom, linkedomStyles, cssVars };
+  return { dom, linkedomStyles, cssVars, mediaRules };
+}
+
+/**
+ * Find all top-level @media blocks in a CSS source. Handles nested braces
+ * (e.g. selectors with rules inside the media body) via depth counting.
+ * A single-pass scanner rather than a regex so we never miss/stop at a
+ * selector whose body happens to contain characters the regex misreads.
+ */
+function extractMediaBlocks(css: string): Array<{ condition: string; body: string }> {
+  const blocks: Array<{ condition: string; body: string }> = [];
+  let i = 0;
+  while (i < css.length) {
+    const at = css.indexOf('@media', i);
+    if (at === -1) break;
+    // Find the opening brace of this @media block
+    let j = at + 6;
+    while (j < css.length && css[j] !== '{') j++;
+    if (j >= css.length) break;
+    const condition = css.slice(at + 6, j).trim();
+    // Scan forward until the matching closing brace (depth 0)
+    let depth = 1;
+    let k = j + 1;
+    while (k < css.length && depth > 0) {
+      const ch = css[k];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+      if (depth === 0) break;
+      k++;
+    }
+    if (depth !== 0) break; // unterminated — bail
+    blocks.push({ condition, body: css.slice(j + 1, k) });
+    i = k + 1;
+  }
+  return blocks;
+}
+
+/**
+ * Parse a media condition like `(max-width: 768px)` or `screen and (max-width: 768px)`.
+ * Returns the numeric breakpoint in px, or null when the query is not max-width-based.
+ */
+function parseMaxWidthFromCondition(condition: string): number | null {
+  const m = condition.match(/\(\s*max-width\s*:\s*([\d.]+)\s*(px|rem|em)?\s*\)/i);
+  if (!m) return null;
+  const value = parseFloat(m[1]);
+  if (!Number.isFinite(value)) return null;
+  const unit = (m[2] || 'px').toLowerCase();
+  // rem/em → approximate using 16px root, which is the spec default.
+  if (unit === 'rem' || unit === 'em') return Math.round(value * 16);
+  return Math.round(value);
 }
 
 /** CSS specificity score: id=100, class/attr=10, tag=1 */
@@ -948,8 +1050,13 @@ interface ConvertContext {
   stats: HtmlImportResult['stats'];
   cssVars: Map<string, string>;
   linkedomStyles: Map<string, Record<string, string>>;
+  mediaRules: Map<string, Array<{ maxWidth: number; properties: Record<string, string> }>>;
   defaultWidth: number;
   defaultHeight: number;
+  /** When true, emit deterministic h:<hash> ids derived from the DOM path. */
+  stableIds: boolean;
+  /** Guards against stable-id collisions within a single import (e.g. two identical subtrees). */
+  usedIds: Set<string>;
 }
 
 const CONTAINER_TAGS = new Set([
@@ -973,6 +1080,231 @@ const TAG_FONT_DEFAULTS: Record<string, { fontSize: number; fontWeight: number }
   h6: { fontSize: 16, fontWeight: 700 },
   small: { fontSize: 12, fontWeight: 400 },
 };
+
+/**
+ * Base mapping from HTML tag → semantic role. This is the first-pass hint
+ * that `inferSemanticRole` refines using class names and data-reframe-* attrs.
+ * Keeping it here (not inline in convertElement) so the resize pipeline and
+ * tests can import it and cross-check.
+ */
+const TAG_TO_SEMANTIC_ROLE: Record<string, SemanticRole> = {
+  button: 'button',
+  a: 'link',
+  input: 'input',
+  textarea: 'input',
+  select: 'select',
+  nav: 'nav',
+  header: 'header',
+  footer: 'footer',
+  main: 'main',
+  aside: 'sidebar',
+  section: 'section',
+  article: 'section',
+  h1: 'heading',
+  h2: 'heading',
+  h3: 'heading',
+  h4: 'heading',
+  h5: 'heading',
+  h6: 'heading',
+  p: 'paragraph',
+  label: 'label',
+  small: 'caption',
+  figcaption: 'caption',
+  ul: 'list',
+  ol: 'list',
+  li: 'listItem',
+  img: 'image',
+  svg: 'icon',
+  hr: 'divider',
+};
+
+/** Class-name hints that strengthen or override the tag-based role. */
+const CLASS_ROLE_HINTS: Array<{ match: RegExp; role: SemanticRole }> = [
+  { match: /\b(hero|hero-section|above-the-fold)\b/i, role: 'hero' },
+  { match: /\b(cta|call-to-action)\b/i, role: 'cta' },
+  { match: /\b(card|tile)\b/i, role: 'card' },
+  { match: /\b(badge|chip|pill|tag)\b/i, role: 'badge' },
+  { match: /\b(avatar)\b/i, role: 'avatar' },
+  { match: /\b(logo|brand)\b/i, role: 'logo' },
+  { match: /\b(nav|navbar|navigation)\b/i, role: 'nav' },
+  { match: /\b(sidebar|rail)\b/i, role: 'sidebar' },
+  { match: /\b(toast|snackbar)\b/i, role: 'toast' },
+  { match: /\b(modal|dialog)\b/i, role: 'modal' },
+  { match: /\b(tooltip)\b/i, role: 'tooltip' },
+  { match: /\b(dropdown|menu)\b/i, role: 'dropdown' },
+];
+
+/** Variant hints drawn from class names — common Tailwind / BEM patterns. */
+const VARIANT_HINTS: Array<{ match: RegExp; variant: string }> = [
+  { match: /\b(primary|btn-primary|cta-primary)\b/i, variant: 'primary' },
+  { match: /\b(secondary|btn-secondary)\b/i, variant: 'secondary' },
+  { match: /\b(outline|outlined|ghost)\b/i, variant: 'outline' },
+  { match: /\b(destructive|danger|error)\b/i, variant: 'destructive' },
+  { match: /\b(success)\b/i, variant: 'success' },
+  { match: /\b(warning)\b/i, variant: 'warning' },
+  { match: /\b(tertiary)\b/i, variant: 'tertiary' },
+];
+
+/** Sentinel classes used internally by the importer — never leaked into meta.sourceClass. */
+const INTERNAL_CLASS_TOKENS = new Set(['data-reframe-import-wrap']);
+
+/**
+ * Derive a SemanticRole from an HTML element. Priority order:
+ *   1. explicit `data-reframe-role="..."` — trust the author
+ *   2. tag-based map (button → 'button', h1 → 'heading', etc.)
+ *   3. class-name hints (.hero → 'hero', .cta → 'cta')
+ *
+ * A div with class="hero" gets role 'hero', a button with class="primary" keeps
+ * 'button' (the tag wins for interactive elements), and an unknown div returns null.
+ */
+function inferSemanticRole(el: HtmlElement): SemanticRole | null {
+  const dataRole = el.attrs['data-reframe-role'];
+  if (dataRole && isKnownSemanticRole(dataRole)) return dataRole;
+
+  const tagRole = TAG_TO_SEMANTIC_ROLE[el.tag];
+  if (tagRole) {
+    // Tag is authoritative for interactive + heading elements; class hints
+    // cannot override 'button' → 'hero' on a <button class="hero-cta">.
+    const interactiveOrHeading = new Set<SemanticRole>([
+      'button', 'link', 'input', 'select', 'heading',
+    ]);
+    if (interactiveOrHeading.has(tagRole)) return tagRole;
+  }
+
+  const className = el.attrs.class || '';
+  if (className) {
+    for (const hint of CLASS_ROLE_HINTS) {
+      if (hint.match.test(className)) return hint.role;
+    }
+  }
+
+  return tagRole ?? null;
+}
+
+function isKnownSemanticRole(v: string): v is SemanticRole {
+  return [
+    'button', 'link', 'input', 'checkbox', 'radio', 'select',
+    'heading', 'paragraph', 'label', 'caption',
+    'card', 'badge', 'tag', 'avatar', 'divider',
+    'nav', 'header', 'footer', 'sidebar', 'main',
+    'hero', 'section', 'list', 'listItem',
+    'image', 'icon', 'logo',
+    'cta', 'toast', 'modal', 'tooltip', 'dropdown',
+  ].includes(v);
+}
+
+/** Derive a variant string from data-reframe-variant or class name patterns. */
+function inferVariant(el: HtmlElement): string | undefined {
+  const explicit = el.attrs['data-reframe-variant'];
+  if (explicit) return explicit;
+  const className = el.attrs.class || '';
+  if (!className) return undefined;
+  for (const hint of VARIANT_HINTS) {
+    if (hint.match.test(className)) return hint.variant;
+  }
+  return undefined;
+}
+
+/**
+ * Build the meta.source object for a node. Captures tag, class, id, path, and
+ * raw data-* attributes (except internal reframe bookkeeping) so downstream
+ * consumers can reason about the original HTML source.
+ */
+function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
+  const meta: NodeMeta = { sourceTag: el.tag, sourcePath: path };
+
+  const cls = el.attrs.class;
+  if (cls) {
+    const filtered = cls
+      .split(/\s+/)
+      .filter(c => c && !INTERNAL_CLASS_TOKENS.has(c))
+      .join(' ');
+    if (filtered) meta.sourceClass = filtered;
+  }
+
+  if (el.attrs.id) meta.sourceId = el.attrs.id;
+
+  const variant = inferVariant(el);
+  if (variant) meta.variant = variant;
+
+  // Preserve raw data-* attrs (sans reframe internals) so exports can
+  // round-trip e.g. analytics hooks, test-ids, or custom author metadata.
+  const data: Record<string, string> = {};
+  for (const [k, v] of Object.entries(el.attrs)) {
+    if (!k.startsWith('data-')) continue;
+    if (k === 'data-reframe-idx' || k === 'data-reframe-import-wrap') continue;
+    data[k] = v;
+  }
+  if (Object.keys(data).length > 0) meta.sourceData = data;
+
+  return meta;
+}
+
+/**
+ * Deterministic 32-bit FNV-1a hash encoded as 8-char lowercase hex.
+ * We use this to turn DOM paths like `body/div[0]/section[2]/h1[0]` into
+ * stable 8-character ids so re-compiling the same HTML yields the same
+ * node ids across runs — a hard prerequisite for reframe_edit to survive
+ * source edits.
+ */
+function fnv1aHex(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    // 32-bit FNV prime multiply, kept in uint32 via >>> 0
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return ('00000000' + h.toString(16)).slice(-8);
+}
+
+/**
+ * Compute a stable node id from a DOM path string. Prefix `h:` keeps it
+ * in a separate namespace from the counter-based `0:N` ids the SceneGraph
+ * uses by default, so stable and counter ids can coexist in the same graph.
+ */
+function stableIdFromPath(path: string): string {
+  return `h:${fnv1aHex(path)}`;
+}
+
+/**
+ * Parse a small subset of CSS properties into SceneNode responsive overrides.
+ * We only honor the props the ResponsiveRule schema allows, so @media queries
+ * targeting unsupported props (transform, display, etc.) quietly drop those.
+ * This is deliberate: the responsive model is deliberately narrow, and the
+ * audit can surface a warning later if needed.
+ */
+function cssToResponsiveProps(
+  css: Record<string, string>,
+): Partial<SceneNode> | null {
+  const o: any = {};
+  if (css.width) { const v = parseUnit(css.width); if (Number.isFinite(v)) o.width = v; }
+  if (css.height) { const v = parseUnit(css.height); if (Number.isFinite(v)) o.height = v; }
+  if (css['font-size']) { const v = parseUnit(css['font-size']); if (Number.isFinite(v)) o.fontSize = v; }
+  if (css['font-weight']) {
+    const raw = css['font-weight'];
+    const numeric = raw === 'bold' ? 700 : raw === 'normal' ? 400 : parseInt(raw, 10);
+    if (Number.isFinite(numeric)) o.fontWeight = numeric;
+  }
+  if (css['line-height']) { const v = parseUnit(css['line-height']); if (Number.isFinite(v)) o.lineHeight = v; }
+  if (css['letter-spacing']) { const v = parseUnit(css['letter-spacing']); if (Number.isFinite(v)) o.letterSpacing = v; }
+  if (css.padding) {
+    const parts = parseFourValues(css.padding);
+    o.paddingTop = parts[0]; o.paddingRight = parts[1]; o.paddingBottom = parts[2]; o.paddingLeft = parts[3];
+  }
+  if (css['padding-top']) o.paddingTop = parseUnit(css['padding-top']);
+  if (css['padding-right']) o.paddingRight = parseUnit(css['padding-right']);
+  if (css['padding-bottom']) o.paddingBottom = parseUnit(css['padding-bottom']);
+  if (css['padding-left']) o.paddingLeft = parseUnit(css['padding-left']);
+  if (css.gap) { const v = parseUnit(css.gap); if (Number.isFinite(v)) o.itemSpacing = v; }
+  if (css.opacity) { const v = parseFloat(css.opacity); if (Number.isFinite(v)) o.opacity = v; }
+  if (css.display === 'none') o.visible = false;
+  if (css['flex-direction']) {
+    o.layoutMode = css['flex-direction'] === 'column' || css['flex-direction'] === 'column-reverse'
+      ? 'VERTICAL'
+      : 'HORIZONTAL';
+  }
+  return Object.keys(o).length > 0 ? o : null;
+}
 
 function findRootElement(dom: HtmlElement): HtmlElement | null {
   // Skip wrapper nodes to find the first real visual element
@@ -1052,6 +1384,7 @@ function convertElement(
   parentId: string,
   el: HtmlElement,
   parentStyles: Record<string, string> | null,
+  path: string,
 ): string {
   const styles = resolveStyles(el, ctx.cssVars, ctx.linkedomStyles);
   // Inherit typographic properties from parent when this element hasn't overridden them.
@@ -1150,7 +1483,8 @@ function convertElement(
       if (!overrides.width || !overrides.height) {
         const fontSize = overrides.fontSize ?? 16;
         const fontWeight = overrides.fontWeight ?? 400;
-        const avgCharWidth = fontSize * (0.48 + (fontWeight >= 600 ? 0.04 : 0));
+        const ls = typeof overrides.letterSpacing === 'number' ? overrides.letterSpacing : 0;
+        const avgCharWidth = fontSize * (0.55 + (fontWeight >= 600 ? 0.04 : 0)) + ls;
         const textLines = textContent.split('\n');
         const longestLine = Math.max(...textLines.map(l => l.length));
         if (!overrides.width) {
@@ -1164,13 +1498,45 @@ function convertElement(
     }
   }
 
-  // Set name: prefer explicit name= / data-name, then id, then class, then tag
+  // Set name: prefer explicit name= / data-name, then id, then class, then tag.
+  // If name is just a generic tag (div/span/section/p), try to derive a
+  // meaningful label from aria-label, role, heading text, or content hints.
   if (!overrides.name) {
     overrides.name = el.attrs.name
       || el.attrs['data-name']
       || el.attrs.id
       || (el.attrs.class ? el.attrs.class.split(/\s+/)[0] : '')
       || el.tag;
+  }
+  const genericTags = new Set(['div', 'span', 'section', 'p', 'main', 'article', 'aside', 'header', 'footer', 'nav', 'ul', 'ol', 'li', 'a', 'figure']);
+  if (genericTags.has(overrides.name)) {
+    // Try to derive a better name
+    const ariaLabel = el.attrs['aria-label'] || el.attrs.title || el.attrs.alt || '';
+    if (ariaLabel) {
+      overrides.name = ariaLabel.slice(0, 30);
+    } else {
+      // Use first text content (up to 25 chars) as name hint
+      let firstText = '';
+      const findFirst = (node: any): void => {
+        if (firstText) return;
+        if (node.kind === 'text' && node.value?.trim()) {
+          firstText = node.value.trim().slice(0, 25);
+          return;
+        }
+        for (const c of node.children ?? []) findFirst(c);
+      };
+      findFirst(el);
+      if (firstText) {
+        overrides.name = firstText;
+      } else {
+        // Fallback: role-based name or semantic hint from styles
+        const role = el.attrs.role || '';
+        if (role) overrides.name = role;
+        else if (overrides.layoutMode === 'HORIZONTAL') overrides.name = 'Row';
+        else if (overrides.layoutMode === 'VERTICAL') overrides.name = 'Stack';
+        else overrides.name = el.tag;
+      }
+    }
   }
 
   // For wrapper frames (text node promoted to frame), set up flex centering
@@ -1199,6 +1565,93 @@ function convertElement(
   delete ov._parentW;
   delete ov._parentH;
 
+  // ── Phase 1: semantic role, source meta, stable id, responsive overrides ──
+  // Applied here (not inside cssToOverrides) because this info is tied to the
+  // HtmlElement, not its resolved CSS styles. These assignments are additive —
+  // an agent that has manually set semanticRole via data-reframe-role wins over
+  // whatever tag-level inference would pick.
+  const role = inferSemanticRole(el);
+  if (role) (overrides as any).semanticRole = role;
+
+  const meta = buildNodeMeta(el, path);
+  (overrides as any).meta = meta;
+
+  // Honor data-reframe-slot for content-slot bindings (used by the Blueprint layer).
+  const dataSlot = el.attrs['data-reframe-slot'];
+  if (dataSlot) (overrides as any).slot = dataSlot;
+
+  // ── Phase 6: component instance marker ──
+  // `data-reframe-component="Name"` on an HTML element means "this node is
+  // a placeholder for component Name". The importer marks the node with
+  // `meta.componentName` + optional `overrides` (parsed from a sibling
+  // `data-reframe-props` JSON attribute). The expansion pass in
+  // compileHtmlIntoProject will hydrate children from the on-disk master
+  // on the next compile. The HTML-authored element stays a FRAME for now
+  // (we can't change nodeType mid-convert) — it gets promoted to INSTANCE
+  // via an override below when the attribute is present.
+  const dataComponent = el.attrs['data-reframe-component'];
+  if (dataComponent) {
+    (meta as any).componentName = dataComponent;
+    // Parse override props from data-reframe-props (JSON string). This is
+    // a shallow pass — agents that need deep slot overrides use the
+    // instantiateComponent op instead.
+    const dataProps = el.attrs['data-reframe-props'];
+    if (dataProps) {
+      try {
+        const parsed = JSON.parse(dataProps);
+        if (parsed && typeof parsed === 'object') {
+          (overrides as any).overrides = parsed;
+        }
+      } catch { /* invalid JSON — ignore */ }
+    }
+    // Force the node type to INSTANCE. This works because `nodeType` is a
+    // local let computed above; we reassign it here and the createNode
+    // call below uses the latest value.
+    nodeType = 'INSTANCE';
+    // Instance placeholders do not carry their own visible children —
+    // hydration creates them from master. Mark the children list as
+    // effectively empty so the convert loop below doesn't populate it.
+    // (We let the normal loop run — it will create children, but
+    // collapseInstances on save strips them back out, and expandInstances
+    // on load re-hydrates from master. So the first compile keeps the
+    // authored children as a snapshot; subsequent compiles normalize.)
+  }
+
+  // <a href="..."> / [href] — populate the navigation intent.
+  if (el.attrs.href) (overrides as any).href = el.attrs.href;
+
+  // Media queries → responsive[]. We look up by data-reframe-idx which the
+  // linkedom pass stamped on every element.
+  const rfIdx = el.attrs['data-reframe-idx'];
+  if (rfIdx && ctx.mediaRules.size > 0) {
+    const entries = ctx.mediaRules.get(rfIdx);
+    if (entries && entries.length > 0) {
+      const rules: ResponsiveRule[] = [];
+      for (const entry of entries) {
+        const props = cssToResponsiveProps(entry.properties);
+        if (props) rules.push({ maxWidth: entry.maxWidth, props: props as any });
+      }
+      if (rules.length > 0) {
+        // Sort descending so the narrowest breakpoint wins when multiple apply.
+        rules.sort((a, b) => b.maxWidth - a.maxWidth);
+        (overrides as any).responsive = rules;
+      }
+    }
+  }
+
+  // Stable id: deterministic from DOM path, with a collision suffix for the
+  // (rare) case where two distinct elements happen to produce the same path
+  // because of an anonymous fragment wrapper injected during parse.
+  if (ctx.stableIds) {
+    let candidate = stableIdFromPath(path);
+    let suffix = 1;
+    while (ctx.usedIds.has(candidate)) {
+      candidate = stableIdFromPath(`${path}#${suffix++}`);
+    }
+    ctx.usedIds.add(candidate);
+    (overrides as any).id = candidate;
+  }
+
   const node = ctx.graph.createNode(nodeType, parentId, overrides);
 
   // Stash the deferred offsets on the raw graph node so
@@ -1222,8 +1675,18 @@ function convertElement(
     const tLines = textContent.split('\n');
     const tLongest = Math.max(...tLines.map(l => l.length));
     const tw = textOverrides.fontWeight ?? 400;
-    textOverrides.width = Math.max(20, Math.ceil(tLongest * fontSize * (0.48 + (tw >= 600 ? 0.04 : 0))));
+    const tLs = typeof textOverrides.letterSpacing === 'number' ? textOverrides.letterSpacing : 0;
+    textOverrides.width = Math.max(20, Math.ceil(tLongest * (fontSize * (0.55 + (tw >= 600 ? 0.04 : 0)) + tLs)));
     textOverrides.height = Math.max(fontSize, Math.ceil(tLines.length * (textOverrides.lineHeight ?? fontSize * 1.4)));
+    // Phase 1: stable id for the synthetic text child, plus provenance meta.
+    if (ctx.stableIds) {
+      let cid = stableIdFromPath(`${path}#text`);
+      let s = 1;
+      while (ctx.usedIds.has(cid)) cid = stableIdFromPath(`${path}#text/${s++}`);
+      ctx.usedIds.add(cid);
+      textOverrides.id = cid;
+    }
+    textOverrides.meta = { sourcePath: `${path}#text`, synthetic: true };
     ctx.stats.textNodes++;
     ctx.graph.createNode('TEXT', node.id, textOverrides);
   }
@@ -1231,6 +1694,76 @@ function convertElement(
   // Convert children (only for non-text nodes and non-promoted frames)
   // Sort element children by z-index to preserve stacking order
   if (!isTextNode && !wasPromotedToFrame) {
+    // ── Phase 5b Bug #1 fix: content-aware sibling keys ──
+    //
+    // Old behavior used positional index (`section[2]`) which meant
+    // INSERTING a new sibling shifted every later sibling's id — the most
+    // common agent edit ("add a testimonials section between features and
+    // cta") silently broke the Phase 3 replay contract.
+    //
+    // New priority for the sibling key:
+    //   1. data-reframe-key="..."  — explicit author hint, always wins
+    //   2. id="..."                — natural HTML anchor, preserved
+    //   3. class first token       — e.g. "hero", "cta" (disambiguated among
+    //                                 siblings of the same tag)
+    //   4. positional index        — fallback for anonymous divs
+    //
+    // Importantly: positions fall back ONLY among elements with no
+    // identifier hint, so inserting a named sibling leaves anonymous
+    // sibling paths unchanged too.
+    const origIndex = new Map<HtmlChild, number>();
+    let elemCounter = 0;
+    let textCounter = 0;
+    for (const child of el.children) {
+      if (child.kind === 'element') {
+        origIndex.set(child, elemCounter++);
+      } else if (child.kind === 'text') {
+        origIndex.set(child, textCounter++);
+      }
+    }
+
+    // Second pass — compute sibling keys with collision resolution.
+    // When two siblings share the same class key (two <section class="card">)
+    // we suffix them with a duplicate counter so each resolves uniquely while
+    // still being position-independent to the OTHER tag groups.
+    const siblingKey = new Map<HtmlChild, string>();
+    const anonPositionByTag = new Map<string, number>();  // tag → next free anon index
+    const keyUsedByTag = new Map<string, Map<string, number>>();  // tag → key → count
+    // First walk to assign named/identifier keys
+    for (const child of el.children) {
+      if (child.kind !== 'element') continue;
+      const tag = child.tag;
+      const dataKey = child.attrs['data-reframe-key'];
+      const htmlId = child.attrs.id;
+      const firstClass = (child.attrs.class ?? '').split(/\s+/).filter(Boolean)[0];
+      let key: string | null = null;
+      if (dataKey) key = `k=${dataKey}`;
+      else if (htmlId) key = `i=${htmlId}`;
+      else if (firstClass && !INTERNAL_CLASS_TOKENS.has(firstClass)) key = `c=${firstClass}`;
+
+      if (key) {
+        // Disambiguate duplicates within the same tag bucket.
+        let byTag = keyUsedByTag.get(tag);
+        if (!byTag) { byTag = new Map(); keyUsedByTag.set(tag, byTag); }
+        const seen = byTag.get(key) ?? 0;
+        byTag.set(key, seen + 1);
+        const suffix = seen === 0 ? '' : `#${seen + 1}`;
+        siblingKey.set(child, `${key}${suffix}`);
+      }
+    }
+    // Second walk: anonymous children get a position counter PER TAG, but
+    // counted only among the unnamed siblings. Named siblings do not consume
+    // the anonymous counter, so inserting a `<section data-reframe-key="x">`
+    // in the middle of three unnamed `<div>`s leaves the div paths intact.
+    for (const child of el.children) {
+      if (child.kind !== 'element') continue;
+      if (siblingKey.has(child)) continue;
+      const tag = child.tag;
+      const idx = anonPositionByTag.get(tag) ?? 0;
+      anonPositionByTag.set(tag, idx + 1);
+      siblingKey.set(child, String(idx));
+    }
+
     const sortedChildren = [...el.children];
     sortedChildren.sort((a, b) => {
       if (a.kind !== 'element' || b.kind !== 'element') return 0;
@@ -1243,21 +1776,33 @@ function convertElement(
     for (const child of sortedChildren) {
       if (child.kind === 'element') {
         if (child.tag === 'style' || child.tag === 'script' || child.tag === 'br' || child.tag === 'hr' || child.tag === 'wbr') continue;
-        convertElement(ctx, node.id, child, styles);
+        const key = siblingKey.get(child) ?? String(origIndex.get(child) ?? 0);
+        const childPath = `${path}/${child.tag}[${key}]`;
+        convertElement(ctx, node.id, child, styles, childPath);
       } else if (child.kind === 'text' && child.value.trim()) {
         // Inline text in a container → create TEXT child node
         const textStyles = { ...styles }; // inherit parent styles
         ctx.stats.textNodes++;
         ctx.stats.elements++;
+        const textIdx = origIndex.get(child) ?? 0;
+        const textPath = `${path}/text[${textIdx}]`;
         const textOverrides: any = {
           text: child.value.trim(),
           name: 'text',
+          meta: { sourcePath: textPath, synthetic: false },
         };
         applyTextStyles(textOverrides, textStyles, el.tag);
         // Inherit color from parent
         if (styles.color) {
           const c = parseColor(styles.color);
           if (c) textOverrides.fills = [makeSolidFill(c)];
+        }
+        if (ctx.stableIds) {
+          let cid = stableIdFromPath(textPath);
+          let s = 1;
+          while (ctx.usedIds.has(cid)) cid = stableIdFromPath(`${textPath}#${s++}`);
+          ctx.usedIds.add(cid);
+          textOverrides.id = cid;
         }
         ctx.graph.createNode('TEXT', node.id, textOverrides);
       }
@@ -1822,6 +2367,7 @@ function cssToOverrides(
     if (jc === 'center') o.primaryAxisAlign = 'CENTER';
     else if (jc === 'flex-end' || jc === 'end') o.primaryAxisAlign = 'MAX';
     else if (jc === 'space-between') o.primaryAxisAlign = 'SPACE_BETWEEN';
+    else if (jc === 'space-around' || jc === 'space-evenly') o.primaryAxisAlign = 'SPACE_AROUND';
 
     // align-items → counterAxisAlign
     const ai = styles['align-items'] ?? (isGrid ? styles['place-items']?.split(/\s+/)[0] : '') ?? '';

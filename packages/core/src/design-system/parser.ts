@@ -170,13 +170,18 @@ function parseColors(section: Section | undefined): DesignSystemColors {
     }
 
     // Background: match "page background", "primary background", "canvas" — but not "CTA backgrounds"
-    if (!colors.background && (/\bpage\s*background\b|\bprimary.*background\b|^\s*-\s*\*\*.*(?:white|background|canvas)\*\*/i.test(lower))) {
+    // Also match "deepest background" and similar deep/dark surface references
+    if (!colors.background && (/\bpage\s*background\b|\bprimary.*background\b|\b(?:deepest|main|base)\s*background\b/i.test(lower) ||
+        /^\s*-\s*\*\*.*(?:white|background|canvas)\*\*/i.test(lower))) {
       colors.background = hex;
       if (!colors.roles.has('background')) colors.roles.set('background', hex);
     }
 
     // Text: match "primary text", "heading color", "body text", or bold names with "text/black/foreground"
-    if (!colors.text && (/\bprimary\s*text\b|\b(?:heading|body)\s*(?:text\s*)?color\b|\bheading\s*(?:color|solid)\b/i.test(lower) ||
+    // Exclude lines whose description mentions "background", "surface", or "canvas" —
+    // those are surface colors (e.g. "**Near Black**: Deepest background surface")
+    if (!colors.text && !/\b(?:background|surface|canvas)\b/i.test(lower.replace(/\*\*[^*]+\*\*/g, '')) &&
+        (/\bprimary\s*text\b|\b(?:heading|body)\s*(?:text\s*)?color\b|\bheading\s*(?:color|solid)\b/i.test(lower) ||
         /^\s*-\s*\*\*.*(?:navy|heading|foreground|black|text)\*\*/i.test(lower))) {
       colors.text = hex;
       if (!colors.roles.has('text')) colors.roles.set('text', hex);
@@ -861,15 +866,59 @@ function parseButtonVariants(text: string): ButtonVariant[] {
   return variants;
 }
 
-function parseButtonSpec(text: string): ButtonSpec | undefined {
-  let buttonText = text;
-  const buttonSectionMatch = text.match(/###\s*Buttons?\b([\s\S]*?)(?=###|$)/i);
-  if (buttonSectionMatch) {
-    buttonText = buttonSectionMatch[1];
+// ─── Universal component section finder ────────────────────
+/**
+ * Find one or more component sub-sections whose heading contains any of
+ * the given keywords. Line-by-line walker — more reliable than multiline
+ * regexes which trip over greedy `[^\n]*` semantics. Captures everything
+ * under a matching heading until the next heading of equal-or-shallower
+ * depth.
+ *
+ * Example matches for keywords=['card']:
+ *   ### Cards
+ *   ### Cards & Containers
+ *   #### Card styles
+ *   ### Content Cards
+ */
+function findComponentBlock(text: string, keywords: string[]): string | undefined {
+  const escaped = keywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const kwRe = new RegExp(`\\b(?:${escaped})s?\\b`, 'i');
+  const lines = text.split(/\r?\n/);
+  const blocks: string[] = [];
+  let currentBlock: string[] | null = null;
+  let currentDepth = 0;
+
+  for (const line of lines) {
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const depth = headingMatch[1].length;
+      const title = headingMatch[2];
+      // Close current block if we hit an equal-or-shallower heading
+      if (currentBlock && depth <= currentDepth) {
+        blocks.push(currentBlock.join('\n'));
+        currentBlock = null;
+      }
+      // Open new block when the heading title contains a keyword
+      if (kwRe.test(title) && depth >= 2 && depth <= 4) {
+        currentBlock = [];
+        currentDepth = depth;
+      }
+    } else if (currentBlock) {
+      currentBlock.push(line);
+    }
   }
+  if (currentBlock) blocks.push(currentBlock.join('\n'));
+  if (blocks.length === 0) return undefined;
+  return blocks.join('\n\n');
+}
 
-  const lower = buttonText.toLowerCase();
+// ─── Button parsing ─────────────────────────────────────────
 
+function parseButtonSpec(fullText: string, fallbackLayout?: DesignSystemLayout, fallbackColors?: DesignSystemColors): ButtonSpec | undefined {
+  const block = findComponentBlock(fullText, ['button', 'cta']) ?? fullText;
+  const lower = block.toLowerCase();
+
+  // Radius — prefer explicit "radius: Npx" near button, fall back to keywords
   let borderRadius = 8;
   let style: ButtonStyle = 'rounded';
 
@@ -877,12 +926,16 @@ function parseButtonSpec(text: string): ButtonSpec | undefined {
   if (brMatch) {
     borderRadius = parseNumber(brMatch[1]) ?? 8;
     style = borderRadius >= 50 ? 'pill' : borderRadius === 0 ? 'square' : 'rounded';
-  } else if (/\bpill\b.*button|button.*\bpill\b/i.test(lower)) {
+  } else if (/\bpill\b|9999px|500px/i.test(lower)) {
     borderRadius = 9999;
     style = 'pill';
-  } else if (/\bsquare\b.*button|button.*\bsquare\b/i.test(lower) || /radius[:\s]*0\s*px/i.test(lower)) {
+  } else if (/radius[:\s]*0\s*px|sharp|razor/i.test(lower)) {
     borderRadius = 0;
     style = 'square';
+  } else if (fallbackLayout && fallbackLayout.borderRadiusScale.length > 1) {
+    // Default to second entry in radius scale (a "medium" value)
+    const scale = fallbackLayout.borderRadiusScale.filter(r => r > 0);
+    if (scale.length > 0) borderRadius = scale[Math.min(1, scale.length - 1)];
   }
 
   let fontWeight: number | undefined;
@@ -891,34 +944,65 @@ function parseButtonSpec(text: string): ButtonSpec | undefined {
   if (fwMatch) fontWeight = parseNumber(fwMatch[1]) ?? undefined;
 
   let textTransform: 'uppercase' | 'none' | undefined;
-  if (/text[- ]?transform[:\s]*uppercase|button.*uppercase|uppercase.*button/i.test(lower)) textTransform = 'uppercase';
-  if (/text[- ]?transform[:\s]*none/i.test(lower)) textTransform = 'none';
+  if (/text[- ]?transform[:\s]*uppercase|uppercase/i.test(lower)) textTransform = 'uppercase';
+  if (/text[- ]?transform[:\s]*none|no text-transform/i.test(lower)) textTransform = 'none';
 
   // Parse variants
-  const variants = parseButtonVariants(buttonText);
+  const variants = parseButtonVariants(block);
+
+  // Ensure at least one variant with sensible defaults if brand has colors
+  if (variants.length === 0 && fallbackColors) {
+    const primary = fallbackColors.primary ?? fallbackColors.roles.get('primary');
+    const onPrimary = fallbackColors.background ?? fallbackColors.roles.get('background');
+    if (primary) {
+      variants.push({
+        name: 'primary',
+        background: primary,
+        color: onPrimary,
+        borderRadius,
+        fontWeight: fontWeight ?? 600,
+        minHeight: 44,
+        paddingX: 20,
+        paddingY: 12,
+        textTransform,
+      });
+    }
+  }
 
   return { borderRadius, style, fontWeight, textTransform, variants: variants.length > 0 ? variants : undefined };
 }
 
 // ─── Card parsing ────────────────────────────────────────────
 
-function parseCardSpec(text: string): CardSpec | undefined {
-  const cardSection = text.match(/###\s*Cards?\b([\s\S]*?)(?=###|$)/i);
-  if (!cardSection) return undefined;
-  const block = cardSection[1];
+function parseCardSpec(fullText: string, fallbackLayout?: DesignSystemLayout, fallbackColors?: DesignSystemColors): CardSpec | undefined {
+  const block = findComponentBlock(fullText, ['card', 'container', 'panel', 'surface']) ?? fullText;
 
   const card: CardSpec = { borderRadius: 8 };
   const r = extractRadius(block);
-  if (r != null) card.borderRadius = r;
+  if (r != null) {
+    card.borderRadius = r;
+  } else if (fallbackLayout && fallbackLayout.borderRadiusScale.length > 1) {
+    // Pick a mid-scale radius (cards are typically 8-16px)
+    const scale = fallbackLayout.borderRadiusScale.filter(r => r > 0 && r < 100);
+    if (scale.length > 0) card.borderRadius = scale[Math.min(2, scale.length - 1)];
+  }
 
   const bg = block.match(/background[:\s]*`?([^`\n]+)`?/i);
   if (bg) card.background = extractColor(bg[1]) ?? undefined;
+  if (!card.background && fallbackColors) {
+    // Fall back to brand background (cards usually inherit surface tone)
+    card.background = fallbackColors.background ?? fallbackColors.roles.get('surface') ?? fallbackColors.roles.get('background');
+  }
 
   const border = block.match(/border[:\s]*`?([^`\n]+)`?/i);
   if (border) card.borderColor = extractColor(border[1]) ?? undefined;
 
   const pad = extractPadding(block);
-  if (pad.paddingX != null) card.padding = pad.paddingX;
+  if (pad.paddingX != null) {
+    card.padding = pad.paddingX;
+  } else {
+    card.padding = 20; // sensible default
+  }
 
   // Shadow layer count
   const shadowMatches = block.match(/shadow/gi);
@@ -931,47 +1015,86 @@ function parseCardSpec(text: string): CardSpec | undefined {
 
 // ─── Badge parsing ───────────────────────────────────────────
 
-function parseBadgeSpec(text: string): BadgeSpec | undefined {
-  const badgeSection = text.match(/###\s*(?:Badges?|Tags?|Pills?)\b([\s\S]*?)(?=###|$)/i);
-  if (!badgeSection) return undefined;
-  const block = badgeSection[1];
+function parseBadgeSpec(fullText: string, fallbackLayout?: DesignSystemLayout, fallbackColors?: DesignSystemColors): BadgeSpec | undefined {
+  const block = findComponentBlock(fullText, ['badge', 'tag', 'pill', 'chip', 'label']) ?? fullText;
 
   // Take the first variant block
   const firstVariant = block.match(/\*\*([^*]+)\*\*([\s\S]*?)(?=\*\*|$)/);
   const varBlock = firstVariant ? firstVariant[2] : block;
 
-  const badge: BadgeSpec = { borderRadius: extractRadius(varBlock) ?? 4 };
+  const badge: BadgeSpec = { borderRadius: extractRadius(varBlock) ?? extractRadius(block) ?? 4 };
+  if (!extractRadius(varBlock) && !extractRadius(block) && fallbackLayout) {
+    // Small-scale radius for badges
+    const scale = fallbackLayout.borderRadiusScale.filter(r => r >= 2 && r < 100);
+    if (scale.length > 0) badge.borderRadius = scale[0];
+  }
+
   const bg = varBlock.match(/background[:\s]*`?([^`\n]+)`?/i);
   if (bg) badge.background = extractColor(bg[1]) ?? undefined;
-  const color = varBlock.match(/^-\s*text[:\s]*`?([^`\n]+)`?/im);
+  if (!badge.background && fallbackColors) {
+    badge.background = fallbackColors.accent ?? fallbackColors.roles.get('accent') ?? fallbackColors.primary;
+  }
+
+  const color = varBlock.match(/(?:^|\n)\s*-\s*text[:\s]*`?([^`\n]+)`?/i);
   if (color) badge.color = extractColor(color[1]) ?? undefined;
-  const font = varBlock.match(/font[:\s]*(\d+)\s*px/i);
+  if (!badge.color && fallbackColors) {
+    badge.color = fallbackColors.background ?? fallbackColors.roles.get('background');
+  }
+
+  const font = varBlock.match(/(?:font|size)[:\s]*(\d+)\s*px/i);
   if (font) badge.fontSize = parseNumber(font[1]) ?? undefined;
+  if (!badge.fontSize) badge.fontSize = 11;
+
   const fw = varBlock.match(/weight\s*(\d{3})/i);
   if (fw) badge.fontWeight = parseNumber(fw[1]) ?? undefined;
+  if (!badge.fontWeight) badge.fontWeight = 600;
+
   const pad = extractPadding(varBlock);
-  if (pad.paddingX != null) badge.paddingX = pad.paddingX;
-  if (pad.paddingY != null) badge.paddingY = pad.paddingY;
+  badge.paddingX = pad.paddingX ?? 8;
+  badge.paddingY = pad.paddingY ?? 2;
 
   return badge;
 }
 
 // ─── Input parsing ───────────────────────────────────────────
 
-function parseInputSpec(text: string): InputSpec | undefined {
-  const inputSection = text.match(/###\s*(?:Inputs?|Forms?)\b([\s\S]*?)(?=###|$)/i);
-  if (!inputSection) return undefined;
-  const block = inputSection[1];
+function parseInputSpec(fullText: string, fallbackLayout?: DesignSystemLayout, fallbackColors?: DesignSystemColors): InputSpec | undefined {
+  const block = findComponentBlock(fullText, ['input', 'form', 'field', 'search', 'textarea']) ?? fullText;
 
   const input: InputSpec = { borderRadius: extractRadius(block) ?? 4 };
+  if (!extractRadius(block) && fallbackLayout) {
+    const scale = fallbackLayout.borderRadiusScale.filter(r => r >= 2 && r <= 50);
+    if (scale.length > 0) input.borderRadius = scale[Math.min(1, scale.length - 1)];
+  }
+
   const border = block.match(/border[:\s]*`?([^`\n]+)`?/i);
   if (border) input.borderColor = extractColor(border[1]) ?? undefined;
+  if (!input.borderColor && fallbackColors) {
+    // Pick a neutral border from roles
+    input.borderColor = fallbackColors.roles.get('border')
+      ?? fallbackColors.roles.get('border-gray')
+      ?? fallbackColors.roles.get('separator')
+      ?? undefined;
+  }
+
   const font = block.match(/(?:font|label|text)[:\s]*.*?(\d+)\s*px/i);
   if (font) input.fontSize = parseNumber(font[1]) ?? undefined;
+  if (!input.fontSize) input.fontSize = 14;
+
   const height = block.match(/height[:\s]*(\d+)\s*px/i);
   if (height) input.height = parseNumber(height[1]) ?? undefined;
+  if (!input.height) input.height = 44; // WCAG touch target
+
   const bg = block.match(/background[:\s]*`?([^`\n]+)`?/i);
   if (bg) input.background = extractColor(bg[1]) ?? undefined;
+  if (!input.background && fallbackColors) {
+    input.background = fallbackColors.roles.get('surface')
+      ?? fallbackColors.background;
+  }
+
+  const pad = extractPadding(block);
+  if (pad.paddingX != null) input.paddingX = pad.paddingX;
+  if (input.paddingX == null) input.paddingX = 12;
 
   // Focus state
   const focusBorder = block.match(/focus[:\s]*`?([^`\n]+)`?/i);
@@ -983,20 +1106,29 @@ function parseInputSpec(text: string): InputSpec | undefined {
 
 // ─── Nav parsing ─────────────────────────────────────────────
 
-function parseNavSpec(text: string): NavSpec | undefined {
-  const navSection = text.match(/###\s*Navigation\b([\s\S]*?)(?=###|$)/i);
-  if (!navSection) return undefined;
-  const block = navSection[1];
+function parseNavSpec(fullText: string, fallbackColors?: DesignSystemColors): NavSpec | undefined {
+  const block = findComponentBlock(fullText, ['navigation', 'nav', 'navbar', 'header', 'topbar']) ?? fullText;
 
   const nav: NavSpec = {};
-  const height = block.match(/height[:\s]*(\d+)\s*px/i);
+  const height = block.match(/(?:nav|header|topbar)[^.\n]*?height[:\s]*(\d+)\s*px/i)
+    || block.match(/height[:\s]*(\d+)\s*px/i);
   if (height) nav.height = parseNumber(height[1]) ?? undefined;
+  if (!nav.height) nav.height = 64;
+
   const bg = block.match(/background[:\s]*`?([^`\n]+)`?/i);
   if (bg) nav.background = extractColor(bg[1]) ?? undefined;
-  const font = block.match(/(\d+)\s*px/i);
+  if (!nav.background && fallbackColors) {
+    nav.background = fallbackColors.background ?? fallbackColors.roles.get('background');
+  }
+
+  const font = block.match(/(\d+)\s*px/);
   if (font) nav.fontSize = parseNumber(font[1]) ?? undefined;
+  if (!nav.fontSize) nav.fontSize = 14;
+
   const fw = block.match(/weight\s*(\d{3})/i);
   if (fw) nav.fontWeight = parseNumber(fw[1]) ?? undefined;
+  if (!nav.fontWeight) nav.fontWeight = 500;
+
   if (/underline|border-bottom/i.test(block)) nav.activeIndicator = 'underline';
   else if (/bold|font-weight.*700/i.test(block)) nav.activeIndicator = 'bold';
   else if (/dot\b/i.test(block)) nav.activeIndicator = 'dot';
@@ -1006,15 +1138,24 @@ function parseNavSpec(text: string): NavSpec | undefined {
 
 // ─── Unified component parser ────────────────────────────────
 
-function parseComponents(section: Section | undefined): DesignSystemComponents {
-  if (!section) return {};
-  const text = section.body;
+/**
+ * Parse component specs from the full DESIGN.md markdown. Unlike the older
+ * variant that only looked inside a single "Components" section, this
+ * searches across the entire document for relevant sub-sections (cards
+ * might live under "Cards & Containers", buttons under "Buttons", etc.)
+ * and falls back to defaults from layout/colors when specs are missing.
+ */
+function parseComponents(
+  fullMarkdown: string,
+  fallbackLayout?: DesignSystemLayout,
+  fallbackColors?: DesignSystemColors,
+): DesignSystemComponents {
   return {
-    button: parseButtonSpec(text),
-    card: parseCardSpec(text),
-    badge: parseBadgeSpec(text),
-    input: parseInputSpec(text),
-    nav: parseNavSpec(text),
+    button: parseButtonSpec(fullMarkdown, fallbackLayout, fallbackColors),
+    card: parseCardSpec(fullMarkdown, fallbackLayout, fallbackColors),
+    badge: parseBadgeSpec(fullMarkdown, fallbackLayout, fallbackColors),
+    input: parseInputSpec(fullMarkdown, fallbackLayout, fallbackColors),
+    nav: parseNavSpec(fullMarkdown, fallbackColors),
   };
 }
 
@@ -1419,7 +1560,10 @@ export function parseDesignMd(markdown: string): DesignSystem {
     brand: extractBrand(markdown),
     colors: parsedColors,
     typography: parseTypography(typoSection),
-    components: parseComponents(componentSection),
+    // Pass the FULL markdown so the component parser can find sub-sections
+    // wherever they live (not just under "Components"). Also hand in layout
+    // and colors so missing specs can be filled with brand-appropriate defaults.
+    components: parseComponents(markdown, parsedLayout, parsedColors),
     layout: parsedLayout,
     responsive: parseResponsive(responsiveSection),
     depth: parseDepth(depthSection),

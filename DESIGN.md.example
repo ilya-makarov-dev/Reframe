@@ -1,246 +1,356 @@
 # Design System Inspired by [Brand Name]
 
+> **Template for a reframe-compatible DESIGN.md.**
+> The reframe engine parses this document to drive: audit rules, token
+> generation, semantic rebrand, component inheritance, and the
+> 60-brand catalog. Every section below maps to a specific parser hook.
+> Replace every `[placeholder]` with a concrete value. The more
+> specific, the better the engine's output.
+
+---
+
 ## 1. Visual Theme & Atmosphere
 
-[2-4 paragraphs describing the FEELING of this brand. Not technical — emotional and philosophical. What mood does it create? What personality does it project? What makes it recognizable at a glance?]
+> **Parsed for**: brand identification, AI prompt context. Free prose.
+> Not machine-consumed — but the LLM agent reads this to understand
+> *why* the numeric tokens exist, so write it like a brief, not a spec.
 
-[Describe the color philosophy — why these colors, not just what they are. "warm near-black (#222222) rather than cold pure black" tells the AI both the value AND the intent.]
+[Two or three paragraphs describing the FEELING of this brand. Emotional
+and philosophical, not technical. What mood does it create? What
+personality does it project? What makes it recognizable in a split
+second — before the user reads a single word?]
 
-[Describe the typography voice — "aggressive negative letter-spacing creates compressed, engineered feel" vs "generous tracking feels open and editorial".]
+[Describe the color philosophy with intent, not just values: "warm
+near-black (`#181818`) rather than cold pure black" tells the agent
+both the value AND the reason. Tie color choices to brand psychology.]
 
-**Key Characteristics:**
-- [List 8-12 defining visual traits with exact values in parentheses]
-- [Each trait: what it IS + exact CSS value + WHY it matters]
-- [Include font features if any: 'Custom OpenType "ss01" on all text — alternate letterforms']
+[Describe the typography voice: "aggressively tight letter-spacing
+(-1.4px at 56px) creates engineered compression" vs "generous tracking
+feels open and editorial". Tie every typographic decision to a feeling.]
+
+**Key Characteristics** (8–12 defining traits, each with an exact value):
+- [Trait 1 — what it is, CSS value, why it matters]
+- [Trait 2 — what it is, CSS value, why it matters]
+- [Trait 3 — what it is, CSS value, why it matters]
+- [Continue...]
+
+---
 
 ## 2. Color Palette & Roles
 
+> **Parsed for**: `color.*` token generation, semantic rebrand
+> (heading/paragraph/button/background mapping), audit
+> `color-in-palette` rule. The parser scans this section for
+> `**Label** (\`#hex\`): description` patterns. Use the exact format.
+
 ### Primary
-- **[Brand Color]** (`#hex`): Primary brand color, CTA backgrounds, interactive highlights
-- **[Heading Color]** (`#hex`): Primary heading text — [warm/cold/neutral character]
-- **[Background]** (`#hex`): Page background, primary canvas
+
+- **[Name]** (`#hex`): Primary brand color — CTA backgrounds, interactive highlights. The one color that must not be used for decoration.
+- **Heading** (`#hex`): Primary heading text color. Usually slightly warmer than pure black (`#181818`, `#0a0a0a`) — pure `#000000` is rare in modern brands.
+- **Background** (`#hex`): Page background / primary canvas.
 
 ### Secondary & Accent
-- **[Accent]** (`#hex`): Secondary accent for decorative elements, icons
-- **[Dark Section]** (`#hex`): Immersive dark sections, footer
+
+- **Accent** (`#hex`): Secondary accent — decoration, icons, dividers, subtle highlights.
+- **Dark Surface** (`#hex`): Inverted sections (footer, newsletter strip, feature callout).
 
 ### Interactive
-- **[CTA Color]** (`#hex`): Primary link color, active states
-- **[Hover]** (`#hex`): Hover state for primary elements
-- **[Focus Ring]** (`#hex`): Keyboard focus indicator
+
+- **Primary Interactive** (`#hex`): Link text, active tab underline, focused input border.
+- **Hover** (`#hex`): Hover state for primary elements (usually a ~10% darker shade).
+- **Focus Ring** (`#hex`): Keyboard focus indicator.
 
 ### Text Scale
-- **[Primary Text]** (`#hex`): Headings, strong labels
-- **[Body Text]** (`#hex`): Secondary text, descriptions, captions
-- **[Label]** (`#hex`): Form labels, metadata
-- **[Disabled]** (`rgba(...)`): Disabled/muted text
+
+- **Heading Text** (`#hex`): Primary headings, strong labels.
+- **Body Text** (`#hex`): Secondary text, descriptions, paragraphs.
+- **Label** (`#hex`): Form labels, metadata, captions.
+- **Disabled** (`rgba(…)`): Muted/disabled state text.
 
 ### Surface & Borders
-- **[Surface]** (`#hex`): Cards, elevated containers
-- **[Border Default]** (`#hex`): Standard card/divider borders
-- **[Border Active]** (`#hex`): Active/selected state borders
+
+- **Surface** (`#hex`): Card backgrounds, elevated containers.
+- **Border Default** (`#hex`): Hairline dividers, card edges.
+- **Border Active** (`#hex`): Active/selected element borders.
 
 ### Semantic
-- **[Success]** (`#hex`): Success indicators, positive states
-- **[Warning]** (`#hex`): Warning states, caution
-- **[Error]** (`#hex`): Error states, destructive actions
+
+- **Success** (`#hex`): Positive indicators, confirmations.
+- **Warning** (`#hex`): Caution states, pending operations.
+- **Error** (`#hex`): Destructive actions, errors.
 
 ### Shadow Colors
-- **[Primary Shadow]** (`rgba(...)`): Main shadow color — [describe tinting philosophy]
-- **[Ambient Shadow]** (`rgba(...)`): Soft ambient lift
 
-### Gradient System
-- [Brand Gradient]: `#fromHex` to `#toHex` — [where/how used: hero decorations, backgrounds]
-- [Note if brand avoids gradients: "Flat color only — no UI gradients"]
+- **Primary Shadow** (`rgba(…)`): Main shadow tint — [blue-tinted for cool brands, warm-gray for paper brands, pure black for cinematic].
+- **Ambient Shadow** (`rgba(…)`): Soft ambient lift for subtle elevation.
+
+### Gradient System (optional)
+
+- **[Gradient Name]**: `linear-gradient(135deg, #from, #to)` — [where used: hero decorations, feature backgrounds].
+- Or: "Flat color only — no UI gradients" if the brand avoids them.
+
+---
 
 ## 3. Typography Rules
 
+> **Parsed for**: `type.*` token generation, font-family auto-binding,
+> audit `font-in-palette` rule. Table format below is required — the
+> parser reads each row to build `TypographyRule` entries.
+
 ### Font Family
-- **Primary**: `[FontName]`, fallbacks: `[SystemFont], sans-serif`
-- **Monospace**: `[MonoFont]`, fallbacks: `monospace`
-- **OpenType Features**: `"ss01"` [describe what it does]; `"tnum"` for tabular numerals [where used]
+
+- **Primary**: `[FontName]`, fallbacks: `[SystemFallback], sans-serif`
+- **Monospace**: `[MonoFont]`, fallbacks: `monospace` (optional)
+- **OpenType Features**: `"ss01"` [describe what it alters]; `"tnum"` for tabular numerals (financial data, tables). The engine will emit `font-feature-settings` on every text node when features are declared.
 
 ### Hierarchy
 
-| Role | Font | Size | Weight | Line Height | Letter Spacing | Features | Notes |
-|------|------|------|--------|-------------|----------------|----------|-------|
-| Display Hero | [font] | [N]px | [N] | [N] | -[N]px | [ss01] | [usage context] |
-| Display Large | [font] | [N]px | [N] | [N] | -[N]px | [ss01] | [usage context] |
-| Section Heading | [font] | [N]px | [N] | [N] | -[N]px | [ss01] | [usage context] |
-| Sub-heading | [font] | [N]px | [N] | [N] | -[N]px | [ss01] | [usage context] |
-| Body Large | [font] | [N]px | [N] | [N] | normal | [ss01] | [usage context] |
-| Body | [font] | [N]px | [N] | [N] | normal | [ss01] | [usage context] |
-| Button | [font] | [N]px | [N] | [N] | normal | [ss01] | [usage context] |
-| Caption | [font] | [N]px | [N] | [N] | normal | [ss01] | [usage context] |
-| Disclaimer | [font] | [N]px | [N] | [N] | normal | | [smallest text] |
+| Role      | Font       | Size    | Weight | Line Height | Letter Spacing | Features   | Notes                               |
+|-----------|------------|---------|--------|-------------|----------------|------------|-------------------------------------|
+| hero      | [font]     | 56px    | 700    | 1.05        | -1.4px         | ss01       | Display headline, maximum size      |
+| title     | [font]     | 32px    | 600    | 1.15        | -0.64px        | ss01       | Section headings                    |
+| subtitle  | [font]     | 20px    | 500    | 1.30        | -0.2px         | ss01       | Sub-section, card heading           |
+| body      | [font]     | 16px    | 400    | 1.50        | 0              | ss01       | Paragraphs, reading text            |
+| button    | [font]     | 14px    | 600    | 1.00        | 0              | ss01       | Button labels                       |
+| caption   | [font]     | 13px    | 400    | 1.40        | 0              | ss01       | Metadata, small labels              |
+| disclaimer| [font]     | 11px    | 400    | 1.40        | 0              |            | Fine print, smallest text           |
 
 ### Principles
-- [Explain WHY these weights — e.g. "weight 300 as luxury signal, not convention"]
-- [Explain the letter-spacing philosophy — progressive tightening at larger sizes?]
-- [Note OpenType feature scope: "ss01 on all text, tnum only for financial data"]
+
+- [One sentence on the WHY of the weight system. E.g. "Weight 300 at display sizes is the signature — lightness as luxury."]
+- [Letter-spacing philosophy: "Progressive tightening — tracking scales with size linearly from 0 at 16px to -1.4 at 56px."]
+- [OpenType feature scope: "`ss01` everywhere, `tnum` only on financial/table numerals — never mix."]
+- [Text case rules: "Buttons and nav are uppercase. Everything else is sentence case. Never title case."]
+
+---
 
 ## 4. Component Stylings
 
+> **Parsed for**: `ButtonSpec`, `CardSpec`, `BadgeSpec`, `InputSpec`,
+> `NavSpec` extraction. `applyBrandInheritance()` reads these to
+> replace raw HTML styles with the brand's component recipes. Each
+> sub-section heading must contain the keyword (`### Buttons`,
+> `### Cards & Containers`, `### Badges`, etc.) — the parser uses a
+> line-by-line keyword matcher.
+
 ### Buttons
 
-**Primary**
+**Primary** (the hero CTA — use once per screen)
 - Background: `#hex`
 - Text: `#hex`
-- Padding: [N]px [N]px
-- Radius: [N]px
-- Font: [N]px [font] weight [N], `"ss01"`
-- Hover: `#hoverHex` background
-- Use: Primary CTA ("Get started", "Sign up")
+- Padding: 12px 24px
+- Radius: 8px
+- Font: 14px [font] weight 600, `"ss01"`
+- Min-height: 44px (WCAG touch target)
+- Hover: background `#hoverHex`
+- Use: "Sign up", "Get started", "Buy now"
 
-**Ghost / Outlined**
+**Secondary / Ghost**
 - Background: transparent
 - Text: `#hex`
-- Padding: [N]px [N]px
-- Radius: [N]px
-- Border: `1px solid #hex`
-- Hover: background shifts to `rgba(...)`
-- Use: Secondary actions
+- Border: `1px solid #borderHex`
+- Padding: 12px 24px
+- Radius: 8px
+- Use: "Learn more", "Cancel", secondary actions
 
-**Tertiary / Text**
+**Tertiary / Text link**
 - Background: transparent
 - Text: `#hex`
-- Padding: [N]px [N]px
-- Radius: [N]px
-- Hover: underline or subtle background
-- Use: Low-emphasis actions, links
+- Padding: 8px 12px
+- Hover: underline
+- Use: low-emphasis actions, navigation
 
-**Destructive** (if applicable)
+**Destructive** (optional)
 - Background: `#errorHex`
-- Text: `#hex`
-- Radius: [N]px
-- Use: Delete, remove, cancel
+- Text: `#ffffff`
+- Radius: 8px
+- Use: Delete, remove, "Cannot be undone" actions
 
 ### Cards & Containers
+
 - Background: `#hex`
-- Border: `1px solid #hex`
-- Radius: [N]px (tight), [N]px (standard), [N]px (featured)
-- Shadow: `[full CSS box-shadow values]`
-- Padding: [N]px
-- Hover: shadow intensifies / border color change / slight lift
+- Border: `1px solid #hex` or `none` if elevation alone carries it
+- Radius: 8px (tight) · 12px (standard) · 16px (featured)
+- Shadow: `[full CSS box-shadow, multi-layer preferred]`
+- Padding: 24px
+- Hover: shadow intensifies / border color shifts to accent
 
 ### Badges / Tags / Pills
 
-**[Default Badge]**
-- Background: `#hex` or `rgba(...)`
+**Default**
+- Background: `rgba(…)` or `#hex`
 - Text: `#hex`
-- Padding: [N]px [N]px
-- Radius: [N]px
-- Font: [N]px weight [N]
+- Padding: 4px 10px
+- Radius: 4px (rectangular tag) or 9999px (full pill)
+- Font: 11px weight 600
+
+**Success / Warning / Error** variants follow the same shape, only color shifts.
 
 ### Inputs & Forms
-- Border: `1px solid #hex`
-- Radius: [N]px
-- Height: [N]px
-- Focus: `1px solid #focusHex` or focus ring
-- Label: `#hex`, [N]px [font]
-- Text: `#hex`
-- Placeholder: `#hex`
+
 - Background: `#hex`
+- Border: `1px solid #hex`
+- Radius: 6px
+- Height: 44px (WCAG)
+- Padding: 10px 14px
+- Focus: `1px solid #focusHex`, optional ring
+- Label: `#hex`, 13px [font]
+- Text: `#hex`
+- Placeholder: `#placeholderHex`
 
 ### Navigation
-- Height: [N]px
-- Background: `#hex` [sticky with blur backdrop?]
-- Links: [font] [N]px weight [N], `#hex` text
-- Active indicator: [underline | background | bold | dot]
-- CTA: [describe nav CTA button]
-- Mobile: [hamburger? slide-out? bottom bar?]
+
+- Height: 64px
+- Background: `#hex` (optionally with `backdrop-filter: blur(12px)` when sticky)
+- Links: [font] 14px weight 500, color `#hex`
+- Active indicator: underline | background pill | bold | left-bar
+- Primary CTA: right-aligned, matches Primary button spec
+- Mobile: hamburger → slide-out | bottom bar
 
 ### Image Treatment
-- [Border radius on images: 0px / product images, [N]px editorial]
-- [Aspect ratio guidelines]
-- [Overlay/scrim approach for text on images]
+
+- Border radius on content images: 0px (editorial / photography) or 8px (product cards)
+- Aspect ratios: [4:3 / 16:9 / 1:1 — which and when]
+- Overlay/scrim approach for text on images
+
+---
 
 ## 5. Layout Principles
 
-### Spacing System
-Base unit: [N]px
+> **Parsed for**: `layout.spacingUnit`, `layout.borderRadiusScale`,
+> `layout.sectionPaddingRange`. The spacing system table is required
+> for the audit `spacing-scale` rule to accept non-8px values.
 
-| Token | Value | Use |
-|-------|-------|-----|
-| space-1 | [N]px | [tight gaps, icon spacing] |
-| space-2 | [N]px | [base unit, button icon gaps] |
-| space-3 | [N]px | [compact padding] |
-| space-4 | [N]px | [standard padding, nav spacing] |
-| space-6 | [N]px | [generous padding] |
-| space-8 | [N]px | [section padding] |
-| space-10 | [N]px | [large section spacing] |
+### Spacing System
+
+Base unit: **8px**. Every padding/gap/margin should snap to this scale.
+
+| Token    | Value  | Use                                                    |
+|----------|--------|--------------------------------------------------------|
+| space-0  | 0px    | Flush                                                  |
+| space-1  | 4px    | Icon gaps, tight inline spacing                        |
+| space-2  | 8px    | Base unit, button icon gaps                            |
+| space-3  | 12px   | Compact padding, list item gaps                        |
+| space-4  | 16px   | Standard padding, card gaps                            |
+| space-5  | 24px   | Generous padding, card internal spacing                |
+| space-6  | 32px   | Section internal padding                               |
+| space-8  | 48px   | Section spacing, hero padding vertical                 |
+| space-10 | 64px   | Large section vertical rhythm                          |
+| space-12 | 80px   | Hero vertical padding, major section breaks            |
+| space-16 | 120px  | Marketing-grade hero padding                           |
 
 ### Grid & Container
-- Max content width: [N]px
-- Hero: [describe layout — centered? split? full-bleed?]
-- Feature sections: [N]-column grids
-- Section spacing: [N]px+
+
+- Max content width: 1200px (or 1440px for wide marketing, 960px for editorial)
+- Hero layout: centered single column / split / full-bleed
+- Feature sections: 3-column (desktop) / 2-column (tablet) / 1-column (mobile)
+- Section vertical spacing: 80–120px (desktop), 48–64px (mobile)
 
 ### Whitespace Philosophy
-- [Describe the spacing personality: dense and data-driven? generous and editorial?]
-- [Dark vs light section rhythm]
+
+- [Describe the spacing personality: dense and data-driven? Generous and editorial? Packed and operational? Rare and monumental?]
+- [Dark vs light section cadence: alternating for editorial rhythm, or all-light for calm density]
 
 ### Border Radius Scale
-- Micro ([N]px): [fine elements, subtle rounding]
-- Standard ([N]px): [buttons, inputs, badges — the workhorse]
-- Comfortable ([N]px): [standard cards]
-- Large ([N]px): [featured cards, hero elements]
-- Full (9999px): [pills, avatars, circular controls]
+
+- 0px — sharp edges (Linear, Framer, razor-precision brands)
+- 2px — subtle rounding (Ferrari, Wired)
+- 4px — standard buttons/inputs (Stripe, Apple defaults)
+- 8px — comfortable cards
+- 12px — featured/elevated cards
+- 16px — large cards, hero elements
+- 9999px — full pill (Spotify, pill-based brands)
+- 50% — circular (avatars, icon buttons)
+
+The brand should use 2–4 values from this scale, not all of them.
+
+---
 
 ## 6. Depth & Elevation
 
-| Level | Treatment | Use |
-|-------|-----------|-----|
-| Flat (Level 0) | No shadow | Page background, inline text |
-| Ambient (Level 1) | `[shadow values]` | Subtle card lift, hover hints |
-| Standard (Level 2) | `[shadow values]` | Standard cards, content panels |
-| Elevated (Level 3) | `[multi-layer shadow values]` | Featured cards, dropdowns |
-| Floating (Level 4) | `[shadow values]` | Modals, floating panels |
+> **Parsed for**: `depth.elevationLevels` — shadow stacks applied by
+> `applyBrandInheritance()` to cards, modals, dropdowns.
 
-**Shadow Philosophy**: [How depth works in this brand. Blue-tinted shadows? Luminance stacking for dark themes? Multi-layer parallax? Borders instead of shadows?]
+| Level          | Treatment                       | Use                                                   |
+|----------------|---------------------------------|-------------------------------------------------------|
+| Flat (0)       | No shadow                       | Page background, inline text, section separators      |
+| Ambient (1)    | `[rgba shadow at ~3px blur]`    | Subtle card lift, hover hints                         |
+| Standard (2)   | `[rgba shadow at ~12px blur]`   | Standard cards, content panels                        |
+| Elevated (3)   | `[multi-layer shadow]`          | Featured cards, dropdowns, popovers                   |
+| Floating (4)   | `[deep shadow]`                 | Modals, floating panels                               |
+
+**Shadow Philosophy**: [How does depth work in this brand?]
+- Blue-tinted shadows for cool/fintech brands (Stripe: `rgba(50,50,93,0.25)`)
+- Warm-gray for paper/editorial brands
+- Pure black with high opacity for dark/cinematic brands
+- Hairline borders instead of shadows for flat/minimal brands
+
+---
 
 ## 7. Do's and Don'ts
 
+> **Parsed for**: audit rule hints, agent prompt guidance. Free prose
+> in bullet lists. Every rule should have a WHY, not just a what.
+
 ### Do
-- Use [font] with `"[feature]"` on every text element — [why]
-- Use weight [N] for [purpose] — [why]
-- Apply [shadow color] for all elevated elements — [why]
-- Use `#hex` for headings instead of `#000` — [why]
-- Keep border-radius between [N]-[N]px — [why]
-- [Each rule with WHY — intent, not just instruction]
+
+- Use [font] with `"[feature]"` on every text element — [why it matters to the brand]
+- Use weight [N] for [purpose] — [why this weight specifically]
+- Apply [shadow color] for all elevated elements — [why this tint]
+- Use `#hex` for headings instead of `#000000` — [why warmer/cooler matters]
+- Keep border-radius between [N]–[N]px — [what this range communicates]
+- [Add 5–10 more rules with intent, not just instructions]
 
 ### Don't
-- Don't use weight [N] for [context] — [what to use instead]
-- Don't use [color] for [purpose] — [why and alternative]
-- Don't skip `"[feature]"` on text — [consequence]
-- Don't use [radius]px on [element type] — [brand reasoning]
-- [Each anti-pattern with consequence and alternative]
+
+- Don't use weight [N] for [context] — [what to use instead and why]
+- Don't use [color] decoratively — [it's a functional signal, not an ornament]
+- Don't skip `"[OpenType feature]"` on text — [what the glyphs should look like]
+- Don't use [radius]px on [element type] — [the brand's typographic DNA]
+- Don't stack [decorative element] over [content element] — [the reading order breaks]
+- [Add 5–10 more anti-patterns with consequences]
+
+---
 
 ## 8. Responsive Behavior
 
+> **Parsed for**: `responsive.breakpoints`, `responsive.typographyOverrides`.
+> Used by resize pipeline to adapt scenes to target viewports.
+
 ### Breakpoints
-| Name | Width | Key Changes |
-|------|-------|-------------|
-| Mobile | <[N]px | Single column, reduced heading sizes |
-| Tablet | [N]-[N]px | 2-column grids, moderate padding |
-| Desktop | [N]-[N]px | Full layout, 3-column feature grids |
-| Large Desktop | >[N]px | Centered content with generous margins |
+
+| Name          | Width           | Key Changes                                          |
+|---------------|-----------------|------------------------------------------------------|
+| Mobile        | <640px          | Single column, heading sizes reduced by ~40%         |
+| Tablet        | 640–1024px      | 2-column grids, moderate padding                     |
+| Desktop       | 1024–1280px     | Full layout, 3-column feature grids                  |
+| Large Desktop | >1280px         | Centered content with generous margins               |
 
 ### Touch Targets
-- Buttons: [N]px minimum height, [N]px padding
-- Navigation links: adequate spacing for touch
-- Mobile nav toggle with [N]px radius
+
+- Buttons: minimum 44×44px (WCAG AAA)
+- Nav links: adequate spacing for touch, minimum 32px tap area
+- Form inputs: 44px height
 
 ### Collapsing Strategy
-- Hero: [N]px display -> [N]px on mobile, weight maintained
-- Navigation: horizontal -> hamburger toggle
-- Cards: 3-col -> 2-col -> 1-col stacked
-- Section spacing: [N]px+ -> [N]px on mobile
-- Typography scale: [N]px -> [N]px -> [N]px across breakpoints
+
+- Hero: [56px → 32px] mobile display, weight maintained
+- Nav: horizontal → hamburger / bottom bar
+- Feature cards: 3-col → 2-col → 1-col stacked
+- Section padding: 120px → 48px on mobile
+- Typography scale compresses: 56 / 48 / 32 px across breakpoints
+
+---
 
 ## 9. Agent Prompt Guide
 
+> **Parsed for**: Nothing structural — this section is a direct-to-agent
+> brief. When the reframe engine asks an LLM to generate new HTML for
+> this brand, it reads this section as context. Write it as if briefing
+> a designer who has never seen the brand.
+
 ### Quick Color Reference
+
 - Primary CTA: [Name] (`#hex`)
 - CTA Hover: [Name] (`#hex`)
 - Background: [Name] (`#hex`)
@@ -251,19 +361,45 @@ Base unit: [N]px
 - Link: [Name] (`#hex`)
 - Dark section: [Name] (`#hex`)
 - Success: (`#hex`)
+- Warning: (`#hex`)
 - Error: (`#hex`)
 
 ### Example Component Prompts
-- "Create a hero section on [bg] background. Headline at [N]px [font] weight [N], line-height [N], letter-spacing -[N]px, color #hex, font-feature-settings '[tag]'. Subtitle at [N]px weight [N], color #hex. [Primary] CTA button (#hex, [N]px radius, [N]px [N]px padding, white text) and [ghost] button (transparent, 1px solid #hex, #hex text)."
-- "Design a card: [bg] background, 1px solid #hex border, [N]px radius. Shadow: [values]. Title at [N]px weight [N], color #hex, '[tag]'. Body at [N]px, #hex."
-- "Build a badge: [bg] background, #hex text, [N]px radius, [N]px [N]px padding, [N]px weight [N]."
-- "Create navigation: [bg] sticky header. [font] [N]px weight [N] for links, #hex text, '[tag]'. [Primary] CTA right-aligned."
+
+Use these as starting points when asking the agent to author HTML in this brand:
+
+- **Hero**: "Create a hero section on `#bg` background. Headline at 56px [font] weight 700, line-height 1.05, letter-spacing -1.4px, color `#hex`, font-feature-settings `'ss01'`. Subtitle at 20px weight 400, line-height 1.30, color `#hex`. Primary CTA (`#hex` bg, 12px 24px padding, 8px radius, white text) and Ghost button (transparent, 1px `#hex` border, `#hex` text). 120px vertical padding."
+- **Feature card**: "Card with `#hex` background, 1px solid `#hex` border, 12px radius, 24px padding. Shadow: `[values]`. Title at 20px weight 600, color `#hex`, `'ss01'`. Body at 16px weight 400, color `#hex`, line-height 1.50."
+- **Badge**: "Pill badge: `rgba(…)` background, `#hex` text, 4px 10px padding, 9999px radius, 11px weight 600 uppercase."
+- **Nav**: "Sticky header at 64px height, `#hex` background with `backdrop-filter: blur(12px)`. [font] 14px weight 500 links in `#hex`. Primary CTA `Sign up` on the right with `#hex` background."
 
 ### Iteration Guide
-1. Always enable `font-feature-settings: "[tags]"` on [font] text — brand typographic DNA
-2. Weight [N] is the default; use [N] only for [context]
-3. Shadow formula: [describe multi-layer approach]
-4. Heading color is `#hex`, body is `#hex`, labels are `#hex`
-5. Border-radius stays in [N]-[N]px range — [reasoning]
-6. Spacing snaps to the scale: [list key values]
-7. Dark sections use `#hex` — not black, not gray, branded
+
+When the agent refines an existing design in this brand:
+
+1. **Always enable** `font-feature-settings: "[tags]"` on all text elements — this is the brand's typographic DNA and non-negotiable.
+2. **Weight [N] is the default**; weight [N] is reserved for [specific context].
+3. **Shadow formula**: [describe the multi-layer approach and tint rationale].
+4. **Heading color is `#hex`** (not `#000000`), body is `#hex`, labels are `#hex`.
+5. **Border-radius stays in the [N]–[N]px range** — [why this range communicates the brand].
+6. **Spacing snaps to the scale**: [list the 4–5 most-used values from the spacing table].
+7. **Dark sections use `#hex`** — not `#000000`, not `#1a1a1a`, the branded specific value.
+8. **The `[accent]` color appears at most [N] times per screen** — its rarity is its power.
+9. **Never mix [feature A] with [feature B]** — [the brand-specific incompatibility].
+10. **When in doubt, refuse to decorate** — [the brand's minimal/maximal posture].
+
+---
+
+> **Checklist before saving as `brands/<slug>/DESIGN.md`:**
+> - [ ] Every `[placeholder]` replaced with a concrete value
+> - [ ] At least 8 color roles in §2 with bold labels and backtick hex values
+> - [ ] Typography hierarchy table has ≥6 rows (hero, title, subtitle, body, button, caption)
+> - [ ] §4 has Buttons, Cards, Badges, Inputs, Navigation — each with keyword in the heading
+> - [ ] §5 has a spacing table with at least 8 tokens
+> - [ ] §6 has an elevation table with at least 3 levels
+> - [ ] §7 Do's/Don'ts have ≥10 rules each, each with WHY
+> - [ ] §9 Quick Color Reference matches §2 exactly (same hex values)
+>
+> Run `reframe_design({ action: 'extract', brand: '<slug>' })` after
+> saving to verify the parser picks up all sections. The agent will
+> report `0 colors, 0 numbers` if structural fields didn't parse.

@@ -17,6 +17,9 @@ export type {
 // Easing
 export { resolveEasing, easingToCss } from './easing.js';
 
+// Phase 5: CSS emission
+export { timelineToCss, type TimelineCss } from './to-css.js';
+
 // Timeline engine
 export {
   computeDuration,

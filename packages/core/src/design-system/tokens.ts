@@ -509,6 +509,310 @@ export function autoBindTokensFromGraph(
   return bound;
 }
 
+// ─── Semantic rebrand ───────────────────────────────────────
+
+// Luminance (WCAG 2.1 relative luminance)
+function channelLuminance(c: number): number {
+  return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+function relativeLuminance(c: Color): number {
+  return 0.2126 * channelLuminance(c.r) + 0.7152 * channelLuminance(c.g) + 0.0722 * channelLuminance(c.b);
+}
+function contrastRatio(a: Color, b: Color): number {
+  const la = relativeLuminance(a) + 0.05;
+  const lb = relativeLuminance(b) + 0.05;
+  return la > lb ? la / lb : lb / la;
+}
+function isDark(c: Color): boolean {
+  return relativeLuminance(c) < 0.2;
+}
+
+/**
+ * Role-based semantic mapping: SemanticRole → token names.
+ * Each role has a "light" and "dark" variant — the engine picks
+ * based on scene polarity so text always contrasts with backgrounds.
+ */
+interface RoleColorMapping {
+  /** Fill token for light-themed scenes */
+  fill?: string;
+  /** Text token candidates — best contrast wins */
+  textCandidates: string[];
+  /** Fill is an accent/interactive color (always applied regardless of polarity) */
+  accentFill?: boolean;
+}
+
+const ROLE_MAPPINGS: Record<string, RoleColorMapping> = {
+  // Structure — backgrounds adapt to polarity
+  section:  { fill: 'color.background', textCandidates: ['color.text', 'color.background'] },
+  hero:     { fill: 'color.background', textCandidates: ['color.text', 'color.background'] },
+  header:   { fill: 'color.background', textCandidates: ['color.text', 'color.background'] },
+  footer:   { fill: 'color.background', textCandidates: ['color.text', 'color.background'] },
+  nav:      { fill: 'color.background', textCandidates: ['color.text', 'color.background'] },
+  sidebar:  { fill: 'color.background', textCandidates: ['color.text', 'color.background'] },
+  main:     { fill: 'color.background', textCandidates: ['color.text', 'color.background'] },
+  card:     { fill: 'color.surface',    textCandidates: ['color.text', 'color.background'] },
+  modal:    { fill: 'color.surface',    textCandidates: ['color.text', 'color.background'] },
+  toast:    { fill: 'color.surface',    textCandidates: ['color.text', 'color.background'] },
+
+  // Interactive — accent fill always applies
+  button:   { fill: 'color.primary',    textCandidates: ['color.on-primary', 'color.background', 'color.text'], accentFill: true },
+  cta:      { fill: 'color.primary',    textCandidates: ['color.on-primary', 'color.background', 'color.text'], accentFill: true },
+  link:     { textCandidates: ['color.primary'] },
+
+  // Text — no fill, contrast-aware text
+  heading:  { textCandidates: ['color.text', 'color.background'] },
+  paragraph:{ textCandidates: ['color.text', 'color.background'] },
+  label:    { textCandidates: ['color.text-secondary', 'color.text', 'color.background'] },
+  caption:  { textCandidates: ['color.text-secondary', 'color.text', 'color.background'] },
+
+  // Components — accent fill always applies
+  badge:    { fill: 'color.accent',     textCandidates: ['color.on-accent', 'color.background', 'color.text'], accentFill: true },
+  tag:      { fill: 'color.accent',     textCandidates: ['color.on-accent', 'color.background', 'color.text'], accentFill: true },
+  input:    { fill: 'color.surface',    textCandidates: ['color.text', 'color.background'] },
+  divider:  { fill: 'color.border',     textCandidates: [] },
+};
+
+/**
+ * Rebrand a scene by mapping semantic roles → brand color tokens.
+ *
+ * Unlike `autoBindTokensFromGraph` (which matches by current value),
+ * this function OVERWRITES fills and text colors based on what the
+ * node IS (its semanticRole). This is the engine behind "change brand
+ * with one button".
+ *
+ * Contrast-aware strategy:
+ *  1. Detect scene polarity (dark vs light) from root background.
+ *  2. Detect brand polarity from color.background token.
+ *  3. If polarities conflict (dark scene + light brand), skip structure
+ *     fill changes — only apply accent/interactive colors. This preserves
+ *     the scene's visual character while injecting brand identity.
+ *  4. For every TEXT node, pick the text color candidate with the best
+ *     contrast against the node's effective background (walking up ancestors).
+ *  5. If no candidate achieves 3:1 contrast, auto-correct toward
+ *     white or black (whichever is closer to the brand's text color).
+ *
+ * Returns the number of properties rebranded.
+ */
+export function rebrandColorsFromTokens(
+  graph: SceneGraph,
+  rootId: string,
+  index: TokenIndex,
+): number {
+  let rebranded = 0;
+
+  // ── Resolve helpers ──────────────────────────────────────────
+
+  function resolveColor(tokenName: string): { color: Color; varId: string } | undefined {
+    const varId = index.tokens.get(tokenName);
+    if (varId) {
+      const val = graph.resolveVariable(varId);
+      if (val && typeof val === 'object' && 'r' in val) {
+        return { color: val as Color, varId };
+      }
+    }
+    return undefined;
+  }
+
+  const FALLBACKS: Record<string, string[]> = {
+    'color.surface':        ['color.background'],
+    'color.on-primary':     ['color.background', 'color.text'],
+    'color.on-accent':      ['color.background', 'color.text'],
+    'color.text-secondary': ['color.text'],
+    'color.border':         ['color.text-secondary', 'color.text'],
+  };
+
+  function resolveWithFallback(tokenName: string): { color: Color; varId: string } | undefined {
+    const direct = resolveColor(tokenName);
+    if (direct) return direct;
+    const fallbacks = FALLBACKS[tokenName];
+    if (fallbacks) {
+      for (const fb of fallbacks) {
+        const result = resolveColor(fb);
+        if (result) return result;
+      }
+    }
+    return undefined;
+  }
+
+  // ── Polarity detection ───────────────────────────────────────
+
+  const root = graph.getNode(rootId);
+  const rootFills = root ? (root as any).fills as any[] | undefined : undefined;
+  const rootBg: Color = (rootFills?.[0]?.type === 'SOLID' && rootFills[0].color)
+    ? rootFills[0].color
+    : { r: 1, g: 1, b: 1, a: 1 }; // assume white if no fill
+  const sceneDark = isDark(rootBg);
+
+  const brandBg = resolveColor('color.background');
+  const brandDark = brandBg ? isDark(brandBg.color) : false;
+
+  // Polarity match: scene and brand are same theme (both dark or both light).
+  // When mismatched, we skip structural fill changes to preserve the scene's
+  // visual character — only accent colors and contrast-corrected text apply.
+  const polarityMatch = sceneDark === brandDark;
+
+  // ── Effective background lookup ──────────────────────────────
+
+  /** Walk ancestors (starting from parent) to find the nearest solid fill.
+   * Skip the node itself — for TEXT nodes, fills[0] IS the text color,
+   * not the background. We need the ancestor's fill for contrast calculation. */
+  function getEffectiveBackground(nodeId: string): Color {
+    const startNode = graph.getNode(nodeId);
+    if (!startNode) return rootBg;
+    let current: string | undefined = (startNode as any).parentId as string | undefined;
+    while (current) {
+      const n = graph.getNode(current);
+      if (!n) break;
+      const fills = (n as any).fills as any[] | undefined;
+      if (Array.isArray(fills) && fills.length > 0 && fills[0]?.type === 'SOLID' && fills[0]?.color) {
+        const c = fills[0].color as Color;
+        // Skip nearly transparent fills
+        if ((c.a ?? 1) > 0.5) return c;
+      }
+      // Walk up — parentId is available on INode
+      const parentId = (n as any).parentId as string | undefined;
+      if (!parentId || parentId === current) break;
+      current = parentId;
+    }
+    return rootBg; // fallback to root
+  }
+
+  // ── Apply fill ───────────────────────────────────────────────
+
+  function applyFill(nodeId: string, tokenName: string): Color | undefined {
+    const resolved = resolveWithFallback(tokenName);
+    if (!resolved) return undefined;
+    const node = graph.getNode(nodeId);
+    if (!node) return undefined;
+    const fills = (node as any).fills as any[] | undefined;
+    if (Array.isArray(fills) && fills.length > 0 && fills[0]?.type === 'SOLID') {
+      fills[0].color = { ...resolved.color };
+      graph.bindVariable(nodeId, 'fills[0].color', resolved.varId);
+      rebranded++;
+      return resolved.color;
+    }
+    return undefined;
+  }
+
+  // ── Apply text with contrast awareness ───────────────────────
+
+  /**
+   * Pick the best text color from candidates, maximizing contrast
+   * against the effective background. If no candidate achieves 3:1,
+   * auto-correct toward white (on dark bg) or black (on light bg).
+   */
+  function applyTextContrastAware(nodeId: string, candidates: string[]): void {
+    const node = graph.getNode(nodeId);
+    if (!node || node.type !== 'TEXT') return;
+    const fills = (node as any).fills as any[] | undefined;
+    if (!Array.isArray(fills) || fills.length === 0 || fills[0]?.type !== 'SOLID') return;
+
+    const bg = getEffectiveBackground(nodeId);
+
+    // Evaluate all candidates, pick best contrast
+    let best: { color: Color; varId: string; contrast: number } | undefined;
+    for (const tokenName of candidates) {
+      const resolved = resolveWithFallback(tokenName);
+      if (!resolved) continue;
+      const cr = contrastRatio(resolved.color, bg);
+      if (!best || cr > best.contrast) {
+        best = { color: resolved.color, varId: resolved.varId, contrast: cr };
+      }
+    }
+
+    if (!best) return;
+
+    // If best contrast is too low, auto-correct toward white or black
+    let finalColor = best.color;
+    let finalVarId = best.varId;
+
+    if (best.contrast < 3) {
+      // Determine correction target: white on dark bg, black on light bg
+      const bgDark = isDark(bg);
+      const corrected: Color = bgDark
+        ? { r: 1, g: 1, b: 1, a: 1 }       // white
+        : { r: 0, g: 0, b: 0, a: 1 };      // black
+
+      // Check if any token matches the correction direction better
+      const correctedCr = contrastRatio(corrected, bg);
+      if (correctedCr > best.contrast) {
+        // Try to find a token that's close to the correction target
+        // (prefer brand token over raw white/black)
+        const altTokens = bgDark
+          ? ['color.background', 'color.text']  // on dark bg, try background (often white)
+          : ['color.text', 'color.background']; // on light bg, try text (often dark)
+        let foundBetter = false;
+        for (const alt of altTokens) {
+          const resolved = resolveWithFallback(alt);
+          if (!resolved) continue;
+          const cr = contrastRatio(resolved.color, bg);
+          if (cr >= 3 && cr > best.contrast) {
+            finalColor = resolved.color;
+            finalVarId = resolved.varId;
+            foundBetter = true;
+            break;
+          }
+        }
+        if (!foundBetter) {
+          // No brand token works — use raw white/black but still bind
+          // to the closest token for mode-switching support
+          finalColor = corrected;
+          // Keep the original varId for binding
+        }
+      }
+    }
+
+    fills[0].color = { ...finalColor };
+    graph.bindVariable(nodeId, 'fills[0].color', finalVarId);
+    rebranded++;
+  }
+
+  // ── Default text candidates for unclassified nodes ─────────
+
+  const DEFAULT_TEXT_CANDIDATES = ['color.text', 'color.background'];
+
+  // ── Main walk ────────────────────────────────────────────────
+
+  function walk(nodeId: string) {
+    const node = graph.getNode(nodeId);
+    if (!node) return;
+
+    const role = (node as any).semanticRole as string | null;
+    if (role && ROLE_MAPPINGS[role]) {
+      const mapping = ROLE_MAPPINGS[role];
+
+      // Apply fill color (background)
+      if (mapping.fill) {
+        if (mapping.accentFill) {
+          // Accent/interactive fills always apply (buttons, badges, CTAs)
+          applyFill(nodeId, mapping.fill);
+        } else if (polarityMatch) {
+          // Structure fills only when polarity matches (both dark or both light)
+          applyFill(nodeId, mapping.fill);
+        }
+        // When polarity mismatches, skip structure fills — preserve scene character
+      }
+
+      // Apply text color — always contrast-aware
+      if (mapping.textCandidates.length > 0) {
+        applyTextContrastAware(nodeId, mapping.textCandidates);
+      }
+    } else if (node.type === 'TEXT') {
+      // Unclassified text nodes: still apply contrast-aware text coloring.
+      // Without this, autoBindTokensFromGraph may have bound their fills
+      // to a wrong-polarity color token (e.g. dark token on dark background),
+      // producing invisible text. We fix that by evaluating all main text
+      // token candidates and picking the one with best contrast.
+      applyTextContrastAware(nodeId, DEFAULT_TEXT_CANDIDATES);
+    }
+
+    for (const childId of node.childIds) walk(childId);
+  }
+
+  walk(rootId);
+  return rebranded;
+}
+
 // ─── Switch mode ────────────────────────────────────────────
 
 /**

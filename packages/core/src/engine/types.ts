@@ -161,7 +161,7 @@ export interface StyleRun {
 
 export type LayoutMode = 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'GRID';
 export type LayoutWrap = 'NO_WRAP' | 'WRAP';
-export type LayoutAlign = 'MIN' | 'CENTER' | 'MAX' | 'SPACE_BETWEEN';
+export type LayoutAlign = 'MIN' | 'CENTER' | 'MAX' | 'SPACE_BETWEEN' | 'SPACE_AROUND';
 export type LayoutCounterAlign = 'MIN' | 'CENTER' | 'MAX' | 'STRETCH' | 'BASELINE';
 export type LayoutSizing = 'FIXED' | 'HUG' | 'FILL';
 export type LayoutAlignSelf = 'AUTO' | 'MIN' | 'CENTER' | 'MAX' | 'STRETCH' | 'BASELINE';
@@ -383,6 +383,80 @@ export interface SceneNode {
   isDefaultVariant: boolean;
   boundVariables: Record<string, string>;
   internalOnly: boolean;
+
+  // Source provenance — tracks where this node came from (HTML tag, class, etc.)
+  // Populated by importers so agents, audits, exporters can reason about original intent.
+  meta: NodeMeta;
+}
+
+/**
+ * Source provenance for a SceneNode. Empty object `{}` when the node has no origin metadata.
+ * Populated by importers (HTML, SVG, Figma) to preserve the author's original intent
+ * through the compile → edit → export pipeline.
+ */
+export interface NodeMeta {
+  /** Original source tag — e.g. 'button', 'section', 'h1'. Set by HTML importer. */
+  sourceTag?: string;
+  /** Space-separated class attribute from source. */
+  sourceClass?: string;
+  /** id attribute from source. */
+  sourceId?: string;
+  /** The stable DOM path used to derive a deterministic node id, e.g. 'body/div[0]/section[2]/h1[0]'. */
+  sourcePath?: string;
+  /** Arbitrary data-* attributes preserved verbatim. Excludes internal reframe bookkeeping attrs. */
+  sourceData?: Record<string, string>;
+  /** Semantic variant hint (e.g. 'primary', 'outline') — from class name or data-reframe-variant. */
+  variant?: string;
+  /** True when this node was created synthetically by the importer (e.g. promoted wrapper frame). */
+  synthetic?: boolean;
+  /**
+   * Design token bindings discovered by autoBindTokens. Keys are SceneNode
+   * properties (fill, stroke, fontSize, fontFamily, cornerRadius), values are
+   * DesignSystem token paths ("primary", "heading", "accent"). When present,
+   * exporters can emit `var(--color-primary)` instead of the hardcoded hex —
+   * changing a single DESIGN.md token then re-skins the entire project.
+   */
+  tokenBindings?: TokenBindings;
+
+  // ── Project-as-INode metadata ──────────────────────────────
+  // Used when the project manifest itself is stored as a SceneGraph.
+  // Scene-ref nodes in the project graph carry these fields.
+
+  /** Scene slug (filesystem-safe persistent key). */
+  slug?: string;
+  /** Monotonic revision counter. */
+  revision?: number;
+  /** Source HTML path relative to .reframe/ (e.g. "src/home.html"). */
+  source?: string;
+  /** Brand slug this scene was compiled against. */
+  brand?: string;
+  /** DESIGN.md content hash at last compile. */
+  brandHash?: string;
+  /** Organizational group (e.g. "site", "app", "email"). */
+  group?: string;
+  /** Arbitrary tags for filtering. */
+  tags?: string[];
+  /** Node count in the referenced scene. */
+  nodeCount?: number;
+  /** When set, this is a responsive variant of another scene. */
+  variantOf?: string;
+  /** Brand registry label. */
+  brandLabel?: string;
+  /** ISO date for registry entries. */
+  registeredAt?: string;
+}
+
+export interface TokenBindings {
+  /** Solid fill → color role ("primary", "background", "cta", ...). */
+  fill?: string;
+  /** Stroke → color role. */
+  stroke?: string;
+  /** Text fontSize → typography hierarchy role ("hero", "title", "body", ...). */
+  fontSize?: string;
+  /** Text fontFamily → "primary" | "secondary". */
+  fontFamily?: string;
+  /** cornerRadius → index in designSystem.layout.borderRadiusScale (stringified). */
+  cornerRadius?: string;
 }
 
 // ─── Semantic Layer ────────────────────────────────────────────

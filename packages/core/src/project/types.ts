@@ -90,6 +90,38 @@ export interface SceneEntry {
   /** Source HTML path relative to .reframe/ (e.g. "src/home.html") */
   source?: string;
   /**
+   * Monotonically-increasing mutation counter. Bumped on every saveScene call
+   * (including re-compile), so Studio/MCP listeners can detect whether a scene
+   * has changed since their last read without diffing the full graph. Starts
+   * at 1 on first save.
+   */
+  revision?: number;
+  /**
+   * Phase 4: when set, this entry is a responsive/sized variant of another
+   * scene. The value is the base scene's slug. Variants are auto-generated
+   * by running the resize pipeline on a base at a target viewport and saved
+   * as separate scene files so they can be exported independently while
+   * still being refreshed from the base on every re-compile.
+   *
+   * A base scene has this field unset; a mobile variant of "hero" has
+   * `variantOf: "hero"`.
+   */
+  variantOf?: string;
+  /**
+   * Phase 4: target viewport this variant was generated at. Required when
+   * `variantOf` is set — without it we'd have no way to re-run adapt() on
+   * refresh. Base scenes leave this unset and use their own width/height as
+   * the canonical dimensions.
+   */
+  viewport?: {
+    /** Human-readable name used as the filename suffix (e.g. "mobile", "tablet"). */
+    name: string;
+    /** Target width in px. */
+    width: number;
+    /** Target height in px. */
+    height: number;
+  };
+  /**
    * Brand slug this scene was designed/compiled against. Resolves via
    * {@link ProjectManifest.brands}. When absent, falls back to
    * {@link ProjectManifest.activeBrand}.

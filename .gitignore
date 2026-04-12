@@ -1,17 +1,18 @@
-# Dependencies
+# ─── Dependencies ─────────────────────────────────────────
 node_modules/
 
-# Build output
+# ─── Build output ─────────────────────────────────────────
 dist/
 build/
 *.tsbuildinfo
 
-# Logs
+# ─── Logs ────────────────────────────────────────────────
 logs/
 *.log
 npm-debug.log*
+yarn-error.log*
 
-# Environment & secrets (never commit)
+# ─── Environment & secrets (never commit) ───────────────
 .env
 .env.*
 !.env.example
@@ -21,7 +22,7 @@ npm-debug.log*
 **/credentials.json
 **/*-credentials.json
 
-# IDEs & editors
+# ─── IDEs & editors ──────────────────────────────────────
 .vscode/
 .idea/
 .cursor/
@@ -30,38 +31,66 @@ npm-debug.log*
 *.swo
 *~
 
-# OS
+# ─── OS ──────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Test output
+# ─── Test output ─────────────────────────────────────────
 test-output/
 **/test-output/
 coverage/
 
-# Dev scripts (exploration harnesses, stress tests, phase verifiers).
-# These are situational — written for specific debugging sessions
-# and go stale fast. Proper regression tests live under
-# packages/*/src/tests/ and run via `npm test`.
+# ─── Temporary / scratch files ───────────────────────────
+# Anything starting with `.tmp-` is a debug dump (we use this pattern
+# for ad-hoc preview output during development). `*.bak` files are
+# session backups. `*-scratch.*` / `scratch/` catches exploration dumps.
+.tmp-*
+*.tmp
+*.bak
+*.orig
+*-scratch.*
+scratch/
+
+# ─── Dev scripts (exploration harnesses, stress tests, phase verifiers) ─
+# Situational — written for specific debugging sessions and go stale
+# fast. Proper regression tests live under packages/*/src/tests/ and
+# run via `npm test`.
 scripts/
 
-# NPM artifacts
+# ─── NPM artifacts ───────────────────────────────────────
 *.tgz
+.npm/
 
-# TSC output leaked into src
-packages/mcp/src/**/*.js
-packages/mcp/src/**/*.js.map
-packages/mcp/src/**/*.d.ts
-packages/mcp/src/**/*.d.ts.map
+# ─── TSC output leaked into src ──────────────────────────
+# tsc-watch occasionally emits .js/.d.ts next to .ts sources. We want
+# only the .ts source checked in, never the compiled siblings.
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.d.ts.map
+# Exception: hand-authored ambient type declarations for npm packages
+# that ship without their own types (svg-parser, others). These ARE
+# source files — the rule above wants to drop tsc output, not typings.
+!packages/core/src/importers/svg-parser.d.ts
 
-# reframe local data (generated at runtime)
-# Covers .reframe/scenes, /exports, /brands, /src, design.md, phase*-report.md
+# ─── Legacy studio package (removed, keep path ignored) ──
+# We removed packages/studio in favor of the platform UI served by
+# the MCP sidecar. Any leftover files from old checkouts should not
+# be tracked.
+packages/studio/
+
+# ─── reframe local data (generated at runtime) ──────────
+# Covers .reframe/scenes, /exports, /brands, /src, /history,
+# /intents, /annotations, /threads, /snapshots, design.md, etc.
+# Nothing in here is source of truth — it's all derived from the
+# package source + user actions.
 .reframe/
 
-# MCP config (user-specific paths/api keys)
+# ─── MCP config (user-specific paths/api keys) ──────────
 .mcp.json
+!.mcp.json.example
 
-# Phase scratch reports outside .reframe/
+# ─── Phase scratch reports outside .reframe/ ────────────
 phase*-report.md
 *-scratch.md

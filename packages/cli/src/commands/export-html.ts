@@ -11,7 +11,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { SceneGraph } from '../engine-bridge';
-import { exportToHtml } from '../../../core/src/exporters/html';
+import { exportToHtml } from '@reframe/core';
 
 export function exportHtml(args: any): void {
   const inputFile = args._[1];

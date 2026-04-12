@@ -154,6 +154,8 @@ export function createDefaultNode(type: NodeType, id: string): SceneNode {
     isDefaultVariant: false,
     boundVariables: {},
     internalOnly: false,
+
+    meta: {},
   };
 }
 
@@ -168,6 +170,18 @@ export class SceneGraph {
   readonly emitter = new Emitter<SceneGraphEvents>();
 
   rootId: string;
+
+  /**
+   * Phase 5: optional timeline attached to this graph. Stored here rather than
+   * on a scene-level wrapper so the `saveScene` → `loadSceneFromProject`
+   * round-trip can preserve animations without a parallel argument plumbed
+   * through every I/O boundary. Animation ops read/write this field via the
+   * ops dispatcher; exporters read it to emit CSS keyframes.
+   *
+   * Declared as `any` to avoid a circular import with animation/types.ts —
+   * the contract is ITimeline but the type is erased at the graph layer.
+   */
+  timeline: any | null = null;
 
   // Caches
   private absPosCache = new Map<string, Vector>();
@@ -232,13 +246,22 @@ export class SceneGraph {
   // ── CRUD ────────────────────────────────────────
 
   createNode(type: NodeType, parentId: string, overrides?: Partial<SceneNode>): SceneNode {
-    const id = generateId();
+    // Allow callers (importers) to request a stable, deterministic id via overrides.id.
+    // When provided we use it verbatim if unique, otherwise fall back to the counter.
+    // This unlocks round-trip re-compile: the same HTML yields the same ids, so
+    // reframe_edit operations stay valid across edits of the source file.
+    let id: string;
+    if (overrides && typeof overrides.id === 'string' && overrides.id.length > 0 && !this.nodes.has(overrides.id)) {
+      id = overrides.id;
+    } else {
+      id = generateId();
+    }
     const node = createDefaultNode(type, id);
     node.parentId = parentId;
 
     if (overrides) {
       Object.assign(node, overrides);
-      node.id = id; // preserve generated id
+      node.id = id; // preserve chosen id
       node.parentId = parentId;
     }
 

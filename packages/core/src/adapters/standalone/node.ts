@@ -490,6 +490,17 @@ export class StandaloneNode implements INode {
     this.graph.updateNode(this.raw.id, { href: v ?? null } as any);
   }
 
+  /**
+   * Phase 1/3 provenance + token binding metadata. The raw SceneNode carries
+   * this on `node.meta`; exposing it through the adapter lets exporters (html,
+   * react) and audit rules reach it without unwrapping the host abstraction.
+   * Without this getter, React export would see `meta` as undefined and lose
+   * all Phase 3 token-bound node substitutions.
+   */
+  get meta(): any {
+    return (this.raw as any).meta ?? undefined;
+  }
+
   get rotation(): number { return this.raw.rotation; }
   set rotation(v: number) { this.graph.updateNode(this.raw.id, { rotation: v }); }
 

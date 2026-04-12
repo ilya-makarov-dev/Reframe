@@ -121,13 +121,14 @@ function persistBrandDesignMd(
   designMd: string,
   slug: string | undefined,
   label: string | undefined,
+  options?: { setActive?: boolean },
 ): { mode: 'registered' | 'legacy' | 'file'; slug?: string; path?: string } {
   const projectDir = getProjectDir();
   if (projectDir) {
     if (slug && slug.trim()) {
       try {
         const normalizedSlug = toSlug(slug);
-        const entry = registerBrand(projectDir, normalizedSlug, designMd, { label, setActive: true });
+        const entry = registerBrand(projectDir, normalizedSlug, designMd, { label, setActive: options?.setActive ?? true });
         return { mode: 'registered', slug: normalizedSlug, path: entry.path };
       } catch {
         /* fall through to legacy save */
@@ -170,13 +171,24 @@ async function handleExtract(input: {
 
     const ds = session.getOrParseDesignMd(designMd, parseDesignMd);
     const brandLabel = (ds.brand && ds.brand.trim()) || input.brand.trim();
+
+    // Only auto-switch active brand if none is set yet.
+    // This prevents `reframe_design extract` from clobbering the active
+    // brand when the user is loading multiple brands for comparison or
+    // rebrand scenarios. Use `reframe_project set_active_brand` to
+    // switch explicitly.
+    const hadActiveBrand = !!session.activeBrand;
     session.setBrand(brandLabel, designMd, ds);
 
-    const persisted = persistBrandDesignMd(designMd, input.brand, brandLabel);
+    const persisted = persistBrandDesignMd(designMd, input.brand, brandLabel, {
+      setActive: !hadActiveBrand,
+    });
 
     const persistNote =
       persisted.mode === 'registered'
-        ? `Registered brand "${persisted.slug}" at .reframe/${persisted.path}. Active brand set in project.json.`
+        ? hadActiveBrand
+          ? `Registered brand "${persisted.slug}" at .reframe/${persisted.path}. Active brand unchanged (was "${session.activeBrand}"). Use reframe_project({ action: "set_active_brand", brand: "${persisted.slug}" }) to switch.`
+          : `Registered brand "${persisted.slug}" at .reframe/${persisted.path}. Active brand set in project.json.`
         : persisted.mode === 'legacy'
           ? 'Saved to .reframe/design.md and linked in project.json (legacy layout — slug not provided).'
           : 'Saved to .reframe/design.md (no project found).';

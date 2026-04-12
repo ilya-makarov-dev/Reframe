@@ -8,14 +8,14 @@
   <img src="https://img.shields.io/badge/version-0.1.0-7c3aed?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/node-%3E%3D18-43853d?style=flat-square" alt="node">
-  <img src="https://img.shields.io/badge/MCP-6_tools-ff6b6b?style=flat-square" alt="MCP tools">
+  <img src="https://img.shields.io/badge/MCP-7_tools-ff6b6b?style=flat-square" alt="MCP tools">
   <img src="https://img.shields.io/badge/audit-23_rules-10b981?style=flat-square" alt="audit rules">
   <img src="https://img.shields.io/badge/exports-7_formats-f59e0b?style=flat-square" alt="export formats">
   <img src="https://img.shields.io/badge/brand-.md_guides-6366f1?style=flat-square" alt="brand guides">
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#mcp-pipeline">MCP Pipeline</a> · <a href="#inode--the-design-ast">INode AST</a> · <a href="#studio">Studio</a> · <a href="#how-its-different">Comparison</a> · <a href="#license">License</a>
+  <a href="#quick-start">Quick Start</a> · <a href="#mcp-pipeline">MCP Pipeline</a> · <a href="#inode--the-design-ast">INode AST</a> · <a href="#platform">Platform</a> · <a href="#how-its-different">Comparison</a> · <a href="#license">License</a>
 </p>
 
 ---
@@ -24,9 +24,9 @@
 <tr>
 <td>
 
-**🚀 v0.1.0 — Early Public Release**
+**🚀 v0.1.0 — developer preview**
 
-The core engine is production-tested: HTML import, 23-rule audit with auto-fix, semantic resize, and 7 export formats all work. MCP pipeline powers AI agents in Claude Code, Cursor, and any MCP-compatible client. 60+ brand design systems available via [`getdesign`](https://www.npmjs.com/package/getdesign) npm. Studio is experimental. We're actively developing and welcome contributors.
+Not a release yet — the engine is close to feature-complete but still stabilising. HTML import, 23-rule audit with auto-fix, semantic resize, and 7 export formats run end-to-end and make a solid demo; APIs may still shift before a tagged release. **6 core + 1 experimental MCP tools** drive AI agents in Claude Code, Cursor, and any MCP-compatible client — consolidated down from 12 after iterate/resize/vary moved inside `reframe_edit` as ops. 60+ brand design systems available via [`getdesign`](https://www.npmjs.com/package/getdesign) npm, with **full brand inheritance** (rebrand applies component recipes, not just colors). Platform UI at `:4100/platform` is a **pan/zoom canvas workspace** — projects group variants, every scene sits on one infinite board, and history/snapshots replace manual save-state juggling.
 
 </td>
 </tr>
@@ -39,9 +39,9 @@ The core engine is production-tested: HTML import, 23-rule audit with auto-fix, 
 | | | |
 |:---:|:---:|:---:|
 | **🎨 Design AST** | **🤖 AI-Native Pipeline** | **⚡ Multi-Target Output** |
-| INode — 80+ properties. Universal format for visual design. Open, portable, version-controlled. | 6 MCP tools. AI writes HTML, Reframe validates, adapts, exports. Works with any AI agent. | One design → HTML, React, SVG, PNG, Lottie, Animated HTML, Multi-page Site. |
-| **✅ 23-Rule Audit** | **🔄 Deterministic Resize** | **👨‍🎨 Studio Editor** |
-| Contrast, accessibility, brand compliance, component specs, font features, spacing scale. Auto-fix most issues. Put in CI. | Not scaling — re-layout. Classifies elements, remaps to guide templates. Milliseconds. No AI. | Open what AI created, edit visually — drag, resize, tweak properties. Same INode, same pipeline. |
+| INode — 80+ properties. Universal format for visual design. Open, portable, version-controlled. | 7 MCP tools (6 core + 1 experimental). AI writes HTML, Reframe validates, adapts, exports. Works with any MCP client. | One design → HTML (hybrid SVG for vectors), React, SVG, PNG, Lottie, Animated HTML, Multi-page Site. |
+| **✅ 23-Rule Audit** | **🔄 Deterministic Resize** | **👁 Platform** |
+| Contrast, accessibility, brand compliance, component specs, font features, spacing scale. Auto-fix most issues. Put in CI. | Not scaling — re-layout. Classifies elements, remaps to guide templates. Milliseconds. No AI. | Pan/zoom canvas at `:4100/platform`. All variants on one board, right panel Layers/Props/Audit/Variations, ops history + snapshots. |
 
 ---
 
@@ -50,51 +50,58 @@ The core engine is production-tested: HTML import, 23-rule audit with auto-fix, 
 Reframe does for design what compilers do for code. An intermediate representation (**INode**), a validation layer (**23 audit rules**), an adaptation engine (**semantic resize**), and multi-target output.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│   BRAND                                                     │
-│   ─────                                                     │
-│   getdesign npm ──→ DESIGN.md ────────┐  60+ brands         │
-│   Your own ───────→ DESIGN.md ────────┤  or write yours     │
-│   Extract URL ────→ DESIGN.md ────────┘                     │
-│                         │                                   │
-│                         ▼                                   │
-│               ┌──────────────────┐                          │
-│               │  Design System   │  colors · typography     │
-│               │  Parser + Tokens │  font features · shadows │
-│               │  100+ CSS vars   │  component specs         │
-│               └────────┬─────────┘  spacing scale           │
-│                        │                                    │
-│   IMPORT               │                                    │
-│   ──────               │                                    │
-│   AI Agent ─── HTML ───┤                                    │
-│   Designer ─── Studio ─┤──→ INode AST (SceneGraph)          │
-│   Any App ──── API ────┘    @reframe/ui · 120 functions     │
-│                                    │                        │
-│   ENGINE                           │                        │
-│   ──────               ┌───────────┼───────────┐           │
-│                        ▼           ▼           ▼           │
-│                   ┌─────────┐ ┌─────────┐ ┌─────────┐     │
-│                   │  Audit  │ │ Resize  │ │ Tokens  │     │
-│                   │23 rules │ │semantic │ │ design  │     │
-│                   │auto-fix │ │re-layout│ │ system  │     │
-│                   └────┬────┘ └────┬────┘ └────┬────┘     │
-│                        └───────────┼───────────┘           │
-│                                    ▼                        │
-│   OUTPUT                                                    │
-│   ──────                                                    │
-│   .reframe/exports/*.html ········· static pages            │
-│   .reframe/exports/*.tsx ·········· React components        │
-│   .reframe/exports/*.svg ·········· vector graphics         │
-│   .reframe/exports/*.json ········· Lottie animations       │
-│   .reframe/exports/site.html ······ multi-page app          │
-│   .reframe/scenes/*.scene.json ···· portable INode          │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                                                                        │
+│   BRAND                                                                │
+│   ─────                                                                │
+│   getdesign npm ──→ DESIGN.md ───────┐  60+ brands                     │
+│   Your own ───────→ DESIGN.md ───────┤  (copy .example)                │
+│   Extract URL ────→ DESIGN.md ───────┘  (reverse-engineer any site)    │
+│                         │                                              │
+│                         ▼                                              │
+│               ┌────────────────────┐                                   │
+│               │  Design System     │  colors · typography              │
+│               │  Parser (fuzzy)    │  OpenType · shadows               │
+│               │  + Inheritance     │  button/card/badge/               │
+│               │  + Tokens (WCAG)   │  input/nav component specs        │
+│               └─────────┬──────────┘                                   │
+│                         │                                              │
+│   IMPORT                │                  REVIEW                      │
+│   ──────                │                  ──────                      │
+│   AI Agent ──── HTML ───┤              ┌── Platform canvas             │
+│   Developer ─ @reframe/ui ──→ INode ◄──┤   (:4100/platform)            │
+│   Re-compile ─ src/*.html ─┤    AST    │   pan · zoom · right panel    │
+│                         │  (SceneGraph)│   Layers/Props/Audit/         │
+│                         │               │   Variations · history       │
+│                         │               │                              │
+│                         │               └── reframe_collab ┄ intent    │
+│                         │                    (experimental) ┄ queue    │
+│                         │                                              │
+│   ENGINE                │                                              │
+│   ──────      ┌─────────┼─────────┬─────────┬─────────┐               │
+│               ▼         ▼         ▼         ▼         ▼               │
+│          ┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐          │
+│          │ Audit  ││ Adapt  ││ Tokens ││ Vary   ││ Inherit│          │
+│          │23 rules││resize +││ CSS +  ││ grid   ││ brand  │          │
+│          │auto-fix││variants││ bind   ││ axes   ││ recipes│          │
+│          └───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘          │
+│              └─────────┴─────────┼─────────┴─────────┘                │
+│                                  ▼                                     │
+│   OUTPUT                                                               │
+│   ──────                                                               │
+│   .reframe/exports/*.html ········ static pages (hybrid SVG)           │
+│   .reframe/exports/*.tsx ········· React components                    │
+│   .reframe/exports/*.svg ········· vector graphics                     │
+│   .reframe/exports/*.json ········ Lottie animations                   │
+│   .reframe/exports/site.html ····· multi-page app                      │
+│   .reframe/scenes/*.scene.json ··· portable INode (persistence)        │
+│   .reframe/snapshots (in-memory) · history + named snapshots           │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 > **Any input. One AST. Any output.**  
-> AI agents write HTML. Developers write TypeScript. Designers use Studio. Apps integrate via adapters. All produce INode — the engine validates, adapts, and exports to any format.
+> AI agents write HTML. Developers write TypeScript with `@reframe/ui`. Platform canvas reads the same SceneGraph for review and variation work. All paths converge on INode — the engine validates, adapts, and exports to any format.
 
 ---
 
@@ -118,31 +125,44 @@ Design has no compiler. Code has GCC, ESLint, Prettier, TypeScript — tools tha
 ## Data Flow
 
 ```
-  ┌──────────────────────────────────────────────────────────┐
-  │ 0. BRAND                                                 │
-  │    getdesign npm ─→ DESIGN.md (60+ brands)               │
-  │    Custom ────────→ DESIGN.md.example template            │
-  │    Extract URL ───→ reverse-engineer any site             │
-  │                                                          │
-  │ 1. IMPORT                                                │
-  │    AI Agent ──→ HTML/CSS ───┐                            │
-  │    Developer ─→ @reframe/ui┤──→ INode AST               │
-  │    Designer ──→ Studio ─────┤    (80+ properties)        │
-  │    Any App ───→ adapter ────┘                            │
-  │                                                          │
-  │ 2. ENGINE                                                │
-  │    Audit ···· 23 rules, auto-fix                         │
-  │    Resize ··· semantic re-layout                         │
-  │    Tokens ··· DESIGN.md → 100+ CSS vars, dark mode       │
-  │                                                          │
-  │ 3. EXPORT                                                │
-  │    .reframe/exports/*.html ······ static pages           │
-  │    .reframe/exports/*.tsx ······· React components       │
-  │    .reframe/exports/*.svg ······· vector graphics        │
-  │    .reframe/exports/*.json ······ Lottie animations      │
-  │    .reframe/exports/site.html ··· multi-page app         │
-  │    .reframe/scenes/*.scene.json · portable INode         │
-  └──────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────┐
+  │ 0. BRAND                                                     │
+  │    getdesign npm ─→ DESIGN.md (60+ brands)                   │
+  │    Custom ────────→ DESIGN.md.example (parser-annotated)     │
+  │    Extract URL ───→ reverse-engineer any site                │
+  │                                                              │
+  │ 1. IMPORT                                                    │
+  │    AI Agent ──→ HTML/CSS ───┐                                │
+  │    Developer ─→ @reframe/ui ─┼──→ INode AST                  │
+  │    Re-compile ─ file:src/*.html ─┘  80+ props · stable ids   │
+  │                              ▲                               │
+  │                              │ source HTML auto-saved to     │
+  │                              │ .reframe/src/<name>.html —    │
+  │                              │ edit → re-compile loop        │
+  │                                                              │
+  │ 2. ENGINE (reframe_edit = single mutation surface)           │
+  │    Audit ······· 23 rules, auto-fix                          │
+  │    Adapt ······· semantic resize + variant auto-refresh      │
+  │    Tokens ······ defineTokens + brand inheritance recipes    │
+  │    Variations ·· scaleSpacing/Radius/Shadows/Colors/Type     │
+  │    Vary grid ··· Cartesian brand × density × radius × …      │
+  │    History ····· ops log + snapshots + revert-to             │
+  │                                                              │
+  │ 3. REVIEW (same AST, second door)                            │
+  │    Platform canvas @ :4100/platform                          │
+  │      · pan/zoom all project variants at native size          │
+  │      · right panel: Layers/Props/Audit/Variations            │
+  │      · history dropdown + snapshots                          │
+  │    reframe_collab (experimental) ┄┄ async intent queue       │
+  │                                                              │
+  │ 4. EXPORT                                                    │
+  │    .reframe/exports/*.html ········ static (hybrid SVG)      │
+  │    .reframe/exports/*.tsx ········· React components         │
+  │    .reframe/exports/*.svg ········· vector graphics          │
+  │    .reframe/exports/*.json ········ Lottie animations        │
+  │    .reframe/exports/site.html ····· multi-page app           │
+  │    .reframe/scenes/*.scene.json ··· portable INode           │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -180,7 +200,7 @@ AI writes creative HTML using brand values from DESIGN.md. Reframe validates aga
 
 ### For Developers — @reframe/ui
 
-120 composable TypeScript functions that build INode trees. The programmatic API to the same AST that MCP and Studio use.
+120 composable TypeScript functions that build INode trees. The programmatic API to the same AST that MCP and Platform use.
 
 ```typescript
 import { render, page, stack, row, heading, body, button, card } from '@reframe/ui';
@@ -273,7 +293,7 @@ interface INode {
 
 ## MCP Pipeline
 
-6 tools. Continuous feedback loop — not a linear pipeline.
+7 tools (6 core + 1 experimental). Continuous feedback loop — not a linear pipeline.
 
 ```
 compile → inspect → [edit → inspect]* → export → user reviews
@@ -283,18 +303,21 @@ compile → inspect → [edit → inspect]* → export → user reviews
             edit → inspect → export → user reviews again
 ```
 
+**7 MCP tools** — one per phase of the flow, plus one experimental async surface:
+
 | Tool | Purpose |
 |------|---------|
 | `reframe_design` | `list` 60+ brands, `extract` by slug/URL/HTML → DESIGN.md, `prompt` for AI context |
 | `reframe_compile` | AI writes HTML → import to INode. 23-rule audit + auto-fix |
 | `reframe_inspect` | Tree + 23-rule audit + fix hints; `diffWith` diff; `diffTextDetail` / `diffStructuredDetail` can shorten text or 2nd JSON block to summary-only counts |
-| `reframe_edit` | Fix issues — inspect tells you exactly what to change |
+| `reframe_edit` | **Single surface for all scene mutations.** Ops: `update`/`add`/`delete`/`clone`/`resize`/`move` (structural), `defineTokens`/`setMode` (theming), `scaleSpacing`/`scaleRadius`/`scaleShadows`/`rotateColors`/`typographyPreset` (style transforms), `iterate` (audit+fix loop), `adapt` (responsive size variants), `vary` (Cartesian variation grid). Replaces the former `reframe_iterate` / `reframe_resize` / `reframe_vary` tools. |
 | `reframe_export` | Preview: html, react, svg, lottie, animated_html, site |
-| `reframe_project` | Save/load. Scenes persist to `.reframe/scenes/` |
+| `reframe_project` | Save/load, history, snapshots, components, macros, brand registry. Scenes persist to `.reframe/scenes/` |
+| `reframe_collab` *(experimental)* | Async agent-worker stub for the Platform UI gesture/intent queue. Three actions: `list` / `process` / `respond`. Dormant in the direct flow; exists so async workflows have a surface when needed. |
 
 ### CLI vs MCP (quick map)
 
-| Flow | CLI (`reframe` in packages/cli) | MCP (6 tools above) |
+| Flow | CLI (`reframe` in packages/cli) | MCP (7 tools above) |
 |------|----------------------------------|----------------------|
 | Import / build | `reframe build`, configs | `reframe_compile`, `reframe_edit` |
 | Audit / tree | `reframe test`, export-svg | `reframe_inspect` |
@@ -377,11 +400,11 @@ The parser extracts everything: colors, typography with font features, button va
 
 ---
 
-## Universal Resize
+## Universal Resize — `adapt` op
 
-> **In development.** Functional for standard formats, improving continuously.
+> **Preview.** Works end-to-end on common patterns, still maturing on edge cases.
 
-Deterministic layout adaptation — no AI, no guessing. The engine classifies elements by role, detects layout patterns, and remaps content to target dimensions using guide templates.
+Deterministic layout adaptation — no AI, no guessing. The engine classifies elements by role, detects layout patterns, and remaps content to target dimensions. Five strategies, pick per call: **smart** (default — classify + reflow), **contain** / **cover** (aspect-preserving), **stretch** (raw proportional), **reflow** (pure flex re-pack).
 
 ```
 1920×1080 hero  →  classify (title, button, background)
@@ -391,52 +414,116 @@ Deterministic layout adaptation — no AI, no guessing. The engine classifies el
                 →  728×90 banner — re-composed, not scaled
 ```
 
-One design → banner, social card, story, OG image. Milliseconds. Pure computation — deterministic, reproducible, no LLM needed.
+Exposed as `reframe_edit { op: "adapt" }` and `reframe_project { action: "add_variant" }`. Variant scenes auto-refresh on every `reframe_compile` of the base, so source HTML edits, replayed history ops, and macro applications propagate to all breakpoints without manual re-runs.
+
+One design → banner, social card, story, OG image, mobile/tablet/desktop. Milliseconds. Pure computation — deterministic, reproducible, no LLM needed.
 
 ---
 
-## Studio
+## Brand Inheritance
 
-> **Experimental** — functional, under active development.
-
-Visual editor for INode. Drag, resize, edit properties by hand, see changes live. What AI creates through MCP — designers can open, tweak visually, and export from the same pipeline.
+`reframe_edit { op: "defineTokens", brand: "stripe" }` is the one-shot **"rebrand this scene"** pipeline. Not just color swap — full component recipe application:
 
 ```
-┌───────────────────────────────────────────────────────┐
-│                                                       │
-│  AI creates via MCP          Designer edits in Studio │
-│        │                              │               │
-│        ▼                              ▼               │
-│  ┌──────────┐    real-time sync   ┌──────────┐       │
-│  │          │◄────── SSE ────────►│  Canvas  │       │
-│  │  INode   │    (port 4100)      │  Layers  │       │
-│  │  AST     │                     │  Props   │       │
-│  │          │                     │  Audit   │       │
-│  └────┬─────┘                     └──────────┘       │
-│       │                           drag, resize,       │
-│       ▼                           edit fills/text/    │
-│  same audit                       spacing/effects     │
-│  same export                      by hand             │
-│  same pipeline                                        │
-│                                                       │
-└───────────────────────────────────────────────────────┘
+1. Parse DESIGN.md → DesignSystem
+      (colors, typography with OpenType, button/card/badge/input/nav specs)
+2. Tokenize + auto-bind every node to the right token role
+3. Semantic rebrand with polarity detection
+      (scene-dark-on-scene-dark vs brand-dark-on-brand-light)
+4. Contrast-aware text color selection
+      (walks parents to find effective bg, ranks tokens by WCAG contrast)
+5. applyBrandInheritance — runs component recipes on matching nodes
+      (buttons get exact radius/height/padding/hover states from the spec;
+       cards, badges, inputs, navs likewise)
 ```
 
-```bash
-cd packages/studio && npm run dev   # → http://localhost:3000
+Semantic classifier + `inferStructuralRole` detects FRAME nodes as buttons/cards/badges/inputs/navs from visual properties, so unclassified nodes still get their recipes. One call = "make this scene look like Spotify / Stripe / Ferrari."
+
+---
+
+## Variations — Deterministic Design Space
+
+No AI. Pure transforms in `packages/core/src/variations/`. Exposed as `reframe_edit` ops and via Platform UI `/api/variations`:
+
+| Axis | Op | Values |
+|------|----|--------|
+| Density | `scaleSpacing` | factor (<1 compact, >1 spacious) |
+| Radius | `scaleRadius` | sharp / soft / pill / editorial / factor |
+| Shadows | `scaleShadows` | flat / subtle / normal / dramatic / factor |
+| Colors | `rotateColors` | invert-accent / invert-mode / [tokenA, tokenB] |
+| Typography | `typographyPreset` | dramatic / flat / editorial / technical / friendly |
+| Grid | `vary` | Cartesian product of all axes + brand + mode |
+
+```
+reframe_edit({ operations: [{
+  op: "vary",
+  sceneId: "s1",
+  axes: {
+    brand: ["stripe", "linear", "vercel"],
+    density: [0.75, 1, 1.25],
+    radius: ["sharp", "soft", "pill"]
+  }
+}]})  // → 27 new session scenes, one per combination
+```
+
+Same input → same output, every time. Pair with `reframe_edit { op: "adapt" }` to generate responsive variants across breakpoints (smart / contain / cover / stretch / reflow strategies).
+
+---
+
+## SVG Hybrid Rendering
+
+HTML exporter now emits inline `<svg>` for vector primitives inside their wrapper `<div>`: ELLIPSE, STAR, POLYGON, LINE, VECTOR, and icon-like frames. `shouldRenderAsSvg()` + `isIconLikeFrame()` in `svg-primitives.ts` decide which nodes qualify; everything else renders as divs as before. Text stroke is preserved via SVG when a stroke is set. Opt-out with `svgDecorations: false`. Graceful fallback if anything throws.
+
+Result: exported HTML contains crisp vector decorations — circles, stars, arrows, brand icons — instead of div hacks with border-radius.
+
+---
+
+## Platform
+
+Design workspace at `http://localhost:4100/platform`. Rewritten as a **pan/zoom canvas** — projects group variants, every scene sits on one infinite board. You are the creative director — AI designs, you review.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                                                          │
+│  AI creates via MCP         You work on Platform canvas  │
+│        │                              │                  │
+│        ▼                              ▼                  │
+│  ┌──────────┐    real-time sync   ┌────────────┐        │
+│  │          │◄────── SSE ────────►│ Project    │        │
+│  │  INode   │   (port 4100, ::)   │ canvas     │        │
+│  │  AST     │                     │ pan / zoom │        │
+│  │          │                     │ all scenes │        │
+│  └────┬─────┘                     └─────┬──────┘        │
+│       │                                 │                │
+│       │                        ┌────────┴────────┐      │
+│       ▼                        ▼                 ▼      │
+│  same audit              Layers/Props/       History +  │
+│  same export             Audit/Variations    snapshots  │
+│  same pipeline           right panel         revert-to  │
+│                                                          │
+│  caches: ctx 2s · preview LRU64 · audit LRU64            │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
 ```
 
 | Feature | Status |
 |---------|--------|
-| Visual canvas — drag, resize, select | ✓ |
-| Layers panel — tree view, reorder | ✓ |
-| Properties panel — edit fills, text, spacing, effects | ✓ |
-| Real-time MCP sync (SSE) | ✓ |
-| Scene management | ✓ |
-| Audit panel — see issues inline | ✓ |
-| Headless preview without Studio (port 4100) | ✓ |
+| **Project canvas** — pan/zoom Figma-style workspace, all variants at native size | ✓ |
+| Dashboard groups scenes into projects by owner + variantOf metadata | ✓ |
+| Lazy iframe artboards with auto-grow to real `scrollHeight` (no cropped windows) | ✓ |
+| Floating tool palette (bottom) + zoom controls (top-right) | ✓ |
+| Right panel — Layers / Properties / Audit / Variations tabs, resizable | ✓ |
+| **History dropdown** — ops log + named snapshots, restore / revert-to / clear | ✓ |
+| Variations API — apply single axis or Cartesian grid from the panel | ✓ |
+| 8 gesture verbs — ask, echo, pin, rule, brush, resonance, lasso, time | ✓ |
+| Intent system — draft, commit, process, propose, accept/reject (via `reframe_collab`) | ✓ |
+| Real-time MCP sync (SSE, debounced 300–1000ms per channel) | ✓ |
+| Export dropdown — HTML / React / SVG / Lottie / animated / site | ✓ |
+| Dual-stack bind (`::`) · Platform context / preview / audit caches | ✓ |
 
-Studio is optional — the engine works headless. But when you need to see and touch the design, Studio is there.
+### Snapshots
+
+The history dropdown doubles as a git-lite: `/platform/api/history/save` captures a full `serialize(scene)` into an in-memory store (LRU 30 per scene, `packages/mcp/src/snapshots.ts`). `/restore` deserializes back into the session. `/revert-to` walks the ops log backwards and replays inverse props atomically — no need to save a snapshot before every edit.
 
 ---
 
@@ -520,22 +607,29 @@ packages/
 │
 ├── core/       @reframe/core
 │               INode AST · SceneGraph · layout engine (Yoga WASM)
-│               audit (23 rules) · importers (HTML, Figma)
-│               exporters (HTML, SVG, React, Lottie, animated, site)
-│               @reframe/ui (120 functions) · design system · resize engine
-│               animation (23 presets) · semantic layer · diff · assert
+│               audit (23 rules, auto-fix) · importers (HTML, Figma)
+│               exporters (HTML hybrid-SVG, SVG, React, Lottie,
+│                          animated, site)
+│               @reframe/ui (120 functions) · semantic layer · diff
+│               design-system parser + brand inheritance (component
+│                          recipes: button/card/badge/input/nav)
+│               tokens (WCAG-aware rebrand, light/dark modes)
+│               variations (spacing/radius/shadows/colors/typography
+│                          + Cartesian grid)
+│               resize engine (5 strategies, variant auto-refresh)
+│               animation (23 presets) · assert
 │
 ├── mcp/        @reframe/mcp
-│               MCP server (6 tools) · HTTP sidecar (port 4100)
-│               session management · DESIGN.md context · auto-fix engine
+│               MCP server (6 core + 1 experimental = 7 tools)
+│               HTTP sidecar on port 4100 (dual-stack `::` bind — no
+│               200ms Windows localhost penalty) · Platform UI canvas
+│               session management · DESIGN.md context · auto-fix
+│               snapshots store (LRU 30/scene) · variations API
+│               intent queue (.reframe/intents) for reframe_collab
 │               brand catalog via getdesign npm (60+ brands)
 │
-├── cli/        @reframe/cli
-│               `reframe build` · `reframe test` · config loader · Figma import
-│
-└── studio/     @reframe/studio  (experimental)
-                Visual editor (React + Vite) · canvas · layers panel
-                Properties panel · real-time MCP sync via SSE
+└── cli/        @reframe/cli
+                `reframe build` · `reframe test` · config loader · Figma import
 ```
 
 ---
@@ -575,7 +669,7 @@ Active contributors who make significant, sustained contributions may be invited
 - **Audit rules** — new design quality and accessibility checks
 - **Brand guides** — contribute DESIGN.md for brands not yet in [`getdesign`](https://www.npmjs.com/package/getdesign)
 - **HTML importer** — CSS property coverage, CSS Grid, complex selectors
-- **Studio** — canvas performance, property editing, undo/redo
+- **Platform UI** — design supervision UX, gesture system
 - **Adapters** — Sketch, Penpot, Canva
 
 ---

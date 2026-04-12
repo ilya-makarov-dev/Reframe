@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import type { CliArgs } from '../args';
 import { loadScene, graphFromSceneEnvelope, exportScene } from '../scene-io';
-import { exportToSvg } from '../../../core/src/exporters/svg';
+import { exportToSvg } from '@reframe/core';
 
 export function exportSvg(args: CliArgs): void {
   const inputPath = args._[1];

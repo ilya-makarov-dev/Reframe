@@ -62,10 +62,32 @@ let _deferredProjectDir: string | null = null;
 /**
  * Sets the workspace root used for `.reframe/` paths and auto-save.
  *
+ * Phase 5b Bug #3: when the project dir changes to a DIFFERENT value, the
+ * session scene cache is cleared so previously-stored scenes don't leak
+ * into the new project's namespace. The drift bug we hit live was:
+ *
+ *   1. reframe_compile creates s1, auto-creates .reframe/ at cwd,
+ *      storeScene autosaves s1 → cwd/.reframe/scenes/s1.scene.json
+ *   2. reframe_project open(/other/dir) updates _projectDir but s1 is
+ *      still in memory with its source file path pointing at cwd
+ *   3. Next compile on s1 reads the wrong src/ dir → data loss
+ *
+ * Resetting session state on dir change (not on null→dir, which is the
+ * initial set) severs that cross-project aliasing.
+ *
  * @deprecated Prefer `setProjectDir` from `tools/project.js` (keeps `reframe_project` and store aligned).
  * `tools/project` continues to call this internally as `setStoreProjectDir`.
  */
 export function setProjectDir(dir: string | null): void {
+  const switching = _projectDir !== null && dir !== null && dir !== _projectDir;
+  if (switching) {
+    // Clear session-level scene cache so the new project starts fresh.
+    // Per-scene state (tokenIndex, images via graph.images) is owned by
+    // the StoredScene entry, so clearing scenes drops all of it.
+    scenes.clear();
+    slugIndex.clear();
+    nextId = 1;
+  }
   _projectDir = dir;
 }
 

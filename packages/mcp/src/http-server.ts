@@ -4,7 +4,7 @@
  * Two modes:
  *   1. Standalone: `node http-server.js` — starts HTTP only
  *   2. Sidecar: `startHttpSidecar()` — starts HTTP alongside stdio in same process
- *      (shares store + session singletons = real-time sync with Studio)
+ *      (shares store + session singletons = real-time sync with Platform UI)
  *
  * Endpoints:
  *   POST /mcp    — MCP JSON-RPC (tool calls)
@@ -12,7 +12,7 @@
  *   GET  /events — SSE stream for real-time project events
  *   GET  /health — Health check
  *
- * Scenes (Studio sync), same session store as MCP tools:
+ * Scenes (Platform sync), same session store as MCP tools:
  *   GET  /scenes              — list session scenes
  *   GET  /scenes/:id          — HTML preview fragment (layout ensured)
  *   GET  /scenes/:id?format=json — full SceneJSON envelope (version, root, images?, timeline?, revision);
@@ -29,7 +29,6 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import { createConnection } from 'net';
 import { randomUUID } from 'crypto';
 import { execSync } from 'child_process';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -42,6 +41,8 @@ import type { ProjectEvent } from '../../core/src/project/types.js';
 import type { INodeJSON, SceneJSON } from '../../core/src/serialize.js';
 import { SERIALIZE_VERSION } from '../../core/src/serialize.js';
 import { deserializeErrorHttpJson } from '../../core/src/deserialize-error.js';
+import { handlePlatformRequest, type PlatformContext } from './platform/router.js';
+import { getProjectDir as getToolsProjectDir } from './tools/project.js';
 
 // ─── Port management ────────────────────────────────────────
 
@@ -68,7 +69,21 @@ async function killPort(port: number): Promise<void> {
 
 import { registerReframeMcpTools } from './register-tools.js';
 
-/** Bind address: REFRAME_BIND_LOCAL=1 → 127.0.0.1; else REFRAME_HTTP_HOST or 0.0.0.0 */
+/**
+ * Bind address:
+ *   REFRAME_BIND_LOCAL=1  → 127.0.0.1 (IPv4 loopback only)
+ *   REFRAME_HTTP_HOST=... → explicit override
+ *   default               → "::" (IPv6 unspecified with dual-stack)
+ *
+ * The default binds to `::` which Node.js treats as a dual-stack socket:
+ * it accepts both IPv6 and IPv4-mapped connections on the same listener.
+ * This is critical for performance on Windows: `localhost` resolves to both
+ * `::1` and `127.0.0.1`, and clients try `::1` first. If the server only
+ * bound to `0.0.0.0` (IPv4 wildcard), every request ate a ~200ms TCP
+ * connect penalty from the IPv6 refused→IPv4 fallback path. Binding to
+ * `::` eliminates that penalty entirely — `::1` connects succeed natively
+ * and the Platform UI loads 10-20× faster.
+ */
 function httpListenHost(): string {
   const bindLocal =
     process.env.REFRAME_BIND_LOCAL === '1' ||
@@ -76,7 +91,7 @@ function httpListenHost(): string {
   if (bindLocal) return '127.0.0.1';
   const h = process.env.REFRAME_HTTP_HOST?.trim();
   if (h) return h;
-  return '0.0.0.0';
+  return '::';
 }
 
 // ─── CORS ────────────────────────────────────────────────────
@@ -117,17 +132,6 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | n
   });
 }
 
-/** Quick TCP check — is something listening on this port? */
-function isPortOpen(port: number, timeout = 300): Promise<boolean> {
-  return new Promise(resolve => {
-    const sock = createConnection({ port, host: '127.0.0.1' });
-    sock.setTimeout(timeout);
-    sock.on('connect', () => { sock.destroy(); resolve(true); });
-    sock.on('timeout', () => { sock.destroy(); resolve(false); });
-    sock.on('error', () => { resolve(false); });
-  });
-}
-
 // ─── SSE Events endpoint ─────────────────────────────────────
 
 const sseClients = new Set<ServerResponse>();
@@ -145,15 +149,158 @@ function handleEventsSSE(_req: IncomingMessage, res: ServerResponse): void {
   res.on('close', () => sseClients.delete(res));
 }
 
-function broadcastEvent(event: ProjectEvent): void {
+export function broadcastEvent(event: ProjectEvent): void {
+  // Invalidate Platform caches on any state-changing event so the next
+  // request rebuilds fresh. SSE is the only signal the server has that
+  // something changed, so we piggy-back invalidation here.
+  const t = (event as any)?.type as string | undefined;
+  if (t && t !== 'connected' && t !== 'ping') {
+    invalidatePlatformContextCache();
+
+    // Invalidate cached preview HTML/SVG bytes + audit results for the
+    // affected scene. The sessionRevision already changed (which is part
+    // of the cache key), so stale entries wouldn't technically be served,
+    // but keeping old keys around wastes memory — evict eagerly.
+    const sceneId = (event as any)?.sceneId as string | undefined;
+    if (sceneId) {
+      invalidatePreviewCacheForScene(sceneId);
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { invalidateAuditCacheForScene } = require('./platform/api/node-edit.js');
+        invalidateAuditCacheForScene?.(sceneId);
+      } catch (_) { /* best-effort */ }
+    }
+    // Brand switch or design-system update affects ALL scenes via token
+    // binding — drop the whole preview + audit caches to be safe.
+    if (t === 'design-system:updated' || t === 'project:changed') {
+      previewCache.clear();
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { invalidateAuditCacheAll } = require('./platform/api/node-edit.js');
+        invalidateAuditCacheAll?.();
+      } catch (_) { /* best-effort */ }
+    }
+
+    // Invalidate sidebar/brand caches only for events that could affect
+    // them — scene mutations don't touch the component/macro/brand list.
+    if (t === 'design-system:updated' || t === 'project:changed' || t.startsWith('component:') || t.startsWith('macro:') || t.startsWith('brand:')) {
+      try {
+        // Lazy import to avoid a cycle: router imports from http-server
+        // via emitEvent, and http-server needs router's invalidator.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { invalidateSidebarCaches } = require('./platform/router.js');
+        invalidateSidebarCaches?.();
+      } catch (_) { /* best-effort */ }
+    }
+  }
   const data = `data: ${JSON.stringify(event)}\n\n`;
   for (const client of sseClients) {
     try { client.write(data); } catch (_) {}
   }
 }
 
+/** Alias for Platform API modules that import from http-server. */
+export const emitEvent = broadcastEvent;
+
+// ─── Platform context cache ──────────────────────────────────
+//
+// The Platform router rebuilds a PlatformContext on every /platform/*
+// request. Before caching, this meant iterating session scenes + calling
+// getScene() per scene on every page navigation, every SSE-triggered
+// refresh, every API call. For a session with 10+ scenes this was the
+// single biggest request latency hit.
+//
+// The cache holds the built context for a short TTL (2s). Any SSE event
+// (scene saved, brand switched, annotation added, etc.) invalidates it
+// so the next request rebuilds with fresh state.
+
+let platformContextCache: { ctx: PlatformContext; builtAt: number } | null = null;
+const PLATFORM_CTX_TTL_MS = 2000;
+
+function invalidatePlatformContextCache(): void {
+  platformContextCache = null;
+}
+
+// ─── Preview HTML/SVG cache ──────────────────────────────────
+//
+// Each /preview/:sceneId request runs `ensureSceneLayout` (Yoga layout
+// pass) + full HTML export through the engine exporter. For a 266-node
+// scene this is 15-100ms; for larger scenes it climbs to 300-500ms.
+// `refreshViewports` fires `iframe.src = url + '?t=' + Date.now()` on
+// every SSE event, so each burst of updates previously triggered N full
+// re-renders per iframe.
+//
+// The cache is keyed by `sceneId:sessionRevision:ext`. The session
+// revision increments on every mutation (bumpSceneSessionRevision), so
+// a cache HIT means "the scene graph is byte-identical to what we last
+// rendered". On MISS we run the full pipeline and store the result.
+// LRU-style eviction at 64 entries prevents unbounded growth.
+
+interface PreviewCacheEntry { body: string; contentType: string; }
+const previewCache = new Map<string, PreviewCacheEntry>();
+const PREVIEW_CACHE_MAX = 64;
+
+function previewCacheSet(key: string, entry: PreviewCacheEntry): void {
+  // Simple LRU — delete+re-insert moves to most-recent position.
+  if (previewCache.has(key)) previewCache.delete(key);
+  previewCache.set(key, entry);
+  while (previewCache.size > PREVIEW_CACHE_MAX) {
+    const oldest = previewCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    previewCache.delete(oldest);
+  }
+}
+
+/** Drop all cached preview renders for a scene (called when scene
+ * graph mutates). */
+function invalidatePreviewCacheForScene(sceneId: string): void {
+  const prefix = `${sceneId}:`;
+  for (const key of previewCache.keys()) {
+    if (key.startsWith(prefix)) previewCache.delete(key);
+  }
+}
+
+function buildPlatformContext(): PlatformContext {
+  const now = Date.now();
+  if (platformContextCache && now - platformContextCache.builtAt < PLATFORM_CTX_TTL_MS) {
+    return platformContextCache.ctx;
+  }
+  const sessionScenes = listSessionScenes().map(s => {
+    const stored = getScene(s.id);
+    return {
+      id: s.id,
+      slug: stored?.slug ?? s.id,
+      name: s.name ?? stored?.name ?? 'Untitled',
+      size: s.size,
+      nodes: s.nodes ?? 0,
+      width: stored?.width,
+      height: stored?.height,
+    };
+  });
+  const ctx: PlatformContext = {
+    projectDir: getToolsProjectDir(),
+    sessionScenes,
+    getScene: (id: string) => {
+      const s = getScene(id);
+      if (!s) return null;
+      return {
+        id,
+        slug: s.slug ?? id,
+        graph: s.graph,
+        rootId: s.rootId,
+        name: s.name,
+        brand: (s as any).brand,
+      };
+    },
+    getDesignMd: () => null,
+    getAuditScore: () => undefined,
+  };
+  platformContextCache = { ctx, builtAt: now };
+  return ctx;
+}
+
 // ─── Shared: broadcast scene store changes via SSE ───────────
-// When stdio MCP creates/updates scenes, push to Studio
+// When stdio MCP creates/updates scenes, push to Platform via SSE
 
 import {
   listScenes as listSessionScenes,
@@ -225,6 +372,17 @@ export function startHttpSidecar(port = 4100): void {
 
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
+    // ── Phase 7.1: Platform routes ───────────────────────────
+    // `/platform/*` is dispatched to the new platform router before any of
+    // the legacy handlers. When the router returns false the request falls
+    // through to the existing sidecar endpoints below — keeps backward
+    // compat for Studio / preview URLs.
+    if (url.pathname === '/platform' || url.pathname.startsWith('/platform/')) {
+      const ctx = buildPlatformContext();
+      const handled = await handlePlatformRequest(req, res, ctx);
+      if (handled) return;
+    }
+
     // Health check
     if (url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -240,20 +398,19 @@ export function startHttpSidecar(port = 4100): void {
     }
 
     // ── Preview UI ─────────────────────────────────────────────
-    // If Studio (port 3000) is running → redirect there.
-    // Otherwise → lightweight preview dashboard with auto-refresh.
+    // Root and /preview are NOT served — only /platform is exposed as the
+    // user-facing entry. Return 404 for discovery while keeping /preview/:id
+    // (iframe contents), /site, /events, /scenes, /mcp intact.
 
-    if (url.pathname === '/' || url.pathname === '/preview') {
-      // Check if Studio is running by testing port 3000
-      const studioRunning = await isPortOpen(3000);
-      if (studioRunning && url.pathname === '/') {
-        res.writeHead(302, { 'Location': 'http://localhost:3000' });
-        res.end();
-        return;
-      }
-      const scenes = listSessionScenes();
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(renderPreviewDashboard(scenes, url.searchParams.get('scene') ?? undefined));
+    if (url.pathname === '/') {
+      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!DOCTYPE html><html><body style="font-family:system-ui;padding:40px;max-width:540px;margin:0 auto"><h1>reframe</h1><p>This endpoint is not available. Open <a href="/platform">/platform</a> instead.</p></body></html>');
+      return;
+    }
+
+    if (url.pathname === '/preview') {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found. Use /platform instead.');
       return;
     }
 
@@ -296,13 +453,31 @@ export function startHttpSidecar(port = 4100): void {
         res.end('<h1>Scene not found</h1>');
         return;
       }
+
+      // ── Preview cache ────────────────────────────────────
+      // Each /preview/:id request used to re-run Yoga layout + HTML export,
+      // which is 15-100ms for non-trivial scenes. Now we cache the rendered
+      // HTML (or SVG) keyed by `sceneId:revision:ext`. If the scene's
+      // sessionRevision hasn't changed, we serve the cached bytes directly.
+      // refreshViewports cache-busts via `?t=<ts>` but that only invalidates
+      // the BROWSER cache — the server can still reuse its own rendered
+      // bytes because the revision alone decides freshness.
+      const cacheKey = `${sceneId}:${stored.sessionRevision ?? 0}:${ext}`;
+      const cached = previewCache.get(cacheKey);
+      if (cached) {
+        res.writeHead(200, { 'Content-Type': cached.contentType, 'X-Preview-Cache': 'hit' });
+        res.end(cached.body);
+        return;
+      }
+
       const { ensureSceneLayout } = await import('../../core/src/engine/layout.js');
       ensureSceneLayout(stored.graph, stored.rootId);
 
       if (ext === 'svg') {
         const { exportSvgFromGraph } = await import('./engine.js');
         const svg = exportSvgFromGraph(stored.graph, stored.rootId);
-        res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+        previewCacheSet(cacheKey, { body: svg, contentType: 'image/svg+xml' });
+        res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'X-Preview-Cache': 'miss' });
         res.end(svg);
         return;
       }
@@ -330,9 +505,19 @@ export function startHttpSidecar(port = 4100): void {
         return;
       }
       // Default: HTML render (same as old /preview/<id> behavior).
+      // Phase 8: enable `inodeAnchors` so every element carries
+      // `data-reframe-inode="<id>"` for the annotation subsystem, and
+      // splice the preview inject script before </body> so hover/click
+      // events bubble up to the Platform UI via postMessage.
       const { exportToHtml } = await import('../../core/src/exporters/html.js');
-      const html = exportToHtml(stored.graph, stored.rootId, { fullDocument: true });
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      const { injectPreviewScript } = await import('./preview-inject.js');
+      const raw = exportToHtml(stored.graph, stored.rootId, {
+        fullDocument: true,
+        inodeAnchors: true,
+      });
+      const html = injectPreviewScript(raw);
+      previewCacheSet(cacheKey, { body: html, contentType: 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'X-Preview-Cache': 'miss' });
       res.end(html);
       return;
     }
@@ -348,7 +533,7 @@ export function startHttpSidecar(port = 4100): void {
       return;
     }
 
-    // Scene list API (simple REST for Studio polling)
+    // Scene list API (REST)
     if (url.pathname === '/scenes' && req.method === 'GET') {
       res.writeHead(200, {
         'Content-Type': 'application/json',
@@ -359,7 +544,7 @@ export function startHttpSidecar(port = 4100): void {
       return;
     }
 
-    // Studio-friendly remove (POST avoids some proxies/clients blocking DELETE)
+    // POST remove (avoids some proxies/clients blocking DELETE)
     if (url.pathname === '/scenes/remove' && req.method === 'POST') {
       const body = await readJsonBody(req);
       const sceneId = typeof body?.sceneId === 'string' ? body.sceneId : typeof body?.id === 'string' ? body.id : '';
@@ -469,7 +654,7 @@ export function startHttpSidecar(port = 4100): void {
       return;
     }
 
-    // Scene export API — HTML fragment (Studio preview) or ?format=json (SceneJSON envelope: root, images?, timeline?, version + revision)
+    // Scene export API — HTML fragment (preview) or ?format=json (SceneJSON envelope: root, images?, timeline?, version + revision)
     if (url.pathname.startsWith('/scenes/') && req.method === 'GET') {
       const sceneId = sceneIdFromPath(url.pathname);
       const stored = getScene(sceneId);
@@ -561,7 +746,10 @@ export function startHttpSidecar(port = 4100): void {
   const maxRetries = 3;
 
   const listenHost = httpListenHost();
-  const displayHost = listenHost === '0.0.0.0' ? 'localhost' : listenHost;
+  // Wildcards (::/0.0.0.0) are shown as "localhost" in user-facing logs;
+  // explicit hosts (REFRAME_HTTP_HOST) are printed verbatim.
+  const isWildcard = listenHost === '::' || listenHost === '0.0.0.0';
+  const displayHost = isWildcard ? 'localhost' : listenHost;
 
   function tryListen(): void {
     httpServer.listen(port, listenHost, () => {

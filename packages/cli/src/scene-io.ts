@@ -6,14 +6,14 @@
  */
 
 import * as fs from 'fs';
-import { SceneGraph } from '../../core/src/engine/scene-graph.js';
 import {
+  SceneGraph,
   serializeSceneNode,
   deserializeScene,
   migrateScene, migrateSceneJSON,
   SERIALIZE_VERSION,
   type INodeJSON, type SceneJSON,
-} from '../../core/src/serialize.js';
+} from '@reframe/core';
 
 // Re-export INodeJSON as SceneNodeJson for backward compat
 export type SceneNodeJson = INodeJSON;

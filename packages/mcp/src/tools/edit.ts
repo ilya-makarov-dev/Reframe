@@ -18,17 +18,26 @@ import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js
 import { setHost } from '../../../core/src/host/context.js';
 import { storeScene, getScene, resolveScene, setTokenIndex, getTokenIndex, findSessionId, bumpSceneSessionRevision, getWorkspaceRoot } from '../store.js';
 import { coreProjectIo } from '../project-io.js';
-import { autoSaveScene } from './project.js';
+import { autoSaveScene, getProjectDir } from './project.js';
+import { appendOp, nextOpId } from '../../../core/src/project/history.js';
+import type { Operation } from '../../../core/src/ops/types.js';
 import { exportScene, inspectScene } from '../engine.js';
 import { getSession } from '../session.js';
-import { parseDesignMd } from '../../../core/src/design-system/index.js';
+import { parseDesignMd, applyBrandInheritance } from '../../../core/src/design-system/index.js';
 import {
   tokenizeDesignSystem, resolveColorToken, resolveNumberToken,
-  bindTokenToNode, autoBindTokensFromGraph, switchTokenMode, listTokens, colorToHex,
+  bindTokenToNode, autoBindTokensFromGraph, rebrandColorsFromTokens, switchTokenMode, listTokens, colorToHex,
   rebuildTokenIndexFromGraph,
   type TokenIndex,
 } from '../../../core/src/design-system/tokens.js';
 import { autoDetectRoles, classifyScene } from '../../../core/src/semantic/index.js';
+import {
+  scaleSpacing as vScaleSpacing,
+  scaleRadius as vScaleRadius,
+  scaleShadows as vScaleShadows,
+  rotateColors as vRotateColors,
+  applyTypographyPreset as vTypographyPreset,
+} from '../../../core/src/variations/index.js';
 import { adaptFromGraph } from '../../../core/src/resize/adapt.js';
 import { ComponentRegistry } from '../../../core/src/engine/component-registry.js';
 import { resolveBlueprint } from '../../../core/src/ui/blueprint.js';
@@ -187,7 +196,7 @@ const nodeDescSchema: z.ZodType<any> = z.lazy(() => z.object({
   // Layout
   layoutMode: z.enum(['NONE', 'HORIZONTAL', 'VERTICAL', 'GRID']).optional(),
   layoutWrap: z.enum(['NO_WRAP', 'WRAP']).optional(),
-  primaryAxisAlign: z.enum(['MIN', 'CENTER', 'MAX', 'SPACE_BETWEEN']).optional(),
+  primaryAxisAlign: z.enum(['MIN', 'CENTER', 'MAX', 'SPACE_BETWEEN', 'SPACE_AROUND']).optional(),
   counterAxisAlign: z.enum(['MIN', 'CENTER', 'MAX', 'STRETCH', 'BASELINE']).optional(),
   itemSpacing: z.number().optional(),
   counterAxisSpacing: z.number().optional(),
@@ -335,6 +344,105 @@ const operationSchema = z.discriminatedUnion('op', [
     op: z.literal('setMode'),
     sceneId: z.string().optional(),
     mode: z.string().describe('Mode name: "light" or "dark"'),
+  }),
+
+  // Variation: scale spacing (density transform)
+  z.object({
+    op: z.literal('scaleSpacing'),
+    sceneId: z.string().optional(),
+    factor: z.number().describe('Scale factor: <1 = compact, >1 = spacious. Applies to padding, gap, itemSpacing.'),
+    preserveAtoms: z.boolean().optional().describe('Preserve internal padding of atomic components (buttons, badges). Default: true.'),
+  }),
+
+  // Variation: transform corner radii
+  z.object({
+    op: z.literal('scaleRadius'),
+    sceneId: z.string().optional(),
+    strategy: z.union([
+      z.enum(['sharp', 'soft', 'pill', 'editorial']),
+      z.object({ factor: z.number() }),
+      z.object({ value: z.number() }),
+    ]).describe('Radius transform: sharp (0), soft (×1.5), pill (small→9999), editorial (→2-4px), or {factor} / {value}.'),
+  }),
+
+  // Variation: scale shadow intensity
+  z.object({
+    op: z.literal('scaleShadows'),
+    sceneId: z.string().optional(),
+    strategy: z.union([
+      z.enum(['flat', 'subtle', 'normal', 'dramatic']),
+      z.object({ factor: z.number() }),
+    ]).describe('Shadow transform: flat (remove), subtle (×0.5), normal (×1), dramatic (×2), or {factor}.'),
+  }),
+
+  // Variation: swap color token roles
+  z.object({
+    op: z.literal('rotateColors'),
+    sceneId: z.string().optional(),
+    rotation: z.union([
+      z.enum(['invert-accent', 'invert-mode']),
+      z.tuple([z.string(), z.string()]),
+    ]).describe('Color rotation: invert-accent (primary↔accent), invert-mode (background↔text), or [tokenA, tokenB] tuple.'),
+  }),
+
+  // Variation: typography preset
+  z.object({
+    op: z.literal('typographyPreset'),
+    sceneId: z.string().optional(),
+    preset: z.enum(['dramatic', 'flat', 'editorial', 'technical', 'friendly'])
+      .describe('Typography preset: dramatic (max contrast), flat (all 500), editorial (tight headings), technical (wide letter-spacing), friendly (rounded).'),
+  }),
+
+  // Iterate — audit+fix loop. Replaces the old reframe_iterate tool.
+  z.object({
+    op: z.literal('iterate'),
+    sceneId: z.string().optional(),
+    mode: z.enum(['auto', 'propose']).optional().default('auto')
+      .describe('auto: run audit+auto-fix loop up to maxRounds times. propose: one audit pass returning suggested ops.'),
+    maxRounds: z.number().optional().default(3).describe('Max audit+fix rounds in auto mode'),
+    goal: z.string().optional().describe('Free-text hint carried into the transcript'),
+    minContrast: z.number().optional().default(3),
+    minFontSize: z.number().optional().default(8),
+  }),
+
+  // Adapt — create responsive variants (replaces reframe_resize).
+  z.object({
+    op: z.literal('adapt'),
+    sceneId: z.string().optional(),
+    sizes: z.array(z.object({
+      width: z.number().int().positive(),
+      height: z.number().int().positive(),
+      name: z.string().optional(),
+      strategy: z.enum(['smart', 'contain', 'cover', 'stretch', 'reflow']).optional().default('smart'),
+    })).min(1).max(20).describe('Target sizes to produce as new sibling scenes'),
+    exportHtml: z.boolean().optional().default(true).describe('Auto-export each variant to .reframe/exports/. Default true.'),
+  }),
+
+  // Vary — generate a Cartesian variation grid (replaces reframe_vary).
+  z.object({
+    op: z.literal('vary'),
+    sceneId: z.string().optional(),
+    axes: z.object({
+      brand: z.array(z.string()).optional(),
+      density: z.array(z.number()).optional(),
+      radius: z.array(z.union([
+        z.enum(['sharp', 'soft', 'pill', 'editorial']),
+        z.object({ factor: z.number() }),
+        z.object({ value: z.number() }),
+      ])).optional(),
+      shadows: z.array(z.union([
+        z.enum(['flat', 'subtle', 'normal', 'dramatic']),
+        z.object({ factor: z.number() }),
+      ])).optional(),
+      typography: z.array(z.enum(['dramatic', 'flat', 'editorial', 'technical', 'friendly'])).optional(),
+      mode: z.array(z.string()).optional(),
+      colorRotation: z.array(z.union([
+        z.enum(['invert-accent', 'invert-mode']),
+        z.tuple([z.string(), z.string()]),
+      ])).optional(),
+    }).describe('Variation axes — Cartesian product generates all combinations'),
+    namePrefix: z.string().optional().describe('Prefix for generated scene names'),
+    limit: z.number().optional().describe('Max variants to generate (safety cap, default 64)'),
   }),
 ]);
 
@@ -906,6 +1014,48 @@ export async function handleEdit(input: {
    *  recomputed during ensureSceneLayout / runAutoFixLoop. */
   const resizedScenes = new Map<string, { width: number; height: number }>();
 
+  /**
+   * Phase 3b: Append the mutation we just applied to the scene's history log
+   * so a subsequent reframe_compile can replay it. Only runs when:
+   *   - a project is open (otherwise there's nowhere to persist);
+   *   - the scene is bound to a project slug (unsaved scratch scenes are skipped);
+   *   - the target node carries a stable h:<hash> id (phase 1 round-trip ids);
+   *
+   * Without any of those conditions the call is a cheap no-op — no throw, no
+   * log pollution. Failures inside the append are swallowed too: history is a
+   * convenience layer, an I/O hiccup must not blow up an agent edit.
+   */
+  function recordOp(sceneId: string, op: Operation): void {
+    try {
+      const projectDir = getProjectDir();
+      if (!projectDir) return;
+      const stored = getScene(sceneId);
+      if (!stored) return;
+      const slug = (stored as any).slug;
+      if (!slug) return;
+      appendOp(projectDir, slug, op);
+    } catch { /* best-effort */ }
+  }
+
+  /**
+   * Build a setProps Operation from an agent-supplied props object + the
+   * target node. Returns null when the node id is not a stable phase-1 id —
+   * replaying a counter id "0:12" after re-compile would land on the wrong
+   * node, so we refuse to record those (graceful: the edit still applies in
+   * memory, just not persisted to history).
+   */
+  function buildSetPropsOp(nodeId: string, props: Record<string, unknown>, label: string): Operation | null {
+    if (!nodeId.startsWith('h:')) return null;
+    return {
+      id: nextOpId(),
+      timestamp: new Date().toISOString(),
+      type: 'setProps',
+      nodeId,
+      props,
+      label,
+    };
+  }
+
   /** Get token index for the current scene context. */
   function getActiveTokenIndex(sceneId?: string): TokenIndex | undefined {
     const id = sceneId ?? lastSceneId;
@@ -1028,6 +1178,9 @@ export async function handleEdit(input: {
         const tokenIdx = getActiveTokenIndex(sceneId);
         const { warnings, appliedKeys } = applyNodeUpdate(stored.graph, target, op.props, tokenIdx);
         touchedScenes.add(sceneId);
+        // Phase 3b: persist as a replayable op so re-compile keeps this edit.
+        const historyOp = buildSetPropsOp(target.id, op.props, `update "${target.name ?? op.path}"`);
+        if (historyOp) recordOp(sceneId, historyOp);
         const warnSuffix = warnings.length > 0 ? ` [sanitized: ${warnings.join('; ')}]` : '';
         results.push(`UPDATE "${target.name}" — ${appliedKeys.join(', ')}${warnSuffix}`);
         break;
@@ -1153,6 +1306,9 @@ export async function handleEdit(input: {
             if (textTarget) {
               const { warnings } = applyNodeUpdate(stored.graph, textTarget, { ...textProps }, tokenIdx);
               allWarnings.push(...warnings);
+              // Phase 3b: replay-safe record of the edit per matched target.
+              const opRec = buildSetPropsOp(textTarget.id, textProps, `updateSlot ${op.role} text`);
+              if (opRec) recordOp(sceneId, opRec);
             } else {
               allWarnings.push(`no TEXT descendant under "${target.name}" — text props skipped`);
             }
@@ -1160,6 +1316,8 @@ export async function handleEdit(input: {
           if (hasContainerProps) {
             const { warnings } = applyNodeUpdate(stored.graph, target, { ...containerProps }, tokenIdx);
             allWarnings.push(...warnings);
+            const opRec = buildSetPropsOp(target.id, containerProps, `updateSlot ${op.role}`);
+            if (opRec) recordOp(sceneId, opRec);
           }
           updatedNames.push(target.name ?? target.id);
         }
@@ -1318,10 +1476,24 @@ export async function handleEdit(input: {
         const stored = getScene(sceneId);
         if (!stored) { results.push(`DEFINE_TOKENS ERROR: scene "${sceneId}" not found`); break; }
 
-        // Parse DESIGN.md (use op-level or input-level)
-        // Order: per-op explicit → call-level explicit → resolved effective
-        // (session + project.json fallback computed at top of handler).
-        const designMdStr = op.designMd ?? input.designMd ?? effectiveDesignMd ?? session.activeDesignMd;
+        // Resolve DESIGN.md content. Supports three input forms:
+        //   1. Full DESIGN.md content string (contains newlines or '#')
+        //   2. Brand slug (e.g. "spotify") → resolved from project brand registry
+        //   3. Fallback to session/project active brand
+        let designMdStr = op.designMd ?? input.designMd ?? effectiveDesignMd ?? session.activeDesignMd;
+
+        // If designMd looks like a brand slug (short, no newlines, no markdown),
+        // resolve it from the project's brand registry on disk.
+        if (designMdStr && designMdStr.length < 80 && !designMdStr.includes('\n') && !designMdStr.includes('#')) {
+          try {
+            const projectDir = getWorkspaceRoot();
+            const loaded = coreProjectIo().loadBrandFromProject(projectDir, designMdStr);
+            if (loaded) {
+              designMdStr = loaded.content;
+            }
+          } catch { /* fall through — treat as literal content */ }
+        }
+
         if (!designMdStr) { results.push('DEFINE_TOKENS ERROR: designMd required (load with reframe_design first)'); break; }
 
         const parsedDs = session.getOrParseDesignMd(designMdStr, parseDesignMd);
@@ -1335,6 +1507,19 @@ export async function handleEdit(input: {
         // "0 properties updated" — defeating the entire token system.
         const boundCount = autoBindTokensFromGraph(stored.graph, stored.rootId, tokenIndex);
 
+        // Semantic rebrand: map node roles → brand color tokens.
+        // autoBindTokensFromGraph only binds when node values match token
+        // values exactly. rebrandColorsFromTokens overwrites fills/text
+        // based on semanticRole, enabling "change brand with one click".
+        const rebrandCount = rebrandColorsFromTokens(stored.graph, stored.rootId, tokenIndex);
+
+        // Full brand inheritance: apply component recipes (button/card/badge/
+        // input/nav specs) + typography hierarchy from the parsed DesignSystem.
+        // This is what turns a "color swap" into an actual brand makeover —
+        // buttons get pill shapes, cards get brand shadows, headings get the
+        // brand's font hierarchy with proper weights and letter-spacing.
+        const inheritanceResult = applyBrandInheritance(stored.graph, stored.rootId, parsedDs);
+
         const tokenList = listTokens(stored.graph, tokenIndex);
         const colorCount = tokenList.filter(t => t.type === 'COLOR').length;
         const numCount = tokenList.filter(t => t.type === 'FLOAT').length;
@@ -1342,7 +1527,9 @@ export async function handleEdit(input: {
         const modeCount = stored.graph.variableCollections.get(tokenIndex.collectionId)?.modes.length ?? 1;
 
         touchedScenes.add(sceneId);
-        results.push(`DEFINE_TOKENS ${tokenList.length} tokens (${colorCount} colors, ${numCount} numbers, ${strCount} strings, ${modeCount} mode(s)) — ${boundCount} bindings`);
+        results.push(
+          `DEFINE_TOKENS ${tokenList.length} tokens (${colorCount} colors, ${numCount} numbers, ${strCount} strings, ${modeCount} mode(s)) — ${boundCount} bindings, ${rebrandCount} rebranded, inherit: ${inheritanceResult.typography}t/${inheritanceResult.buttons}b/${inheritanceResult.cards}c/${inheritanceResult.badges}bg/${inheritanceResult.inputs}i/${inheritanceResult.navs}n`
+        );
         break;
       }
 
@@ -1480,6 +1667,163 @@ export async function handleEdit(input: {
         const reResolved = reResolveTokenBindings(stored.graph, stored.rootId, tokenIdx);
         touchedScenes.add(sceneId);
         results.push(`SET_MODE → "${op.mode}" — ${reResolved} properties updated`);
+        break;
+      }
+
+      case 'scaleSpacing': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('SCALE_SPACING ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`SCALE_SPACING ERROR: scene "${sceneId}" not found`); break; }
+
+        const n = vScaleSpacing(stored.graph, stored.rootId, op.factor, {
+          preserveAtoms: op.preserveAtoms ?? true,
+        });
+        touchedScenes.add(sceneId);
+        results.push(`SCALE_SPACING factor=${op.factor} — ${n} fields updated`);
+        break;
+      }
+
+      case 'scaleRadius': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('SCALE_RADIUS ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`SCALE_RADIUS ERROR: scene "${sceneId}" not found`); break; }
+
+        const n = vScaleRadius(stored.graph, stored.rootId, op.strategy);
+        touchedScenes.add(sceneId);
+        const label = typeof op.strategy === 'string' ? op.strategy : JSON.stringify(op.strategy);
+        results.push(`SCALE_RADIUS ${label} — ${n} fields updated`);
+        break;
+      }
+
+      case 'scaleShadows': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('SCALE_SHADOWS ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`SCALE_SHADOWS ERROR: scene "${sceneId}" not found`); break; }
+
+        const n = vScaleShadows(stored.graph, stored.rootId, op.strategy);
+        touchedScenes.add(sceneId);
+        const label = typeof op.strategy === 'string' ? op.strategy : JSON.stringify(op.strategy);
+        results.push(`SCALE_SHADOWS ${label} — ${n} nodes updated`);
+        break;
+      }
+
+      case 'rotateColors': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('ROTATE_COLORS ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`ROTATE_COLORS ERROR: scene "${sceneId}" not found`); break; }
+
+        let tokenIdx = getActiveTokenIndex(sceneId);
+        if (!tokenIdx) {
+          tokenIdx = rebuildTokenIndexFromGraph(stored.graph);
+        }
+        if (!tokenIdx) {
+          results.push('ROTATE_COLORS ERROR: no tokens defined (run defineTokens first)');
+          break;
+        }
+
+        const n = vRotateColors(stored.graph, tokenIdx, op.rotation);
+
+        // Re-resolve bound variables so the new values show up in the graph
+        reResolveTokenBindings(stored.graph, stored.rootId, tokenIdx);
+
+        touchedScenes.add(sceneId);
+        const label = typeof op.rotation === 'string' ? op.rotation : `${op.rotation[0]}↔${op.rotation[1]}`;
+        results.push(`ROTATE_COLORS ${label} — ${n} mode entries swapped`);
+        break;
+      }
+
+      case 'typographyPreset': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('TYPOGRAPHY_PRESET ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`TYPOGRAPHY_PRESET ERROR: scene "${sceneId}" not found`); break; }
+
+        const n = vTypographyPreset(stored.graph, stored.rootId, op.preset);
+        touchedScenes.add(sceneId);
+        results.push(`TYPOGRAPHY_PRESET ${op.preset} — ${n} text nodes updated`);
+        break;
+      }
+
+      // Iterate — audit+fix loop (absorbed from the old reframe_iterate tool).
+      // Delegates to the iterate module's handler via the same code path,
+      // then aggregates its output into the shared results[] so the user
+      // sees a unified edit transcript.
+      case 'iterate': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('ITERATE ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`ITERATE ERROR: scene "${sceneId}" not found`); break; }
+
+        try {
+          const { handleIterate } = await import('./iterate.js');
+          const out = await handleIterate({
+            sceneId,
+            mode: op.mode ?? 'auto',
+            maxRounds: op.maxRounds ?? 3,
+            goal: op.goal,
+            minContrast: op.minContrast ?? 3,
+            minFontSize: op.minFontSize ?? 8,
+          });
+          const text = out.content?.[0]?.text ?? '';
+          results.push(text);
+          touchedScenes.add(sceneId);
+        } catch (e: any) {
+          results.push(`ITERATE ERROR: ${e?.message ?? e}`);
+        }
+        break;
+      }
+
+      // Adapt — generate responsive variants (absorbed from reframe_resize).
+      case 'adapt': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('ADAPT ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`ADAPT ERROR: scene "${sceneId}" not found`); break; }
+
+        try {
+          const { handleResize } = await import('./resize.js');
+          const out = await handleResize({
+            sceneId,
+            sizes: op.sizes as any,
+            exportHtml: op.exportHtml ?? true,
+          });
+          const text = out.content?.[0]?.text ?? '';
+          results.push(text);
+          // Adapted scenes are new session scenes — they get their own
+          // revision bump via storeScene, so touch the source too so the
+          // outer audit pass re-runs on a stable state.
+          touchedScenes.add(sceneId);
+        } catch (e: any) {
+          results.push(`ADAPT ERROR: ${e?.message ?? e}`);
+        }
+        break;
+      }
+
+      // Vary — Cartesian grid generation (absorbed from reframe_vary).
+      case 'vary': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('VARY ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`VARY ERROR: scene "${sceneId}" not found`); break; }
+
+        try {
+          const { handleVary } = await import('./vary.js');
+          const out = await handleVary({
+            sceneId,
+            axes: op.axes as any,
+            namePrefix: op.namePrefix,
+            limit: op.limit,
+          });
+          const text = out.content?.[0]?.text ?? '';
+          results.push(text);
+          touchedScenes.add(sceneId);
+        } catch (e: any) {
+          results.push(`VARY ERROR: ${e?.message ?? e}`);
+        }
         break;
       }
     }
@@ -1678,7 +2022,7 @@ function reResolveTokenBindings(graph: SceneGraph, rootId: string, tokenIndex: T
   return count;
 }
 
-function deepCloneTree(src: SceneGraph, srcId: string, dest: SceneGraph, destParentId: string): void {
+export function deepCloneTree(src: SceneGraph, srcId: string, dest: SceneGraph, destParentId: string): void {
   const node = src.getNode(srcId);
   if (!node) return;
 

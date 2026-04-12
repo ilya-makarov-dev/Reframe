@@ -6,9 +6,21 @@
  */
 
 import type { SceneGraph } from '../engine/scene-graph';
-import type { SceneNode, Color, Fill, Stroke, Effect, GradientTransform, StateOverride, ResponsiveRule } from '../engine/types';
+import type { SceneNode, Color, Fill, Stroke, Effect, GradientTransform, StateOverride, ResponsiveRule, TokenBindings } from '../engine/types';
+import type { DesignSystem } from '../design-system/types';
+import type { ITimeline } from '../animation/types';
+import { timelineToCss } from '../animation/to-css';
 import { collectCssTokens, tokenToCssVar } from '../design-system/tokens';
 import { semanticTag, ariaRole, headingLevel } from '../semantic';
+import {
+  shouldRenderAsSvg,
+  shouldRenderTextAsSvg,
+  isIconLikeFrame,
+  renderNodePrimitive,
+  renderTextAsSvg,
+  wrapPrimitiveSvg,
+  renderIconFrameSvg,
+} from './svg-primitives';
 
 /** Convert gradientTransform matrix back to CSS angle in degrees. */
 function gradientTransformToAngle(t: GradientTransform): number {
@@ -79,12 +91,154 @@ export interface HtmlExportOptions {
   fullDocument?: boolean;
   /** Include node names as data attributes (default: false) */
   dataAttributes?: boolean;
+  /** Emit `data-reframe-inode="<id>"` on every element for annotation
+   *  anchoring. Cleaner than `dataAttributes` when the consumer only
+   *  needs the INode id (e.g. Platform preview with injected hover
+   *  tracking). Default: false. */
+  inodeAnchors?: boolean;
   /** Use CSS classes instead of inline styles (default: false) */
   cssClasses?: boolean;
   /** CSS class prefix (default: 'rf-') */
   classPrefix?: string;
   /** Include responsive meta viewport (default: true) */
   responsive?: boolean;
+  /**
+   * Phase 3b: active DesignSystem. When provided, any node carrying
+   * `meta.tokenBindings` will have those properties emitted as CSS custom
+   * properties referencing a `:root` block at the top of the document.
+   *
+   * Example: a button with `meta.tokenBindings.fill = "primary"` and the DS
+   * primary color `#533afd` emits `background: var(--color-primary)` instead
+   * of the hardcoded hex, plus a `:root { --color-primary: #533afd; }`
+   * definition. Change the DS primary → re-export → whole document re-themes
+   * without touching individual fills.
+   */
+  designSystem?: DesignSystem;
+
+  /**
+   * Hybrid SVG rendering. When true (default), vector primitives
+   * (ELLIPSE, STAR, POLYGON, LINE, VECTOR) and RECTANGLE/FRAME nodes
+   * with features HTML can't express (dashed strokes, non-uniform
+   * rounded corners) are emitted as inline `<svg>` elements instead
+   * of `<div>` with CSS. Icon-like FRAMES (small, vector-only children)
+   * collapse into a single `<svg>` with nested shapes for maximum
+   * fidelity.
+   *
+   * The standard HTML path is used for everything else (layout
+   * containers, text, images). Failures fall back gracefully to the
+   * div path without throwing.
+   *
+   * Default: true. Set false to force the legacy pure-HTML path for
+   * consumers that want no SVG in the output.
+   */
+  svgDecorations?: boolean;
+}
+
+// ─── Phase 3b: meta.tokenBindings → CSS vars ─────────────────
+
+interface Phase3VarTables {
+  /** node id → { fill: '--color-primary', ... } */
+  byNode: Map<string, Map<keyof TokenBindings, string>>;
+  /** CSS var name → hex/value for the :root block */
+  rootVars: Map<string, string>;
+}
+
+/**
+ * Walk the scene and collect every `node.meta.tokenBindings` into two maps:
+ *  (a) per-node lookup so renderNode can emit `var(--color-primary)` in
+ *      place of the hardcoded value, and
+ *  (b) a flat `:root` variable block resolved against the DS.
+ *
+ * A token that has no match in the DS (e.g. scene saved against a brand that
+ * was since deleted) is silently skipped — the hardcoded fallback on the
+ * node stays, and the agent gets graceful degradation instead of a missing
+ * CSS variable in devtools.
+ */
+function collectPhase3Tokens(
+  graph: SceneGraph,
+  rootId: string,
+  ds: DesignSystem,
+): Phase3VarTables {
+  const byNode = new Map<string, Map<keyof TokenBindings, string>>();
+  const rootVars = new Map<string, string>();
+
+  function resolveColor(role: string): string | undefined {
+    // Priority: explicit shortcut (primary/background/text/accent), then roles map.
+    if (role === 'primary' && ds.colors.primary) return ds.colors.primary;
+    if (role === 'background' && ds.colors.background) return ds.colors.background;
+    if (role === 'text' && ds.colors.text) return ds.colors.text;
+    if (role === 'accent' && ds.colors.accent) return ds.colors.accent;
+    return ds.colors.roles?.get(role);
+  }
+  function resolveFontSize(role: string): number | undefined {
+    const rule = ds.typography.hierarchy.find(r => r.role === role);
+    return rule?.fontSize;
+  }
+  function resolveFontFamily(slot: string): string | undefined {
+    if (slot === 'primary') return ds.typography.primaryFont;
+    if (slot === 'secondary') return ds.typography.secondaryFont;
+    return undefined;
+  }
+  function resolveRadius(idxStr: string): number | undefined {
+    const idx = parseInt(idxStr, 10);
+    if (!Number.isFinite(idx)) return undefined;
+    return ds.layout?.borderRadiusScale?.[idx];
+  }
+
+  function visit(id: string): void {
+    const n = graph.getNode(id);
+    if (!n) return;
+    const bindings = n.meta?.tokenBindings;
+    if (bindings && Object.keys(bindings).length > 0) {
+      const fieldMap = new Map<keyof TokenBindings, string>();
+
+      if (bindings.fill) {
+        const hex = resolveColor(bindings.fill);
+        if (hex) {
+          const varName = `--color-${bindings.fill}`;
+          rootVars.set(varName, hex);
+          fieldMap.set('fill', varName);
+        }
+      }
+      if (bindings.stroke) {
+        const hex = resolveColor(bindings.stroke);
+        if (hex) {
+          const varName = `--color-${bindings.stroke}`;
+          rootVars.set(varName, hex);
+          fieldMap.set('stroke', varName);
+        }
+      }
+      if (bindings.fontSize) {
+        const px = resolveFontSize(bindings.fontSize);
+        if (px !== undefined) {
+          const varName = `--font-size-${bindings.fontSize}`;
+          rootVars.set(varName, `${px}px`);
+          fieldMap.set('fontSize', varName);
+        }
+      }
+      if (bindings.fontFamily) {
+        const fam = resolveFontFamily(bindings.fontFamily);
+        if (fam) {
+          const varName = `--font-family-${bindings.fontFamily}`;
+          rootVars.set(varName, `'${fam}', sans-serif`);
+          fieldMap.set('fontFamily', varName);
+        }
+      }
+      if (bindings.cornerRadius) {
+        const r = resolveRadius(bindings.cornerRadius);
+        if (r !== undefined) {
+          const varName = `--radius-${bindings.cornerRadius}`;
+          rootVars.set(varName, `${r}px`);
+          fieldMap.set('cornerRadius', varName);
+        }
+      }
+
+      if (fieldMap.size > 0) byNode.set(id, fieldMap);
+    }
+    for (const cid of n.childIds) visit(cid);
+  }
+  visit(rootId);
+  return { byNode, rootVars };
 }
 
 /**
@@ -100,8 +254,10 @@ export function exportToHtml(
 
   const fullDoc = options.fullDocument ?? true;
   const dataAttrs = options.dataAttributes ?? false;
+  const inodeAnchors = options.inodeAnchors ?? false;
   const useCssClasses = options.cssClasses ?? false;
   const prefix = options.classPrefix ?? 'rf-';
+  const svgDecorations = options.svgDecorations ?? true;
 
   const classes: Map<string, string> = new Map();
   let classCounter = 0;
@@ -131,6 +287,26 @@ export function exportToHtml(
       for (const cid of n.childIds) buildTokenLookup(cid);
     }
     buildTokenLookup(rootId);
+  }
+
+  // ── Phase 3b: meta.tokenBindings → additional CSS vars ─────
+  // These live alongside the legacy boundVariables lookup. When a node has
+  // both (unusual — only when auto-bind ran on an already-tokenized scene),
+  // the phase-3 binding wins because it's registered AFTER the legacy one.
+  if (options.designSystem) {
+    const { byNode, rootVars } = collectPhase3Tokens(graph, rootId, options.designSystem);
+    for (const [varName, value] of rootVars) {
+      cssTokens.set(varName, value);
+    }
+    for (const [nodeId, fields] of byNode) {
+      const existing = tokenVarLookup.get(nodeId) ?? new Map<string, string>();
+      if (fields.has('fill')) existing.set('fills[0].color', fields.get('fill')!);
+      if (fields.has('stroke')) existing.set('strokes[0].color', fields.get('stroke')!);
+      if (fields.has('fontSize')) existing.set('fontSize', fields.get('fontSize')!);
+      if (fields.has('fontFamily')) existing.set('fontFamily', fields.get('fontFamily')!);
+      if (fields.has('cornerRadius')) existing.set('cornerRadius', fields.get('cornerRadius')!);
+      tokenVarLookup.set(nodeId, existing);
+    }
   }
 
   // Collect behavior CSS: state pseudo-classes and responsive media queries
@@ -186,14 +362,36 @@ export function exportToHtml(
   const behaviorTransitions = new Map<string, string>();
   collectBehaviorCss(rootId);
 
-  // Auto-add hover for interactive elements (buttons, links) that don't have explicit states
+  // ── Phase 5: timeline → @keyframes + class rules ──────────
+  // Runs BEFORE autoInteractiveHover so animatedNodeIds is populated when
+  // the auto-hover heuristic decides to skip animated nodes (Bug #6 fix).
+  const animatedNodeIds = new Set<string>();
+  const timelineForCss = (graph as any).timeline as ITimeline | null;
+  if (timelineForCss && timelineForCss.animations?.length > 0) {
+    const cssResult = timelineToCss(timelineForCss);
+    if (cssResult.keyframes) behaviorStyles.push(cssResult.keyframes);
+    for (const rule of cssResult.classRules.values()) behaviorStyles.push(rule);
+    for (const [nodeId, animClasses] of cssResult.perNodeClasses) {
+      animatedNodeIds.add(nodeId);
+      const existing = behaviorClassMap.get(nodeId);
+      const merged = existing ? `${existing} ${animClasses.join(' ')}` : animClasses.join(' ');
+      behaviorClassMap.set(nodeId, merged);
+    }
+  }
+
+  // Auto-add hover for interactive elements (buttons, links) that don't have explicit states.
+  // Phase 5b Bug #6: skip nodes that already carry an animation. The
+  // auto-hover `transform: translateY(-1px)` would otherwise fight the
+  // animation's keyframe transform at pseudo-class specificity, silently
+  // cancelling keyframe transforms on hover. Explicit `n.states.hover`
+  // still runs via collectBehaviorCss.
   function autoInteractiveHover(nodeId: string) {
     const n = graph.getNode(nodeId);
     if (!n) return;
     const role = n.semanticRole;
     const isInteractive = role === 'button' || role === 'link' || role === 'cta'
       || n.name === 'Button' || n.name === 'CTA' || n.name === 'NavItem' || n.name === 'Link';
-    if (isInteractive && !behaviorClassMap.has(nodeId)) {
+    if (isInteractive && !behaviorClassMap.has(nodeId) && !animatedNodeIds.has(nodeId)) {
       const cls = `rf-b${behaviorNodeCounter++}`;
       behaviorClassMap.set(nodeId, cls);
       behaviorStyles.push(`.${cls}:hover { opacity: 0.85; transform: translateY(-1px) }`);
@@ -208,6 +406,7 @@ export function exportToHtml(
     isRoot: boolean,
     parentLayout?: string,
     parentInteractive: boolean = false,
+    parentCounterAlign?: string,
   ): string {
     // Root is often an invisible “artboard” frame; still export children for HTML round-trip / Studio MCP.
     if (!node.visible && !isRoot) return '';
@@ -243,7 +442,7 @@ export function exportToHtml(
       const child = graph.getNode(cid);
       return child?.layoutPositioning === 'ABSOLUTE';
     });
-    const styles = computeStyles(node, isRoot, parentLayout, tokenVars, hasAbsoluteChild);
+    const styles = computeStyles(node, isRoot, parentLayout, tokenVars, hasAbsoluteChild, parentCounterAlign);
 
     // Add transition CSS if this node has behavior states
     const behaviorCls = behaviorClassMap.get(node.id);
@@ -292,11 +491,25 @@ export function exportToHtml(
       attrs.push(`data-type="${node.type}"`);
       if (node.semanticRole) attrs.push(`data-role="${node.semanticRole}"`);
     }
+    // Phase 8 — INode anchor for annotation system. Kept distinct from
+    // user-authorable data-id so there's no collision risk with source
+    // HTML that happens to use data-id for other purposes.
+    if (inodeAnchors) {
+      attrs.push(`data-reframe-inode="${node.id}"`);
+    }
 
     const attrStr = attrs.join(' ');
 
     // Text node
     if (node.type === 'TEXT' && node.text) {
+      // Stroked/outlined text → SVG (HTML has no cross-browser text
+      // stroke; `-webkit-text-stroke` is Chromium-only and inconsistent).
+      if (svgDecorations && shouldRenderTextAsSvg(node)) {
+        try {
+          const svg = renderTextAsSvg(node);
+          return `<${tag} ${attrStr}>${svg}</${tag}>`;
+        } catch { /* fall through to HTML text */ }
+      }
       // Rich text: render styleRuns as <span> per range
       if (node.styleRuns.length > 0) {
         const richHtml = renderStyleRuns(node.text, node.styleRuns);
@@ -309,6 +522,57 @@ export function exportToHtml(
     // Self-closing tags
     if (tag === 'img') {
       return `<${tag} ${attrStr} alt="${escapeHtml(node.name)}" />`;
+    }
+
+    // ─── Hybrid SVG rendering ──────────────────────────
+    //
+    // Vector primitives (ELLIPSE, STAR, POLYGON, LINE, VECTOR) and
+    // icon-like FRAMEs (small, vector-only descendants) get rendered
+    // as inline SVG for fidelity. Everything else falls through to
+    // the standard HTML path below. Wrapped in try/catch so any
+    // failure in the SVG generator doesn't take down the whole
+    // export — graceful fallback is important for first-run stability.
+    if (svgDecorations && !isRoot) {
+      try {
+        // Resolve fill/stroke token vars up-front so the SVG primitive
+        // can reference them instead of hard-coded colors.
+        const fillVar = tokenVars?.get('fills[0].color');
+        const strokeVar = tokenVars?.get('strokes[0].color');
+        const fillVarCss = fillVar ? `var(${fillVar})` : undefined;
+        const strokeVarCss = strokeVar ? `var(${strokeVar})` : undefined;
+
+        // Icon-like FRAME collapse — render whole subtree as single SVG
+        if (isIconLikeFrame(node, id => graph.getNode(id))) {
+          const svg = renderIconFrameSvg(
+            node,
+            id => graph.getNode(id),
+            (nodeId, field) => {
+              const vars = tokenVarLookup.get(nodeId);
+              const name = vars?.get(field);
+              return name ? `var(${name})` : undefined;
+            },
+          );
+          // Wrap in a div so the parent's layout (flex/grid) still
+          // positions this node. Styles on the div control size,
+          // margin, padding, etc; the SVG fills 100% of it.
+          return `<${tag} ${attrStr}>${svg}</${tag}>`;
+        }
+
+        // Per-node SVG for vector primitives + complex rects
+        if (shouldRenderAsSvg(node)) {
+          const w = node.width ?? 0;
+          const h = node.height ?? 0;
+          if (w > 0 && h > 0) {
+            const inner = renderNodePrimitive(node, { width: w, height: h, fillVar: fillVarCss, strokeVar: strokeVarCss });
+            const svg = wrapPrimitiveSvg(inner, w, h);
+            return `<${tag} ${attrStr}>${svg}</${tag}>`;
+          }
+        }
+      } catch (err) {
+        // Fall through to the normal HTML path on any SVG failure.
+        // Logging here would pollute export output; silent recovery
+        // is the right behaviour for a layered enhancement.
+      }
     }
 
     // Container with children
@@ -324,7 +588,7 @@ export function exportToHtml(
     const children = node.childIds
       .map(id => graph.getNode(id))
       .filter((n): n is SceneNode => n !== null && n !== undefined)
-      .map(child => renderNode(child, false, childLayout, childInteractive))
+      .map(child => renderNode(child, false, childLayout, childInteractive, node.counterAxisAlign))
       .filter(Boolean);
 
     if (children.length === 0) {
@@ -471,7 +735,7 @@ function responsiveRuleToCss(rule: ResponsiveRule): string[] {
 
 // ─── Style Computation ─────────────────────────────────────────
 
-function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, tokenVars?: Map<string, string>, hasAbsoluteChild = false): string {
+function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, tokenVars?: Map<string, string>, hasAbsoluteChild = false, parentCounterAlign?: string): string {
   const s: string[] = [];
   const hasFlexLayout = node.layoutMode !== 'NONE' && node.layoutMode !== 'GRID';
 
@@ -558,8 +822,19 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
     const hasMaxWidth = !isParentRow && node.maxWidth != null && node.maxWidth > 0;
     const hasMaxHeight = isParentRow && node.maxHeight != null && node.maxHeight > 0;
     const hasMaxConstraint = hasMaxWidth || hasMaxHeight;
-    const shouldStretch = (selfAlign === 'STRETCH' || counterSizing === 'FILL') && !hasMaxConstraint;
-    if (shouldStretch) {
+    // Don't emit align-self: stretch if the parent uses CENTER/MAX alignment
+    // and the child didn't explicitly request STRETCH — let the parent's
+    // align-items handle positioning so centered children stay centered.
+    const parentCentersOrEnds = parentCounterAlign === 'CENTER' || parentCounterAlign === 'MAX';
+    const explicitStretch = selfAlign === 'STRETCH';
+    const impliedStretch = counterSizing === 'FILL' && !explicitStretch;
+    const skipForParentAlign = impliedStretch && parentCentersOrEnds;
+    const shouldStretch = (explicitStretch || impliedStretch) && !hasMaxConstraint && !skipForParentAlign;
+    if (skipForParentAlign) {
+      // Parent aligns children to center/end — don't emit stretch or fixed
+      // cross-axis dimension. Let the browser auto-size the child and
+      // respect the parent's align-items.
+    } else if (shouldStretch) {
       s.push('align-self: stretch');
     } else if (counterSizing === 'HUG' || counterSuspect || (isText && (autoResize === 'WIDTH_AND_HEIGHT' || autoResize === 'HEIGHT'))) {
       // HUG or suspect counter axis — let CSS auto-size
@@ -627,6 +902,7 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
     const jc = node.primaryAxisAlign === 'CENTER' ? 'center'
       : node.primaryAxisAlign === 'MAX' ? 'flex-end'
       : node.primaryAxisAlign === 'SPACE_BETWEEN' ? 'space-between'
+      : node.primaryAxisAlign === 'SPACE_AROUND' ? 'space-around'
       : 'flex-start';
     s.push(`justify-content: ${jc}`);
 
@@ -759,10 +1035,15 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
     // behaviour soft — if the text happens to fit in less, it does,
     // but it can never exceed the Yoga bbox.
     if (node.width > 0 && node.width < 16000) {
-      s.push(`max-width: ${px(node.width)}`);
-      // `word-wrap: break-word` covers the edge case where a single
-      // word (URL, identifier) is wider than the max-width.
-      s.push('word-wrap: break-word');
+      // The engine estimates text width with a glyph factor (~0.48–0.55)
+      // which can undersize by 10–15% vs actual browser font metrics.
+      // Apply a 15% safety margin so browsers don't clip the last characters.
+      // max-width is a soft cap — parent containers still constrain overflow.
+      // No word-wrap or white-space override: the browser's default behavior
+      // wraps at spaces (good for multi-line text) and never breaks mid-word
+      // (good for labels like "PRODUCT" that were splitting into "PRODU CT").
+      const safeWidth = Math.ceil(node.width * 1.15);
+      s.push(`max-width: ${px(safeWidth)}`);
     }
     s.push(`font-size: ${tv('fontSize', px(node.fontSize || 16))}`);
     if (node.fontFamily) s.push(`font-family: ${tv('fontFamily', `'${node.fontFamily}', sans-serif`)}`);

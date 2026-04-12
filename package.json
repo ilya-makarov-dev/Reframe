@@ -12,13 +12,10 @@
     "build:cli": "npm run build -w packages/cli",
     "build:mcp": "npm run build -w packages/mcp",
     "typecheck": "tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/mcp/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json",
-    "test": "npx tsx scripts/test-pipeline.ts && npx tsx scripts/test-reframe-all.ts && npx tsx scripts/test-studio-mcp-sync.ts && npx tsx scripts/test-scene-import-parity.ts",
-    "test:studio-mcp": "npx tsx scripts/test-studio-mcp-sync.ts",
+    "test": "npx tsx scripts/test-pipeline.ts && npx tsx scripts/test-reframe-all.ts && npx tsx scripts/test-scene-import-parity.ts",
     "test:pipeline": "npx tsx scripts/test-pipeline.ts",
     "test:reframe": "npx tsx scripts/test-reframe-all.ts",
-    "test:build": "npx tsx scripts/test-build-system.ts",
-    "studio": "npm run dev -w packages/studio",
-    "studio:build": "npm run build -w packages/studio"
+    "test:build": "npx tsx scripts/test-build-system.ts"
   },
   "author": "Ilya Makarov",
   "license": "AGPL-3.0-or-later",

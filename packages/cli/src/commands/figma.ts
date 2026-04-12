@@ -7,7 +7,7 @@
 
 import * as fs from 'fs';
 import type { CliArgs } from '../args';
-import { importFromFigma } from '../../../core/src/importers/figma-rest';
+import { importFromFigma } from '@reframe/core';
 
 export async function figma(args: CliArgs): Promise<void> {
   const fileKey = args._[1];

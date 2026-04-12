@@ -180,6 +180,9 @@ export interface INodeJSON {
   states?: Record<string, any>;
   responsive?: any[];
 
+  // Source provenance (HTML tag, class, data-*, stable DOM path)
+  meta?: Record<string, any>;
+
   // Export
   exportSettings?: IExportSettings[];
 
@@ -499,6 +502,9 @@ export function serializeSceneNode(
   // ── Behavior ───────────────────────────────────
   if (!isEmptyObject(node.states)) json.states = JSON.parse(JSON.stringify(node.states));
   if (node.responsive.length > 0) json.responsive = JSON.parse(JSON.stringify(node.responsive));
+
+  // ── Source provenance ─────────────────────────
+  if (node.meta && !isEmptyObject(node.meta)) json.meta = JSON.parse(JSON.stringify(node.meta));
 
   // Export settings — not on SceneNode (INode-only concept via StandaloneNode)
 
@@ -881,8 +887,12 @@ export function deserializeFromString(jsonStr: string): INode {
 function importNodeToGraph(graph: SceneGraph, parentId: string, json: INodeJSON): string {
   const props: Record<string, unknown> = {};
 
-  // Skip meta fields — handled separately
-  const skip = new Set(['id', 'type', 'children', 'name', 'version', 'timeline', 'strokeWeight']);
+  // Skip fields that are either handled separately (children, name, type) or
+  // not graph properties (version, timeline, strokeWeight is split into per-side
+  // weights by applyImportedNodeLayoutProps). Note: `id` is intentionally NOT
+  // skipped — we want to preserve stable ids (h:<hash>) across serialize →
+  // deserialize cycles so reframe_edit operations survive project save/load.
+  const skip = new Set(['type', 'children', 'name', 'version', 'timeline', 'strokeWeight']);
 
   for (const [key, value] of Object.entries(json)) {
     if (skip.has(key) || value === undefined) continue;

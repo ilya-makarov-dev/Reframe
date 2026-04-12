@@ -3,8 +3,7 @@
  */
 
 import * as path from 'path';
-import { findConfig, loadConfigJson } from '../../../core/src/config/loader.js';
-import { buildAll, type BuildLogger } from '../../../core/src/config/build.js';
+import { findConfig, loadConfigJson, buildAll, type BuildLogger } from '@reframe/core';
 import { initYoga } from '../engine-bridge.js';
 
 const ICONS = { ok: '[OK]', fail: '[!!]', warn: '[!]', scene: '>>' };

@@ -28,6 +28,8 @@ export {
 export { parseDesignMd } from './parser';
 export { extractDesignSystemFromFrame } from './extractor';
 export { exportDesignMd } from './exporter';
+export { applyBrandInheritance } from './inheritance';
+export type { InheritanceResult } from './inheritance';
 
 export {
   tokenizeDesignSystem,
@@ -37,6 +39,7 @@ export {
   resolveNumberToken,
   bindTokenToNode,
   autoBindTokensFromGraph,
+  rebrandColorsFromTokens,
   switchTokenMode,
   listTokens,
   collectCssTokens,

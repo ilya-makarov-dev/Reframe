@@ -63,6 +63,7 @@ export interface YogaInstance {
   JUSTIFY_CENTER: number;
   JUSTIFY_FLEX_END: number;
   JUSTIFY_SPACE_BETWEEN: number;
+  JUSTIFY_SPACE_AROUND?: number;
   ALIGN_FLEX_START: number;
   ALIGN_CENTER: number;
   ALIGN_FLEX_END: number;
@@ -111,8 +112,9 @@ export function setTextMeasurer(measurer: TextMeasurer | null): void {
 }
 
 // Average glyph width ratios for proportional fonts (character width / fontSize).
-// Monospace fonts are wider (~0.6), proportional fonts like Inter/Roboto ~0.45-0.5.
-const BASE_GLYPH_FACTOR = 0.48;
+// Monospace fonts are wider (~0.6), proportional fonts like Inter/Roboto ~0.50-0.55.
+// Using 0.55 with bold extra gives enough headroom to avoid clipping last characters.
+const BASE_GLYPH_FACTOR = 0.55;
 const BOLD_GLYPH_EXTRA = 0.04; // bold text ~8% wider
 
 function estimateTextSize(
@@ -124,7 +126,8 @@ function estimateTextSize(
   const glyphFactor = BASE_GLYPH_FACTOR + (weight >= 600 ? BOLD_GLYPH_EXTRA : 0);
   const charWidth = fontSize * glyphFactor;
   const textLength = (node.text || '').length;
-  const naturalWidth = textLength * charWidth;
+  const ls = typeof node.letterSpacing === 'number' ? node.letterSpacing : 0;
+  const naturalWidth = textLength * (charWidth + ls);
 
   const constrainedWidth = maxWidth && maxWidth < 1e5 ? maxWidth : naturalWidth;
   const lines = constrainedWidth > 0 ? Math.ceil(naturalWidth / constrainedWidth) : 1;
@@ -143,6 +146,7 @@ function mapJustify(y: YogaInstance, align: string): number {
     case 'CENTER': return y.JUSTIFY_CENTER;
     case 'MAX': return y.JUSTIFY_FLEX_END;
     case 'SPACE_BETWEEN': return y.JUSTIFY_SPACE_BETWEEN;
+    case 'SPACE_AROUND': return y.JUSTIFY_SPACE_AROUND ?? y.JUSTIFY_SPACE_BETWEEN;
     default: return y.JUSTIFY_FLEX_START;
   }
 }

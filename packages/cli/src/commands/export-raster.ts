@@ -12,7 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { SceneGraph } from '../engine-bridge';
-import { exportToRaster, initCanvasKit } from '../../../core/src/exporters/raster';
+import { exportToRaster, initCanvasKit } from '@reframe/core';
 
 interface SceneIO {
   graph: SceneGraph;

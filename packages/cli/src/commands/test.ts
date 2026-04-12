@@ -3,8 +3,7 @@
  */
 
 import * as path from 'path';
-import { findConfig, loadConfigJson } from '../../../core/src/config/loader.js';
-import { testAll, type TestLogger } from '../../../core/src/config/test.js';
+import { findConfig, loadConfigJson, testAll, type TestLogger } from '@reframe/core';
 import { initYoga } from '../engine-bridge.js';
 
 export async function testCommand(args: string[]) {
