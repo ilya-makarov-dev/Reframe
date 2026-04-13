@@ -34,6 +34,14 @@ export interface StoredScene {
   brand?: string;
   /** DESIGN.md short hash at last compile — persisted to project.json for drift detection. */
   brandHash?: string;
+  /** Project group (from "site/home" → "site"). Powers `export site` filtering
+   *  so a multi-page site export doesn't bundle every unrelated scene in the
+   *  session. Set on compile from the name prefix; hydrated on load. */
+  group?: string;
+  /** Relative path from .reframe/ to the source HTML this scene was compiled
+   *  from. Hydrated from disk so re-compile from-file flows survive a session
+   *  restart. */
+  sourceFile?: string;
   /**
    * Token index created by `defineTokens`. Stored on the scene itself
    * (not in a sidecar Map) so it shares the scene's lifecycle — a
@@ -458,7 +466,15 @@ export function loadProjectScenes(projectDir: string): number {
       graph: SceneGraph;
       rootId: string;
       timeline?: ITimeline;
-      entry: { slug?: string; id: string; name: string };
+      entry: {
+        slug?: string;
+        id: string;
+        name: string;
+        group?: string;
+        source?: string;
+        brand?: string;
+        brandHash?: string;
+      };
     }>;
 
     for (const { graph, rootId, timeline, entry } of loaded) {
@@ -477,6 +493,13 @@ export function loadProjectScenes(projectDir: string): number {
         createdAt: Date.now(),
         timeline,
         sessionRevision: 1,
+        // Carry through project metadata so tools that filter on group
+        // (export site, project list grouping) work after a session
+        // restart instead of seeing only freshly-compiled scenes.
+        group: entry.group,
+        sourceFile: entry.source,
+        brand: entry.brand,
+        brandHash: entry.brandHash,
       };
 
       scenes.set(sessionId, stored);

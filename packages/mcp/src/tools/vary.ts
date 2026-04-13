@@ -137,10 +137,22 @@ export async function handleVary(input: VaryInput) {
       if (brandMd) {
         try {
           const parsed = session.getOrParseDesignMd(brandMd, parseDesignMd);
-          const tokenIdx = tokenizeDesignSystem(newGraph, parsed, { darkMode: true });
+          // darkMode only when the recipe explicitly asks for it — forcing
+          // darkMode=true on every brand meant every rebrand in a light scene
+          // tokenized against the brand's dark-mode colors and failed polarity
+          // detection, re-introducing the "Team" 1:1 contrast bug the
+          // defineTokens path already fixed.
+          const wantDark = recipe.axes.mode === 'dark';
+          const tokenIdx = tokenizeDesignSystem(newGraph, parsed, { darkMode: wantDark });
           autoBindTokensFromGraph(newGraph, newRoot.id, tokenIdx);
           rebrandColorsFromTokens(newGraph, newRoot.id, tokenIdx);
           applyBrandInheritance(newGraph, newRoot.id, parsed);
+          // Second pass: applyBrandInheritance may have changed card/nav
+          // backgrounds (brand-specific surface colors that don't match
+          // the token-based color.surface the first rebrand pass used).
+          // Re-run contrast-aware text selection against the FINAL fills
+          // so text lands ≥3:1 against the actual rendered background.
+          rebrandColorsFromTokens(newGraph, newRoot.id, tokenIdx, { textOnly: true });
           transforms.push(`brand=${recipe.axes.brand}`);
         } catch {
           transforms.push(`brand=${recipe.axes.brand}(FAILED)`);

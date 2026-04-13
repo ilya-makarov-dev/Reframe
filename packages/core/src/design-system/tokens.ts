@@ -597,8 +597,10 @@ export function rebrandColorsFromTokens(
   graph: SceneGraph,
   rootId: string,
   index: TokenIndex,
+  options: { textOnly?: boolean } = {},
 ): number {
   let rebranded = 0;
+  const textOnly = options.textOnly === true;
 
   // ── Resolve helpers ──────────────────────────────────────────
 
@@ -771,6 +773,25 @@ export function rebrandColorsFromTokens(
 
   const DEFAULT_TEXT_CANDIDATES = ['color.text', 'color.background'];
 
+  // ── Per-node polarity inversion detector ─────────────────────
+  /** True when the node's current fill polarity is OPPOSITE to the scene root.
+   * A dark card in a light scene (or a light card in a dark scene) is treated
+   * as an intentional authored inversion — the rebrand must preserve it rather
+   * than normalizing it to the brand's default surface, which would both erase
+   * creative emphasis AND trap any child text at near-1:1 contrast after the
+   * background flip (the old Stripe "Team" bug). */
+  function nodeInvertsRootPolarity(nodeId: string): boolean {
+    const n = graph.getNode(nodeId);
+    if (!n) return false;
+    const fills = (n as any).fills as any[] | undefined;
+    if (!Array.isArray(fills) || fills.length === 0) return false;
+    const f = fills[0];
+    if (f?.type !== 'SOLID' || !f?.color) return false;
+    if ((f.color.a ?? 1) < 0.5) return false;
+    const nodeDark = isDark(f.color);
+    return nodeDark !== sceneDark;
+  }
+
   // ── Main walk ────────────────────────────────────────────────
 
   function walk(nodeId: string) {
@@ -778,22 +799,38 @@ export function rebrandColorsFromTokens(
     if (!node) return;
 
     const role = (node as any).semanticRole as string | null;
+
+    // Detect intentional polarity inversion on this node. Descendant text
+    // color stays correct automatically because we skip the structural
+    // fill rebrand on this node, so getEffectiveBackground walks up and
+    // picks the preserved original fill.
+    const invertsPolarity = nodeInvertsRootPolarity(nodeId);
+
     if (role && ROLE_MAPPINGS[role]) {
       const mapping = ROLE_MAPPINGS[role];
 
-      // Apply fill color (background)
-      if (mapping.fill) {
+      // Apply fill color (background) — skipped in textOnly mode so that a
+      // second pass after applyBrandInheritance can re-run the contrast-
+      // aware text selection against the final (inheritance-applied) fills
+      // without overwriting them.
+      if (!textOnly && mapping.fill) {
         if (mapping.accentFill) {
           // Accent/interactive fills always apply (buttons, badges, CTAs)
+          // — even inside an inverted subtree. A purple CTA on a dark card
+          // is still a purple CTA.
           applyFill(nodeId, mapping.fill);
-        } else if (polarityMatch) {
-          // Structure fills only when polarity matches (both dark or both light)
+        } else if (polarityMatch && !invertsPolarity) {
+          // Structure fills only when (a) brand polarity matches scene, AND
+          // (b) this specific node isn't an intentional polarity inversion.
           applyFill(nodeId, mapping.fill);
         }
-        // When polarity mismatches, skip structure fills — preserve scene character
+        // Otherwise: skip structure fill — preserve scene character.
       }
 
-      // Apply text color — always contrast-aware
+      // Apply text color — always contrast-aware. getEffectiveBackground
+      // walks ancestors and picks up the preserved inversion fill, so
+      // descendants of a dark card in a light scene get white text instead
+      // of the brand's on-light heading color collapsing to 1:1 contrast.
       if (mapping.textCandidates.length > 0) {
         applyTextContrastAware(nodeId, mapping.textCandidates);
       }

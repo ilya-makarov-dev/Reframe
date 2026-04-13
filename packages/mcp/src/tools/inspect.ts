@@ -13,6 +13,7 @@ import type { SceneGraph } from '../../../core/src/engine/scene-graph.js';
 import { parseDesignMd } from '../../../core/src/design-system/index.js';
 import { audit } from '../../../core/src/audit.js';
 import { buildInspectAuditRules } from '../../../core/src/inspect-audit-rules.js';
+import { buildLayoutSchematic } from '../../../core/src/inspect-layout-schematic.js';
 import { assertDesign, formatAssertions } from '../../../core/src/assert.js';
 import { diffTrees, formatDiff } from '../../../core/src/diff.js';
 import { inspectScene, exportScene } from '../engine.js';
@@ -84,6 +85,14 @@ export const inspectInputSchema = {
     .optional()
     .default(MCP_LIMITS.inspectTreeDefaultMaxLines)
     .describe('Cap lines in the ASCII tree (truncates with a flag in stats line).'),
+
+  layout: z
+    .enum(['summary', 'focus', 'full', 'off'])
+    .optional()
+    .default('summary')
+    .describe(
+      'Layout schematic mode. summary = ~10 lines, section strip + issue clusters (default). focus = broken subtrees only with inline annotations. full = entire tree (expensive — only when explicitly needed). off = skip entirely.',
+    ),
 };
 
 // ─── Handler ───────────────────────────────────────────────────
@@ -353,6 +362,28 @@ export async function handleInspect(input: {
       }
       if (infoSummary > 0) {
         sections.push(`[i] ${infoSummary} info-level suggestions (non-blocking)`);
+      }
+    }
+
+    // ── b.2 Layout schematic ────────────────────────────────────
+    // Compact (summary mode default) agent-readable spatial view.
+    // Section strip + issue clusters in ~10 lines, sized for a hot tool.
+    // `layout: "focus"` drills into broken subtrees, `layout: "full"`
+    // dumps the whole tree (expensive), `layout: "off"` skips.
+    const layoutMode = (input as any).layout ?? 'summary';
+    if (layoutMode !== 'off') {
+      try {
+        const schematic = buildLayoutSchematic(graph, rootId, issues, {
+          mode: layoutMode,
+        });
+        if (schematic) {
+          sections.push('');
+          sections.push(`--- Layout (${layoutMode}) ---`);
+          sections.push(schematic);
+        }
+      } catch (err: any) {
+        sections.push('');
+        sections.push(`--- Layout --- (skipped: ${err?.message ?? 'unknown'})`);
       }
     }
   }

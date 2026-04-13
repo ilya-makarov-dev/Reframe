@@ -418,6 +418,25 @@ const operationSchema = z.discriminatedUnion('op', [
     exportHtml: z.boolean().optional().default(true).describe('Auto-export each variant to .reframe/exports/. Default true.'),
   }),
 
+  // Component — define / instantiate / override / propagate / detach / list.
+  // Underlying handler dispatches on `action`. Without this schema entry,
+  // the agent had no way to reach the component registry — the handler
+  // existed but every call was rejected by zod before it ever ran.
+  z.object({
+    op: z.literal('component'),
+    sceneId: z.string().optional(),
+    action: z.enum(['define', 'instantiate', 'override', 'propagate', 'detach', 'list']),
+    nodeId: z.string().optional().describe('Node to define-from / set-overrides on / detach. Required for define/override/detach.'),
+    name: z.string().optional().describe('Component name. Required for define.'),
+    componentId: z.string().optional().describe('Component master id. Required for instantiate/propagate (or pass componentName).'),
+    componentName: z.string().optional().describe('Component master name to look up. Alternative to componentId.'),
+    parentId: z.string().optional().describe('Parent node id to insert the new instance under. Defaults to the scene root.'),
+    variant: z.string().optional().describe('Variant key (when the master defines variants).'),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    overrides: z.record(z.unknown()).optional().describe('Slot/property overrides for the override action.'),
+  }),
+
   // Vary — generate a Cartesian variation grid (replaces reframe_vary).
   z.object({
     op: z.literal('vary'),
@@ -1520,6 +1539,20 @@ export async function handleEdit(input: {
         // brand's font hierarchy with proper weights and letter-spacing.
         const inheritanceResult = applyBrandInheritance(stored.graph, stored.rootId, parsedDs);
 
+        // Second contrast-aware text pass: applyBrandInheritance may have
+        // changed card/nav backgrounds to brand-specific surface values that
+        // don't match the token-level color.surface the first rebrand pass
+        // used. Re-run text-only rebrand so text contrast is computed against
+        // the FINAL rendered fills (fixes dark-brand-on-light-scene collapse).
+        rebrandColorsFromTokens(stored.graph, stored.rootId, tokenIndex, { textOnly: true });
+
+        // Re-run Yoga layout: applyBrandInheritance mutated padding / radius /
+        // font-size / card heights and those changes cascade through every
+        // ancestor's computed size. Without re-layout, cached section y / h
+        // are stale and sibling-overlap audit reports phantom collisions
+        // between top-level sections. Cheap: ~10–30 ms even on 300-node scenes.
+        ensureSceneLayout(stored.graph, stored.rootId);
+
         const tokenList = listTokens(stored.graph, tokenIndex);
         const colorCount = tokenList.filter(t => t.type === 'COLOR').length;
         const numCount = tokenList.filter(t => t.type === 'FLOAT').length;
@@ -1533,35 +1566,12 @@ export async function handleEdit(input: {
         break;
       }
 
-      case 'adapt': {
-        const sceneId = op.sceneId ?? op.source ?? lastSceneId;
-        if (!sceneId) { results.push('ADAPT ERROR: no scene'); break; }
-        const stored = getScene(sceneId);
-        if (!stored) { results.push(`ADAPT ERROR: scene "${sceneId}" not found`); break; }
-        const tw = op.width ?? op.targetWidth;
-        const th = op.height ?? op.targetHeight;
-        if (!tw || !th) { results.push('ADAPT ERROR: width and height required'); break; }
-        const strategy = op.strategy ?? 'smart';
-        const sceneName = op.name ?? `${stored.name}-${tw}x${th}`;
-        try {
-          // Smart resize engine: semantic classification → layout profile → cluster scale → guide postprocess
-          // Returns { root: INode, graph: SceneGraph, semanticTypes, layoutProfile, stats }
-          const adapted = await adaptFromGraph(stored.graph, stored.rootId, tw, th, {
-            strategy: strategy as any,
-            designSystem: ds ?? undefined,
-            preserveProportions: true,
-          });
-          const newId = storeScene(adapted.graph, adapted.root.id, undefined, { name: sceneName });
-          lastSceneId = newId;
-          touchedScenes.add(newId);
-          const guide = adapted.stats.usedGuide ? `, guide: ${adapted.stats.guideKey}` : '';
-          const layout = adapted.layoutProfile ? `, layout: ${adapted.layoutProfile.layoutClass}` : '';
-          results.push(`ADAPT → **${newId}** "${sceneName}" ${tw}×${th} (${strategy}${guide}${layout}, ${adapted.stats.durationMs}ms)`);
-        } catch (err: any) {
-          results.push(`ADAPT ERROR: ${err.message}`);
-        }
-        break;
-      }
+      // NOTE: the real `adapt` handler lives further down (line ~1795) and
+      // uses the multi-size schema `{ sizes: [{ width, height, name }] }`
+      // that matches zod validation. An older single-size variant used to
+      // live here and shadowed the real one, so every adapt call hit the
+      // dead path and failed zod validation on missing `sizes`. Removed —
+      // do not re-add a `case 'adapt'` above line 1795.
 
       case 'component': {
         const sceneId = op.sceneId ?? lastSceneId;
@@ -1849,11 +1859,49 @@ export async function handleEdit(input: {
 
       const minFS = opts.minFontSize ?? 8;
       const minCR = opts.minContrast ?? 3;
-      const rules = buildInspectAuditRules(ds as any, { minFontSize: minFS, minContrast: minCR });
+
+      // Per-scene design system. Earlier this pulled the session-global
+      // `ds` (= activeBrand) for every touched scene, so a long-read with
+      // NO brand applied was getting audited against whatever brand
+      // happened to be active in the session. The `colorInPalette`
+      // auto-fix would then "correct" every #1a1a1a body text to the
+      // closest color in the alien brand's palette — usually a near-
+      // background tint — collapsing the article to a 39-warning
+      // contrast cascade.
+      //
+      // Resolve precedence:
+      //   1. Scene's own `brand` (set by reframe_compile / defineTokens)
+      //   2. Explicit input.designMd (operator passed it for THIS edit)
+      //   3. None — run brand-agnostic rules only.
+      let sceneDs: ReturnType<typeof parseDesignMd> | undefined;
+      if (stored.brand) {
+        try {
+          const projectDir = getWorkspaceRoot();
+          const loaded = coreProjectIo().loadBrandFromProject(projectDir, stored.brand);
+          if (loaded) sceneDs = session.getOrParseDesignMd(loaded.content, parseDesignMd);
+        } catch { /* fall through */ }
+      }
+      if (!sceneDs && input.designMd) {
+        sceneDs = session.getOrParseDesignMd(input.designMd, parseDesignMd);
+      }
+
+      const rules = buildInspectAuditRules(sceneDs as any, { minFontSize: minFS, minContrast: minCR });
 
       const { finalIssues, allFixed, passCount } = runAutoFixLoop(
         stored.graph, stored.rootId,
         () => {
+          // Re-run layout before every audit pass. Auto-fix mutations
+          // (padding, gap, font-weight) cascade through ancestor sizes;
+          // spatial rules read cached y/height and would otherwise fire
+          // on phantom collisions between top-level sections.
+          //
+          // Earlier this call was REMOVED because long-read clones
+          // collapsed every text fill to background (bug #24). The
+          // root cause turned out to be bug #25 — cross-brand
+          // contamination from session-global activeDesignMd — not
+          // the layout call itself. With per-scene sceneDs in place,
+          // re-laying out here is safe and necessary.
+          ensureSceneLayout(stored.graph, stored.rootId);
           setHost(new StandaloneHost(stored.graph));
           const root = new StandaloneNode(stored.graph, stored.graph.getNode(stored.rootId)!);
           // Pass token-bound fields to audit for auto-pass on palette checks
@@ -1870,7 +1918,7 @@ export async function handleEdit(input: {
               return fields.size > 0 ? fields : undefined;
             },
           } : undefined;
-          return audit(root, rules, ds as any, tokenOpts);
+          return audit(root, rules, sceneDs as any, tokenOpts);
         },
         { autoFix: opts.autoFix !== false, maxPasses: opts.maxPasses ?? 3 },
       );
@@ -2026,14 +2074,22 @@ export function deepCloneTree(src: SceneGraph, srcId: string, dest: SceneGraph, 
   const node = src.getNode(srcId);
   if (!node) return;
 
-  const overrides: any = {};
-  // Copy all properties except structural ones
-  for (const [k, v] of Object.entries(node)) {
-    if (['id', 'parentId', 'childIds'].includes(k)) continue;
-    overrides[k] = v;
-  }
+  // Use JSON round-trip for the entire node payload. This is the same
+  // contract `SceneGraph._cloneProps` already uses for fills/strokes/effects
+  // and it deep-copies every plain-JSON value in one shot. Earlier
+  // implementations (Object.entries shallow copy / hand-rolled cloneValue)
+  // missed at least one mutation source: cloned scenes shared `fills`
+  // array references with the source, so any auto-fix or typography preset
+  // run on a clone propagated to its source AND its sibling clones,
+  // collapsing every text fill to the page background (the "39 contrast
+  // 1:1 warnings on every long-read clone" cascade).
+  const serialized = JSON.parse(JSON.stringify(node));
+  // Drop structural fields — graph regenerates id and parents/children.
+  delete serialized.id;
+  delete serialized.parentId;
+  delete serialized.childIds;
 
-  const cloned = dest.createNode(node.type as any, destParentId, overrides);
+  const cloned = dest.createNode(node.type as any, destParentId, serialized);
   for (const childId of node.childIds) {
     deepCloneTree(src, childId, dest, cloned.id);
   }

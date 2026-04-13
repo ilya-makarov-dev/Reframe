@@ -162,7 +162,67 @@ export async function importFromHtml(
   // width, before audit/layout runs.
   propagateWidthsTopDown(graph, rootId);
 
+  // Auto-register component masters from `data-reframe-component="X"`
+  // markers. Without this, the importer marked nodes as INSTANCE with a
+  // componentName but never created the master, so the registry was
+  // empty even on scenes that AUTHORED 10 component instances. Strategy:
+  //   1. Walk the tree, group INSTANCE nodes by componentName.
+  //   2. For each unique name, promote the FIRST occurrence to a real
+  //      COMPONENT (master) — its in-place subtree becomes the template.
+  //   3. Subsequent occurrences keep their content as override snapshots
+  //      and point `componentId` at the master.
+  // Single-occurrence components also get promoted so the registry has
+  // a master for downstream `op:component instantiate` flows.
+  autoRegisterComponentMasters(graph, rootId);
+
   return { graph, rootId, stats };
+}
+
+/**
+ * Post-import pass: scan for INSTANCE nodes carrying `meta.componentName`
+ * (set by `data-reframe-component="X"` in authored HTML) and register
+ * masters with the engine ComponentRegistry. Without this, instances
+ * exist but no master backs them — `op:component list` returns empty
+ * even on scenes with 10 marked instances.
+ */
+function autoRegisterComponentMasters(graph: SceneGraph, rootId: string): void {
+  const byName = new Map<string, string[]>(); // componentName → nodeIds in DFS order
+  const walk = (nodeId: string): void => {
+    const node = graph.getNode(nodeId);
+    if (!node) return;
+    const meta = (node as any).meta as { componentName?: string } | undefined;
+    if (meta?.componentName) {
+      const list = byName.get(meta.componentName) ?? [];
+      list.push(nodeId);
+      byName.set(meta.componentName, list);
+    }
+    for (const childId of node.childIds) walk(childId);
+  };
+  walk(rootId);
+
+  if (byName.size === 0) return;
+
+  for (const [name, ids] of byName) {
+    const masterId = ids[0];
+    const masterNode = graph.getNode(masterId);
+    if (!masterNode) continue;
+    // Promote first occurrence to COMPONENT type. Its in-place subtree
+    // is the template; the node stays where it is in the tree (no
+    // reparenting) so the visible layout doesn't shift.
+    if (masterNode.type !== 'COMPONENT') {
+      try {
+        graph.updateNode(masterId, { type: 'COMPONENT' as any, name });
+      } catch { /* best-effort */ }
+    }
+    // Wire subsequent occurrences to the master. They keep their
+    // authored child snapshot as override content.
+    for (let i = 1; i < ids.length; i++) {
+      const instId = ids[i];
+      try {
+        graph.updateNode(instId, { componentId: masterId });
+      } catch { /* best-effort */ }
+    }
+  }
 }
 
 /**
@@ -1418,8 +1478,19 @@ function convertElement(
     nodeType = 'FRAME';
   }
 
-  // Build node overrides from CSS
-  const overrides = cssToOverrides(styles, el, nodeType, ctx, parentStyles);
+  // Build node overrides from CSS. We also hand the parent's resolved
+  // width/height so percentage values (`width:100%`) resolve against the
+  // actual parent frame and not `parseUnit('100%') === 100`, which used to
+  // collapse every nested wrapper under a full-width `<section>` to the
+  // 40 px floor.
+  const parentNode = ctx.graph.getNode(parentId);
+  const parentResolvedW = parentNode && (parentNode.width ?? 0) > 100
+    ? parentNode.width
+    : undefined;
+  const parentResolvedH = parentNode && (parentNode.height ?? 0) > 100
+    ? parentNode.height
+    : undefined;
+  const overrides = cssToOverrides(styles, el, nodeType, ctx, parentStyles, parentResolvedW, parentResolvedH);
 
   // clip-path: circle/ellipse → change node type to ELLIPSE
   if ((overrides as any)._clipShape === 'ellipse' && nodeType !== 'TEXT') {
@@ -1908,9 +1979,9 @@ function convertElement(
           const available = Math.max(0, innerW - fixedSiblingW);
           const myShare = totalGrow > 0 ? available * (childGrow / totalGrow) : available / Math.max(1, growingSiblings + 1);
           updates.width = Math.max(40, Math.floor(myShare));
-        } else if (parentNode && parentNode.width > 0) {
-          // Any other descendant without explicit width: cap at parent's inner width.
-          // This is correct for BOTH directions:
+        } else if (parentNode && parentNode.width > 100) {
+          // Parent has a RESOLVED width (not the creation-default 100). Cap
+          // at parent's inner content box.
           //  · VERTICAL parent, any child  → fills parent width (CSS block default).
           //  · HORIZONTAL parent, non-grow child → would normally hug content; we
           //    don't know content width at import-time so cap at parent inner as
@@ -1919,6 +1990,14 @@ function convertElement(
           const pPadR = parentNode.paddingRight ?? 0;
           const innerW = Math.max(40, parentNode.width - pPadL - pPadR);
           updates.width = innerW;
+        } else if (parentNode) {
+          // Parent width is still at the default 100 — its own post-process
+          // hasn't run yet in the depth-first walk. Do NOT set width here:
+          // leaving createdNode.width at the default 100 keeps it flagged as
+          // "needs resolve" so propagateWidthsTopDown() fixes it from the
+          // parent's final width. Previously we wrote Math.max(40, 100-pad),
+          // which on a section with 96/80 padding clamped to 40 and
+          // cascaded 40-wide columns through the entire page.
         } else {
           // No parent context (root element or orphan) — use viewport default.
           updates.width = ctx.defaultWidth ?? 1440;
@@ -2035,14 +2114,33 @@ function cssToOverrides(
   nodeType: NodeType,
   ctx: ConvertContext,
   parentStyles: Record<string, string> | null,
+  /** Parent's already-resolved width (from the scene graph). Preferred over
+   * parsing parentStyles.width when the parent declared a percentage like
+   * `width:100%`, which parseUnit would truncate to the literal 100. */
+  parentResolvedW?: number,
+  parentResolvedH?: number,
 ): Partial<SceneNode> & { name?: string } {
   const o: any = {};
 
   // ── Resolve parent dimensions for % values ──
-  // Width cascades from root (pages have fixed width). Height does NOT cascade —
-  // scrolling pages have content taller than viewport. Only use explicit parent height.
-  const parentW = parentStyles?.width ? parseUnit(parentStyles.width) : ctx.defaultWidth;
-  const parentH = parentStyles?.height ? parseUnit(parentStyles.height) : undefined;
+  // Prefer the parent's ACTUAL resolved width from the scene graph. Only fall
+  // back to parsing parentStyles.width when the graph parent hasn't settled
+  // yet. This prevents `parseUnit('100%') === 100` from cascading through
+  // every nested wrapper under a full-width section.
+  const parsedParentW = parentStyles?.width
+    ? (parentStyles.width.endsWith('%')
+        ? undefined
+        : parseUnit(parentStyles.width))
+    : undefined;
+  const parentW = parentResolvedW ?? parsedParentW ?? ctx.defaultWidth;
+  // Accept `min-height` as a height reference when height is absent — a
+  // flex container declared as `min-height: 120px` is the natural anchor
+  // for a child's percentage height (bar-chart columns at height: 40% etc.).
+  // Without this, nested percentage heights collapse to 0 at import time.
+  const parsedParentH = parentStyles?.height
+    ? (parentStyles.height.endsWith('%') ? undefined : parseUnit(parentStyles.height))
+    : (parentStyles?.['min-height'] ? parseUnit(parentStyles['min-height']) : undefined);
+  const parentH = parentResolvedH ?? parsedParentH;
 
   // ── Dimensions (with % resolution) ──
   if (styles.width) o.width = resolveLength(styles.width, parentW);

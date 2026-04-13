@@ -187,17 +187,18 @@ export async function handleCompile(input: CompileInput) {
       );
     }
   }
-  // Fallback to session brand if no explicit brand/designMd
-  if (!input.designMd && session.activeDesignMd) {
+  // Brand fallback policy:
+  //   - If the user passed raw HTML with no explicit brand, they are declaring
+  //     their own design — do NOT silently re-theme it with whichever brand
+  //     happened to be active on disk. (This used to convert neutral landings
+  //     into Shopify-green overnight.)
+  //   - For the compiler path (content/blueprint), DESIGN.md is REQUIRED, so
+  //     fall back to session / project activeBrand to avoid a hard error.
+  const needsBrandFallback = !input.designMd && !input.html;
+  if (needsBrandFallback && session.activeDesignMd) {
     input.designMd = session.activeDesignMd;
   }
-  // Last-resort fallback: read activeBrand from project.json. The session
-  // singleton can lose state across MCP transport boundaries (each tool call
-  // may run in a fresh interpreter when stdio harness forks), so the last
-  // brand the user extracted only survives on disk. Without this fallback,
-  // every compile after a process boundary silently runs without DESIGN.md
-  // and audit drops to 17 generic rules instead of the 23 brand-aware ones.
-  if (!input.designMd) {
+  if (needsBrandFallback && !input.designMd) {
     try {
       const projectDir = getWorkspaceRoot();
       const manifest = coreProjectIo().loadProject(projectDir);
@@ -205,8 +206,6 @@ export async function handleCompile(input: CompileInput) {
         const loaded = coreProjectIo().loadBrandFromProject(projectDir, manifest.activeBrand);
         if (loaded) {
           input.designMd = loaded.content;
-          // Re-hydrate the session so subsequent calls in the same process
-          // skip the disk read.
           const ds = session.getOrParseDesignMd(loaded.content, parseDesignMd);
           session.setBrand(manifest.activeBrand, loaded.content, ds);
         }
@@ -538,6 +537,18 @@ export async function handleCompile(input: CompileInput) {
       const { finalIssues, allFixed, passCount } = runAutoFixLoop(
         graph, rootId,
         () => {
+          // Re-run layout before every audit pass. Auto-fix mutations
+          // (padding, gap, font-weight) cascade through ancestor sizes,
+          // and spatial rules (sibling-overlap, content-overflow) read
+          // cached y/height — without a fresh Yoga pass they fire on
+          // phantom collisions between top-level sections after brand
+          // inheritance settles padding/font specs.
+          //
+          // Safe in compile.ts because `auditDs` is the brand passed to
+          // THIS compile call, not the session-global activeBrand —
+          // unlike the same trick in edit.ts which had to be reverted to
+          // avoid cross-brand color-in-palette contamination.
+          ensureSceneLayout(graph, rootId);
           const wrappedRoot = new StandaloneNode(graph, graph.getNode(rootId)!);
           return audit(wrappedRoot, rules, auditDs as any);
         },
@@ -644,11 +655,13 @@ export async function handleCompile(input: CompileInput) {
         writeFileSync(srcPath, input.html, 'utf-8');
         const srcRelative = group ? `src/${group}/${srcFileName}` : `src/${srcFileName}`;
 
-        // Store source path + group on the scene, then re-save to update manifest
+        // Store source path + group on the scene, then re-save to update manifest.
+        // Group is the typed StoredScene field powering `export site` filtering
+        // and the project list view's per-group section.
         const stored = getScene(sceneId);
         if (stored) {
-          (stored as any).sourceFile = srcRelative;
-          (stored as any).group = group;
+          stored.sourceFile = srcRelative;
+          stored.group = group;
           resaveScene(sceneId);
         }
       } catch { /* best-effort */ }

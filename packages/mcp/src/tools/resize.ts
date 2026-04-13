@@ -130,6 +130,32 @@ export async function handleResize(input: ResizeInput) {
     // Store the adapted scene as a new session scene so it can be inspected/
     // exported/edited via existing MCP tools. Slug carries the dimensions to
     // avoid collisions when adapting one source into many sizes.
+    //
+    // Pin the variant root to the EXACT requested dimensions and reset
+    // its position to (0, 0) before storing. Two related fixes:
+    //
+    //  1. Dimensions: the reflow pipeline preserves content height by
+    //     default, so a fixed-canvas request like 1200×630 (OG card)
+    //     ends up grown to whatever Yoga computed from the source. The
+    //     caller asked for a specific canvas — force it here.
+    //
+    //  2. Position: reflow.execute() parks the clone beside its source
+    //     (`clone.x = source.x + source.width + 50`) so an editor canvas
+    //     can show the before/after side by side. For an MCP resize that
+    //     stores each variant as a STANDALONE scene, this leaves the
+    //     variant root at x≈1490, y=0 in its own coordinate space, and
+    //     every child renders shifted right by 1490 px in the export.
+    //     Reset to 0,0 so the standalone canvas's coordinate space
+    //     starts at the origin.
+    try {
+      result.graph.updateNode(result.root.id, {
+        x: 0,
+        y: 0,
+        width: target.width,
+        height: target.height,
+      });
+    } catch { /* best-effort */ }
+
     const childName = `${stored.name} ${tName}`;
     const childSlug = `${(stored.slug ?? input.sceneId).replace(/[^a-z0-9-]+/gi, '-')}-${target.width}x${target.height}`;
     const newSceneId = storeScene(
@@ -138,6 +164,28 @@ export async function handleResize(input: ResizeInput) {
       undefined,
       { name: childName, slug: childSlug },
     );
+
+    // Inherit `group` and `brand` from the source scene so downstream
+    // tools that filter by group (`export site`, project list grouping)
+    // see the resize variants alongside their source. Without this, a
+    // launch-group source produces variant scenes with no group, and
+    // `export site` from the source filters them out — bundling only
+    // the desktop scene and missing every responsive size.
+    //
+    // Re-save after setting the field so the project.json manifest
+    // also picks up the group — without resaveScene the in-memory
+    // copy has the group but the disk entry doesn't, and a session
+    // restart would lose it.
+    const newStored = getScene(newSceneId);
+    if (newStored) {
+      if (stored.group) newStored.group = stored.group;
+      if (stored.brand) newStored.brand = stored.brand;
+      if (stored.brandHash) newStored.brandHash = stored.brandHash;
+      try {
+        const { resaveScene } = await import('../store.js');
+        resaveScene(newSceneId);
+      } catch { /* best-effort */ }
+    }
     succeeded++;
 
     // Compose semantic distribution + layout profile summary

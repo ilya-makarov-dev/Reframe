@@ -9,6 +9,7 @@
 
 import type { SceneGraph } from '../../../core/src/engine/scene-graph.js';
 import type { AuditIssue } from '../../../core/src/audit.js';
+import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
 
 // ─── CSS → INode property mapping ────────────────────────────
 
@@ -157,6 +158,21 @@ export function applyFix(graph: SceneGraph, issue: AuditIssue): boolean {
 
   if (!issue.fix) return false;
 
+  // Special case: combo "min-width/min-height" property emitted by
+  // min-touch-target rule. The combo string isn't in the CSS→node prop
+  // map, so the regular cssPropertyToNodeProperty lookup returned null
+  // and the touch-target fix silently no-op'd through every iterate
+  // pass. Parse out a single numeric value (e.g. "44×44px" → 44) and
+  // write both minWidth and minHeight on the node.
+  if (issue.fix.property === 'min-width/min-height') {
+    const num = parseFloat(issue.fix.suggested);
+    if (!isNaN(num) && num > 0) {
+      graph.updateNode(issue.nodeId, { minWidth: num, minHeight: num });
+      return true;
+    }
+    return false;
+  }
+
   const nodeProp = cssPropertyToNodeProperty(issue.fix.property);
   if (!nodeProp) return false;
 
@@ -195,6 +211,20 @@ export function applyFix(graph: SceneGraph, issue: AuditIssue): boolean {
   // Numeric properties
   const numVal = parseFloat(suggested);
   if (!isNaN(numVal)) {
+    // Safety: never auto-shrink dimensions on container nodes or the scene root.
+    // A component-spec rule firing on a mis-classified node (e.g. the old
+    // `/input|field|form/i` regex matching "Plainform") used to crush the
+    // entire landing from 4326px → 44px in one pass.
+    if (nodeProp === 'height' || nodeProp === 'width') {
+      const hasChildren = Array.isArray((node as any).children) && (node as any).children.length > 0;
+      const isRoot = !(node as any).parentId;
+      const current = (node as any)[nodeProp] as number | undefined;
+      const shrinkingALot = typeof current === 'number' && current > 0 && numVal < current * 0.5;
+      if (hasChildren || isRoot || shrinkingALot) {
+        return false;
+      }
+    }
+
     const updates: Record<string, number> = { [nodeProp]: numVal };
 
     // When fontSize changes, proportionally scale the baked-in absolute line-height
@@ -236,7 +266,19 @@ export function applyFix(graph: SceneGraph, issue: AuditIssue): boolean {
 
 /**
  * Auto-fix contrast by adjusting text color to meet WCAG AA (4.5:1).
- * Reads current text fill + parent background, computes corrected color.
+ * Reads current text fill + walks all ancestors to find the nearest solid
+ * background, mirroring the logic of the contrast-minimum audit rule.
+ *
+ * Bug history: this used to look at the immediate parent only and fall
+ * back to white. On articles where every text wrapper had
+ * `background:transparent`, the immediate parent had no solid fill, the
+ * function defaulted to white, computed contrast vs white (16:1, "fine"),
+ * skipped the fix, but the audit rule (which DOES walk ancestors) saw the
+ * real #fafaf7 article bg and kept reporting failures. Worse, when the
+ * audit's reported bg was very light, the white default became the
+ * correction target — and the fixer pushed text toward the actual bg
+ * color, ending in a 1:1 same-color collapse. Walking ancestors here
+ * keeps the fix and the audit on the same effective background.
  */
 function applyContrastFix(graph: SceneGraph, nodeId: string, node: any): boolean {
   // Get text color from fills
@@ -247,19 +289,35 @@ function applyContrastFix(graph: SceneGraph, nodeId: string, node: any): boolean
   const textG = textFill.color.g ?? 0;
   const textB = textFill.color.b ?? 0;
 
-  // Find parent background
-  let bgR = 1, bgG = 1, bgB = 1; // default white
-  if (node.parentId) {
-    const parent = graph.getNode(node.parentId);
-    if (parent?.fills) {
-      const bgFill = parent.fills.find((f: any) => f.type === 'SOLID' && f.visible !== false);
+  // Walk up ancestors to find the nearest solid (alpha > 0.5) background.
+  // Skip the node itself — for TEXT, fills[0] IS the text color.
+  let bgR = 1, bgG = 1, bgB = 1; // default white if nothing found
+  let bgFound = false;
+  let currentParentId: string | undefined = node.parentId;
+  while (currentParentId) {
+    const ancestor: any = graph.getNode(currentParentId);
+    if (!ancestor) break;
+    const ancFills = ancestor.fills as any[] | undefined;
+    if (Array.isArray(ancFills) && ancFills.length > 0) {
+      const bgFill = ancFills.find(
+        (f: any) => f?.type === 'SOLID' && f?.visible !== false && (f?.color?.a ?? 1) > 0.5,
+      );
       if (bgFill?.color) {
         bgR = bgFill.color.r ?? 1;
         bgG = bgFill.color.g ?? 1;
         bgB = bgFill.color.b ?? 1;
+        bgFound = true;
+        break;
       }
     }
+    const next = ancestor.parentId as string | undefined;
+    if (!next || next === currentParentId) break;
+    currentParentId = next;
   }
+  // No ancestor had a fill → don't guess. Trust the rule: it ran and
+  // produced the issue, but we have no ground truth for the bg to fix
+  // against. Returning false here is safer than corrupting the text fill.
+  if (!bgFound) return false;
 
   // Check if already good
   const currentRatio = contrastRatio(
@@ -299,6 +357,18 @@ export function runAutoFixLoop(
   let finalIssues: AuditIssue[] = [];
   let passCount = 0;
 
+  // Track which properties changed this pass. Dimension-affecting fixes
+  // (font-size, padding, gap, line-height, width/height) invalidate cached
+  // bbox geometry — spatial rules (content-overflow, sibling-overlap,
+  // container-underflow) would otherwise run against stale positions and
+  // produce phantom warnings. Non-dimensional fixes (color / contrast /
+  // fills) don't require re-layout and skip the cost.
+  const DIMENSION_FIX_PROPS = new Set([
+    'font-size', 'font-family', 'font-weight', 'line-height', 'letter-spacing',
+    'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+    'gap', 'width', 'height', 'min-width', 'min-height',
+  ]);
+
   for (let pass = 0; pass < (doAutoFix ? maxPasses : 1); pass++) {
     passCount++;
     const issues = auditFn();
@@ -310,10 +380,14 @@ export function runAutoFixLoop(
 
     // Apply fixable issues
     let fixedThisPass = 0;
+    let dimensionFixesThisPass = 0;
     for (const issue of issues) {
       const applied = applyFix(graph, issue);
       if (applied) {
         fixedThisPass++;
+        if (issue.fix?.property && DIMENSION_FIX_PROPS.has(issue.fix.property)) {
+          dimensionFixesThisPass++;
+        }
         if (issue.fix) {
           allFixed.push(`${issue.rule}: ${issue.fix.property} ${issue.fix.current} → ${issue.fix.suggested}`);
         } else {
@@ -325,6 +399,14 @@ export function runAutoFixLoop(
     if (fixedThisPass === 0) {
       finalIssues = issues;
       break;
+    }
+
+    // Re-run layout BEFORE the next audit pass when a fix mutated something
+    // that affects geometry. This prevents spatial rules on pass N+1 from
+    // reading the cached (pre-fix) y/height of ancestors whose size depends
+    // on the fixed node.
+    if (dimensionFixesThisPass > 0) {
+      ensureSceneLayout(graph, rootId);
     }
 
     // Last pass: re-audit to get remaining

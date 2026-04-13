@@ -232,14 +232,15 @@ export function textOverflow(): AuditRule {
 
     // Flex column wrap escape hatch: linkedom doesn't compute flex constraints,
     // so a TEXT node inside a VERTICAL parent can report a natural width much
-    // wider than its parent even though it would wrap in a real browser. If
-    // the parent is a column and the text's measured width is well past the
-    // parent's inner width, trust CSS wrap rather than flag overflow.
+    // wider than its parent even though it would wrap in a real browser. Only
+    // trust CSS wrap when the parent is wide enough to realistically wrap into
+    // — a 64-wide column holding 680-wide text is a layout bug, not a wrap
+    // candidate, so we let `content-overflow` catch it downstream.
     const parent = ctx.parent;
     if (
       parent &&
       parent.layoutMode === 'VERTICAL' &&
-      parent.width > 0 &&
+      parent.width >= 120 &&
       node.width > parent.width * 1.1
     ) {
       return [];
@@ -526,23 +527,262 @@ export function noEmptyText(): AuditRule {
   });
 }
 
+// ── Content Overflow (parent-child spatial check) ──
+
+/**
+ * Detect children whose bounding box extends beyond their parent's inner
+ * content box. Unlike text-overflow (which checks against the root frame
+ * with a CSS-wrap escape hatch), this rule directly compares each child
+ * against its own parent at every level of the tree — catching the
+ * "680-wide text inside a 64-wide testimonial column" bug that
+ * text-overflow silently lets through.
+ *
+ * Severity scales with the overflow magnitude: >2× parent = error (visually
+ * broken), >1.25× = warning, smaller = info (likely fine under CSS wrap).
+ */
+export function contentOverflow(): AuditRule {
+  return rule('content-overflow', (node, ctx) => {
+    if (node === ctx.root) return [];
+    const parent = ctx.parent;
+    if (!parent) return [];
+
+    // Skip absolute-positioned nodes: they are intentionally out of flow.
+    if ((node as any).layoutPositioning === 'ABSOLUTE') return [];
+    // Skip when any ancestor clips — overflow is visually hidden anyway.
+    if (hasClippingAncestor(ctx)) return [];
+
+    const pW = parent.width ?? 0;
+    const pH = parent.height ?? 0;
+    if (pW <= 0 || pH <= 0) return [];
+
+    // Parent inner box (padding-aware). Handle a missing padding as 0.
+    const pl = (parent as any).paddingLeft ?? 0;
+    const pr = (parent as any).paddingRight ?? 0;
+    const pt = (parent as any).paddingTop ?? 0;
+    const pb = (parent as any).paddingBottom ?? 0;
+    const innerW = Math.max(0, pW - pl - pr);
+    const innerH = Math.max(0, pH - pt - pb);
+
+    // Child's measured size and position (relative to parent).
+    const cw = node.width ?? 0;
+    const ch = node.height ?? 0;
+    const cx = (node as any).x ?? 0;
+    const cy = (node as any).y ?? 0;
+    if (cw <= 0 || ch <= 0) return [];
+
+    // Position-aware overflow. A child positioned at (cx, cy) with size
+    // (cw, ch) must fit within parent's inner box (pl..pW-pr, pt..pH-pb).
+    // Taking position into account catches "main section placed below a
+    // sidebar at y=parent.height" bugs in reflow, where the child size
+    // fits its parent but its POSITION lands outside the container.
+    const rightOverflow = (cx + cw) - (pW - pr);
+    const bottomOverflow = (cy + ch) - (pH - pb);
+    const leftUnderflow = pl - cx;
+    const topUnderflow = pt - cy;
+
+    const overW = Math.max(0, rightOverflow, leftUnderflow);
+    const overH = Math.max(0, bottomOverflow, topUnderflow);
+
+    // Tolerance: sub-pixel rounding + 1px Yoga drift.
+    const TOLERANCE = 2;
+    if (overW <= TOLERANCE && overH <= TOLERANCE) return [];
+
+    // Ignore text nodes where the parent is clearly wide enough that CSS
+    // wrap will handle it (width > 100 px). A 680-wide text inside a 64-wide
+    // column cannot wrap out of that; a 200-wide text inside a 180-wide
+    // column will wrap and render fine.
+    if (node.type === NodeType.Text && innerW >= 100 && overW < innerW * 0.5) return [];
+
+    // Severity: magnitude of overflow vs parent inner size. Uses the
+    // maximum of (child bbox extent / parent inner extent) on both axes,
+    // so position-based overflows (child at y=pH) also scale severity.
+    const extentRatioW = innerW > 0 ? (cx + cw) / innerW : 1;
+    const extentRatioH = innerH > 0 ? (cy + ch) / innerH : 1;
+    const worstRatio = Math.max(extentRatioW, extentRatioH);
+    let severity: Severity = 'info';
+    if (worstRatio > 2) severity = 'error';
+    else if (worstRatio > 1.25) severity = 'warning';
+
+    const dir = overW > overH ? 'horizontally' : 'vertically';
+    const label = node.type === NodeType.Text
+      ? `Text "${truncate((node as any).characters ?? '', 24)}"`
+      : `"${node.name}" (${node.type})`;
+
+    return [{
+      rule: 'content-overflow',
+      severity,
+      message: `${label} overflows parent "${parent.name}" ${dir} by ${Math.round(Math.max(overW, overH))}px (child ${Math.round(cw)}×${Math.round(ch)}, parent inner ${Math.round(innerW)}×${Math.round(innerH)})`,
+      nodeId: node.id,
+      nodeName: node.name,
+      path: ctx.path,
+    }];
+  });
+}
+
+// ── Container Underflow (collapsed wrapper detector) ──
+
+/**
+ * Detect layout containers whose resolved width is absurdly small compared
+ * to a resolved ancestor — the signature of the "40 px floor" cascade where
+ * `propagateWidthsTopDown` failed to resolve a nested wrapper and every
+ * descendant collapsed together with it. `content-overflow` misses this
+ * case because children collapse TOO (so child.width ≤ parent.width → no
+ * overflow). This rule catches the parent directly.
+ *
+ * Deterministic: fires only when (a) node has an auto-layout mode, (b)
+ * width is below an absolute floor (50 px), AND (c) the nearest ancestor
+ * with a resolved width (>200 px) is at least 4× larger. All three have
+ * to hold — legitimate narrow sidebars (48 px icon rails) don't have a
+ * much wider ancestor.
+ */
+export function containerUnderflow(): AuditRule {
+  return rule('container-underflow', (node, ctx) => {
+    if (node === ctx.root) return [];
+    const mode = (node as any).layoutMode as string | undefined;
+    if (!mode || mode === 'NONE') return [];
+    const children = (node as any).children as INode[] | undefined;
+    if (!children || children.length === 0) return [];
+    const w = node.width ?? 0;
+    if (w <= 0 || w >= 50) return [];
+
+    // Find nearest ancestor whose width is resolved (>200 px).
+    let ancestorW = 0;
+    let nearest: INode | undefined;
+    for (let i = ctx.ancestors.length - 1; i >= 0; i--) {
+      const a = ctx.ancestors[i];
+      if ((a.width ?? 0) > 200) { ancestorW = a.width; nearest = a; break; }
+    }
+    if (ancestorW < w * 4) return [];
+
+    // Intent guard: a tiny container is only a CASCADE FAILURE if at least
+    // one of its direct children doesn't fit inside it. Status pills
+    // ("Paid" 44 px wide containing a 30 px text), icon tiles, avatar
+    // dots are all legitimately narrow — the children fit, the author
+    // intended this size. The 40-floor cascade we want to catch always
+    // has children whose intrinsic width exceeds the collapsed parent.
+    const tolerance = 4;
+    const hasOversizedChild = children.some(c => {
+      const cw = c.width ?? 0;
+      const ch = c.height ?? 0;
+      // Skip absolute-positioned and zero-size children.
+      if ((c as any).layoutPositioning === 'ABSOLUTE') return false;
+      if (cw <= 0 && ch <= 0) return false;
+      // A child wider than its parent in the relevant axis is the
+      // unmistakable signature of cascade failure.
+      return cw > w + tolerance;
+    });
+    if (!hasOversizedChild) return [];
+
+    const pl = (nearest as any)?.paddingLeft ?? 0;
+    const pr = (nearest as any)?.paddingRight ?? 0;
+    const expected = Math.max(0, (nearest?.width ?? ancestorW) - pl - pr);
+
+    return [{
+      rule: 'container-underflow',
+      severity: 'error',
+      message: `Layout container "${node.name}" is ${Math.round(w)}px wide but its ancestor "${nearest?.name ?? 'root'}" is ${Math.round(nearest?.width ?? ancestorW)}px — likely width-cascade failure (expected ~${expected}px)`,
+      nodeId: node.id,
+      nodeName: node.name,
+      path: ctx.path,
+    }];
+  });
+}
+
+// ── Sibling Overlap (auto-layout spatial check) ──
+
+/**
+ * In auto-layout containers (HORIZONTAL / VERTICAL), siblings should flow
+ * without overlapping. An overlap here indicates a layout computation
+ * failure (Yoga cross-axis cascade, stale cached dimensions, etc.). This
+ * rule fires once per parent and lists every overlapping pair.
+ */
+export function siblingOverlap(): AuditRule {
+  return rule('sibling-overlap', (node, _ctx) => {
+    const layoutMode = (node as any).layoutMode;
+    if (layoutMode !== 'HORIZONTAL' && layoutMode !== 'VERTICAL') return [];
+    const children = (node.children ?? []).filter(c =>
+      (c as any).layoutPositioning !== 'ABSOLUTE' && c.width > 0 && c.height > 0,
+    );
+    if (children.length < 2) return [];
+
+    const issues: AuditIssue[] = [];
+    for (let i = 0; i < children.length; i++) {
+      for (let j = i + 1; j < children.length; j++) {
+        const a = children[i];
+        const b = children[j];
+
+        // TEXT-TEXT overlap is a measurement artifact: text nodes report a
+        // glyph bbox that can include ascenders/descenders leaking ±2-4 px
+        // into the neighbor's bbox, but CSS actually lays text out using
+        // line-boxes, so real browser renders never overlap text siblings.
+        // Skip text-against-text. A real container-vs-container collision
+        // (FRAME vs FRAME) is still the bug we care about.
+        if (a.type === NodeType.Text && b.type === NodeType.Text) continue;
+
+        // Larger tolerance for any overlap involving text: descender on one
+        // text can extend ~3 px into a neighboring frame's top without
+        // visually colliding. A true overlap is > 4 px.
+        const involvesText = a.type === NodeType.Text || b.type === NodeType.Text;
+        const TOLERANCE = involvesText ? 4 : 1;
+
+        const ax = a.x ?? 0, ay = a.y ?? 0;
+        const bx = b.x ?? 0, by = b.y ?? 0;
+        const overlapX = ax + a.width - bx > TOLERANCE && bx + b.width - ax > TOLERANCE;
+        const overlapY = ay + a.height - by > TOLERANCE && by + b.height - ay > TOLERANCE;
+        if (overlapX && overlapY) {
+          issues.push({
+            rule: 'sibling-overlap',
+            severity: 'warning',
+            message: `"${a.name}" and "${b.name}" overlap inside auto-layout parent "${node.name}"`,
+            nodeId: node.id,
+            nodeName: node.name,
+          });
+        }
+      }
+    }
+    return issues;
+  });
+}
+
 // ── Zero-Size Nodes ──
 
 /** Detect nodes with zero width or height. */
 export function noZeroSize(): AuditRule {
   return rule('no-zero-size', (node, ctx) => {
     if (node === ctx.root) return [];
-    if (node.width === 0 || node.height === 0) {
-      return [{
-        rule: 'no-zero-size',
-        severity: 'warning',
-        message: `"${node.name}" has zero ${node.width === 0 ? 'width' : 'height'}`,
-        nodeId: node.id,
-        nodeName: node.name,
-        path: ctx.path,
-      }];
+    if (node.width !== 0 && node.height !== 0) return [];
+
+    // Container false-positive guard: if the node has at least one visible
+    // child with non-zero dimensions, the 0-width/height is a Yoga HUG
+    // cross-axis measurement artifact — the content still renders and the
+    // warning is noise. Skip.
+    const children = (node as any).children as INode[] | undefined;
+    if (Array.isArray(children) && children.length > 0) {
+      const hasSizedChild = children.some(c =>
+        (c as any).visible !== false && c.width > 0 && c.height > 0,
+      );
+      if (hasSizedChild) return [];
     }
-    return [];
+
+    // Empty decorative leaves (background dots, icon tiles) with a visible
+    // fill but no children are also not useful to flag — the author put
+    // explicit width/height in CSS, the importer just failed to resolve
+    // percentage heights against an unsized parent. Flagging here drowns
+    // the real warnings in noise.
+    const fills = (node as any).fills as any[] | undefined;
+    const hasVisibleFill = Array.isArray(fills) && fills.some(f =>
+      f?.visible !== false && f?.type === 'SOLID' && (f?.opacity ?? 1) > 0,
+    );
+    if (hasVisibleFill && (!children || children.length === 0)) return [];
+
+    return [{
+      rule: 'no-zero-size',
+      severity: 'warning',
+      message: `"${node.name}" has zero ${node.width === 0 ? 'width' : 'height'}`,
+      nodeId: node.id,
+      nodeName: node.name,
+      path: ctx.path,
+    }];
   });
 }
 
@@ -987,17 +1227,28 @@ export function ctaVisibility(): AuditRule {
         });
       }
 
-      // CTA should have sufficient area relative to frame — but only on fixed-size
-      // layouts. Area ratio is meaningless for a 7000px-tall scrollable landing.
+      // CTA should have sufficient area relative to viewport — capped at
+      // ~1 viewport (900 px tall) for long landing pages so a 100×40
+      // button doesn't appear "0.1% of frame" against a 4000-px scroll
+      // length. The user only sees one viewport at a time, and that's
+      // the area worth comparing against. Also skip when the page is
+      // already detected as scrollable (handled by the visual
+      // hierarchy / focus areas of the audit elsewhere).
       if (!isScrollable) {
+        const VIEWPORT_REFERENCE_HEIGHT = 900;
+        const effectiveHeight = Math.min(realHeight, VIEWPORT_REFERENCE_HEIGHT);
         const btnArea = btn.width * btn.height;
-        const frameArea = realWidth * realHeight;
+        const frameArea = realWidth * effectiveHeight;
         const areaRatio = btnArea / frameArea;
-        if (areaRatio < 0.005 && minDim > 200) {
+        // 0.2% threshold reflects realistic CTA sizing — a typical
+        // 96×32 px primary button on a 1440×900 viewport is ~0.23 %.
+        // The previous 0.5 % threshold flagged every reasonably-sized
+        // CTA on every modern landing page as "not prominent enough."
+        if (areaRatio < 0.002 && minDim > 200) {
           issues.push({
             rule: 'cta-visibility',
             severity: 'info',
-            message: `CTA "${btn.name}" occupies only ${(areaRatio * 100).toFixed(1)}% of frame area. Consider making it more prominent.`,
+            message: `CTA "${btn.name}" occupies only ${(areaRatio * 100).toFixed(1)}% of viewport area. Consider making it more prominent.`,
             nodeId: btn.id,
             nodeName: btn.name,
           });
@@ -1032,10 +1283,13 @@ export function ctaVisibility(): AuditRule {
 
 /**
  * Check that interactive-looking elements meet WCAG minimum 44×44px touch target.
- * Targets: nodes whose name contains "button", "cta", "btn", "link", "toggle", "checkbox".
+ * Targets: nodes whose name matches a whole-word interactive token. Word
+ * boundaries are non-negotiable here — without them "Recent trans**action**s"
+ * matched `action`, "in**form**ation" matched `form` (the same class of bug
+ * that crushed root frames in the original audit-floor regression).
  */
 export function minTouchTarget(minSize = 44): AuditRule {
-  const INTERACTIVE_PATTERNS = /(button|btn|cta|link|toggle|checkbox|radio|switch|tab|action|click|tap|submit)/i;
+  const INTERACTIVE_PATTERNS = /\b(button|btn|cta|link|toggle|checkbox|radio|switch|tab|action|click|tap|submit)\b/i;
 
   return rule('min-touch-target', (node, ctx) => {
     if (node.type === NodeType.Text) return [];
@@ -1231,31 +1485,50 @@ export function exportFidelity(): AuditRule {
  * If the design system specifies ss01/tnum/cv01, text nodes should use them.
  */
 export function fontFeaturesCompliance(): AuditRule {
+  // Root-only aggregation: walking every text node produced one issue per
+  // node (56+ on a typical landing), drowning the audit in repeated
+  // "missing 'ss01'" noise. Collapse into one summary issue per scene.
   return rule('font-features-compliance', (node, ctx) => {
-    if (node.type !== NodeType.Text) return [];
+    if (node !== ctx.root) return [];
     if (!ctx.designSystem?.typography?.fontFeatures) return [];
     if (ctx.designSystem.typography.fontFeatures.length === 0) return [];
 
-    const nodeFeatures = (node as any).fontFeatureSettings as string[] | undefined;
     const requiredTags = ctx.designSystem.typography.fontFeatures
       .filter(f => f.scope === 'global' || f.scope === 'heading')
       .map(f => f.tag);
-
     if (requiredTags.length === 0) return [];
 
-    const missing = requiredTags.filter(tag => !nodeFeatures?.includes(tag));
-    if (missing.length === 0) return [];
+    const missingByTag = new Map<string, number>();
+    let affectedNodes = 0;
+    const walk = (n: INode) => {
+      if (n.type === NodeType.Text) {
+        const feats = (n as any).fontFeatureSettings as string[] | undefined;
+        const missing = requiredTags.filter(tag => !feats?.includes(tag));
+        if (missing.length > 0) {
+          affectedNodes++;
+          for (const tag of missing) missingByTag.set(tag, (missingByTag.get(tag) ?? 0) + 1);
+        }
+      }
+      if (n.children) for (const c of n.children) walk(c);
+    };
+    walk(node);
+
+    if (affectedNodes === 0) return [];
+
+    const tagSummary = [...missingByTag.entries()]
+      .map(([tag, count]) => `"${tag}" (×${count})`)
+      .join(', ');
 
     return [{
       rule: 'font-features-compliance',
       severity: 'info',
-      message: `Text "${truncate(node.characters ?? '', 20)}" is missing font features: ${missing.map(t => `"${t}"`).join(', ')}`,
+      message: `${affectedNodes} text node(s) missing design-system font features: ${tagSummary}`,
       nodeId: node.id,
       nodeName: node.name,
       path: ctx.path,
       fix: {
         property: 'font-feature-settings',
-        current: nodeFeatures?.length ? nodeFeatures.map(t => `"${t}"`).join(', ') : 'none',
+        current: 'none',
         suggested: requiredTags.map(t => `"${t}"`).join(', '),
         css: `font-feature-settings: ${requiredTags.map(t => `"${t}"`).join(', ')}`,
       },
@@ -1399,8 +1672,9 @@ export function componentSpecCompliance(): AuditRule {
       }
     }
 
-    // Input compliance
-    if ((role === 'input' || /input|field|form/i.test(name)) && components.input) {
+    // Input compliance — match by semantic role only, or whole-word name.
+    // Substring matches like "form" inside "Plainform" used to crush the root.
+    if ((role === 'input' || /\b(input|textfield|form-field)\b/i.test(name)) && components.input) {
       const spec = components.input;
       const cr = node.cornerRadius;
       if (typeof cr === 'number' && cr > 0 && Math.abs(cr - spec.borderRadius) > 2) {
@@ -1643,13 +1917,24 @@ export function semanticTouchTarget(minSize = 44): AuditRule {
   return rule('semantic-touch-target', (node, ctx) => {
     if (!node.semanticRole || !INTERACTIVE_ROLES.has(node.semanticRole)) return [];
     if (node.width >= minSize && node.height >= minSize) return [];
+    const current = `${Math.round(node.width)}×${Math.round(node.height)}px`;
     return [{
       rule: 'semantic-touch-target',
       severity: 'warning',
-      message: `Interactive "${node.name}" (${node.semanticRole}) is ${Math.round(node.width)}×${Math.round(node.height)}px — below WCAG ${minSize}×${minSize}px touch target.`,
+      message: `Interactive "${node.name}" (${node.semanticRole}) is ${current} — below WCAG ${minSize}×${minSize}px touch target.`,
       nodeId: node.id,
       nodeName: node.name,
       path: ctx.path,
+      // Provide a fix so iterate auto can clear semantic touch-target
+      // warnings the same way it clears min-touch-target. Same combo
+      // property string the autoFix engine handles via its slashed
+      // special case.
+      fix: {
+        property: 'min-width/min-height',
+        current,
+        suggested: `${minSize}×${minSize}px`,
+        css: `min-width: ${minSize}px; min-height: ${minSize}px`,
+      },
     }];
   });
 }
@@ -1746,7 +2031,17 @@ function findButtonElements(root: INode): INode[] {
         hasMeaningfulLabel &&
         isButtonSized;
 
-      if (isSmall && hasMeaningfulLabel && (namedLikeButton || shapedLikeButton)) {
+      // Container guard: a real CTA has at most label + optional icon. Anything
+      // with FRAME descendants is a card/section, not a button. Without this,
+      // pricing cards (title + price + description + inner CTA) get mis-classified
+      // as CTAs, and the clip check flags the whole pricing row as "extends outside
+      // frame" on every rebrand.
+      const hasFrameDescendant = (node.children ?? []).some(
+        c => c.type === NodeType.Frame || c.type === NodeType.Instance,
+      );
+      const isLikelyContainer = hasFrameDescendant || textChildren.length > 2 || labelText.length > 40;
+
+      if (isSmall && hasMeaningfulLabel && !isLikelyContainer && (namedLikeButton || shapedLikeButton)) {
         buttons.push(node);
       }
     }

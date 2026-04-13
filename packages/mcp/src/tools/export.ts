@@ -316,14 +316,27 @@ export async function handleExport(input: {
       }
 
       case 'site': {
-        // Bundle all scenes in the session into a multi-page site
+        // Bundle scenes into a multi-page site. Filtering policy:
+        //  1. If the requested sceneId belongs to a project group (e.g.
+        //     compiled with name="site/home" → group="site"), only bundle
+        //     scenes that share that group. This is the common case —
+        //     the agent is exporting a coherent micro-site, not the
+        //     entire ad-hoc session of 65 grid variants and rebrands.
+        //  2. Otherwise fall back to bundling every scene. Old behavior
+        //     stays available for ad-hoc multi-scene previews.
         const allScenes = listScenes();
-        if (allScenes.length < 2) {
-          return {
-            content: [{ type: 'text' as const, text: 'Site export requires at least 2 scenes. Create more scenes with reframe_compile or reframe_edit first.' }],
-          };
+        const sourceStored = getScene(sceneId);
+        const sourceGroup = sourceStored?.group;
+        const filtered = sourceGroup
+          ? allScenes.filter(s => getScene(s.id)?.group === sourceGroup)
+          : allScenes;
+        if (filtered.length < 2) {
+          const hint = sourceGroup
+            ? `Site export from group "${sourceGroup}" found only ${filtered.length} scene. Compile additional pages with name="${sourceGroup}/<page>" first.`
+            : 'Site export requires at least 2 scenes. Create more scenes with reframe_compile or reframe_edit first.';
+          return { content: [{ type: 'text' as const, text: hint }] };
         }
-        const sitePages = allScenes.map(s => {
+        const sitePages = filtered.map(s => {
           const stored = getScene(s.id)!;
           return {
             slug: stored.slug,

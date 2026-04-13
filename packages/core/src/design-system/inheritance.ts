@@ -199,6 +199,26 @@ export function applyBrandInheritance(
   // Pre-compute elevation level 1 shadow stack if depth is defined
   const elevationLevel1 = ds.depth?.elevationLevels?.[1] ?? ds.depth?.elevationLevels?.[0];
 
+  // Scene polarity — used by inheritance fills to preserve intentional
+  // polarity inversions (e.g. a dark pricing card inside a light scene).
+  // Without this, applyCard would overwrite the preserved dark fill with
+  // the brand's default light card surface, and any contrast-aware text
+  // painted earlier for the dark background would collapse to ~1:1.
+  function colorIsDark(c: { r: number; g: number; b: number }): boolean {
+    return (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) < 0.5;
+  }
+  const rootNode = graph.getNode(rootId);
+  const rootFill = (rootNode as any)?.fills?.[0];
+  const rootFillColor = rootFill?.type === 'SOLID' ? rootFill.color : undefined;
+  const sceneIsDark = rootFillColor ? colorIsDark(rootFillColor) : false;
+  function nodeInvertsScenePolarity(nodeId: string): boolean {
+    const n = graph.getNode(nodeId);
+    const f = (n as any)?.fills?.[0];
+    if (!f || f.type !== 'SOLID' || !f.color) return false;
+    if ((f.color.a ?? 1) < 0.5) return false;
+    return colorIsDark(f.color) !== sceneIsDark;
+  }
+
   // ─── Typography inheritance ────────────────────────────────
 
   function applyTypography(nodeId: string, role: string): boolean {
@@ -357,7 +377,11 @@ export function applyBrandInheritance(
       updates.paddingBottom = cardSpec.padding;
       updates.paddingLeft = cardSpec.padding;
     }
-    if (cardSpec.background) {
+    // Only overwrite the card background when this card is NOT a polarity
+    // inversion of the scene. A dark card in a light scene is authored
+    // emphasis — keep the dark fill. Preserving it also keeps the contrast-
+    // aware text painted earlier by rebrandColorsFromTokens correct.
+    if (cardSpec.background && !nodeInvertsScenePolarity(nodeId)) {
       const color = hexToColor(cardSpec.background);
       if (color) setSolidFill(graph, nodeId, color);
     }
@@ -455,7 +479,9 @@ export function applyBrandInheritance(
   function applyNav(nodeId: string, spec: NavSpec): boolean {
     const updates: Record<string, unknown> = {};
     if (typeof spec.height === 'number') updates.height = spec.height;
-    if (spec.background) {
+    // Respect authored polarity inversion on nav bars (dark nav in light
+    // scene = intentional, don't repaint).
+    if (spec.background && !nodeInvertsScenePolarity(nodeId)) {
       const color = hexToColor(spec.background);
       if (color) setSolidFill(graph, nodeId, color);
     }
