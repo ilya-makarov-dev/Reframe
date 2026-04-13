@@ -33,6 +33,7 @@ import { handleIntentApi } from './api/intent.js';
 import { handleGestureApi } from './api/gesture.js';
 import { handleNodeEditApi } from './api/node-edit.js';
 import { handleVariationsApi } from './api/variations.js';
+import { renderShell, renderSidebar } from './layout.js';
 import type { SidebarSceneItem, SidebarComponentItem, SidebarMacroItem } from './layout.js';
 import { hydrateShell } from './hydrate.js';
 
@@ -228,6 +229,122 @@ export async function handlePlatformRequest(
     }
     const html = renderMacrosPage(data);
     send(res, 200, 'text/html', html);
+    return true;
+  }
+
+  if (pathname === '/platform/api-docs') {
+    const apiDocsHtml = renderShell({
+      title: 'API Explorer',
+      sidebar: renderSidebar({ current: 'home' as any }),
+      main: `
+        <div style="padding:32px 40px;max-width:1000px">
+          <h1 class="t-title" style="font-size:28px;font-weight:700;margin:0 0 8px">Headless API</h1>
+          <p class="t-body" style="color:var(--text-muted);margin:0 0 32px">REST endpoints for programmatic design rendering. Base URL: <code style="background:var(--surface-sunken);padding:2px 6px;border-radius:4px">http://localhost:4100/api</code></p>
+          ${[
+            { method: 'GET', path: '/api/render/{sceneId}', params: 'format, brand, width, height, scale, mode', desc: 'Render a scene to any format with optional brand/viewport' },
+            { method: 'POST', path: '/api/render/batch', params: 'sceneId, formats[], brands[], viewports[]', desc: 'Cartesian product batch — N brands \u00D7 M viewports \u00D7 K formats' },
+            { method: 'GET', path: '/api/tokens/{sceneId}', params: 'format=dtcg', desc: 'Export design tokens in W3C DTCG 2025.10 format' },
+            { method: 'POST', path: '/api/tokens/{sceneId}', params: 'DTCG JSON body', desc: 'Import tokens from DTCG JSON' },
+            { method: 'GET', path: '/api/audit/{sceneId}', params: 'aesthetic=true', desc: 'Run 30+ audit rules + aesthetic quality scoring' },
+            { method: 'GET', path: '/api/blocks', params: 'category', desc: 'Browse block library (20+ section templates)' },
+            { method: 'POST', path: '/api/blocks/instantiate', params: 'name, slots, brand', desc: 'Create scene from block template' },
+            { method: 'GET', path: '/api/scenes', params: '', desc: 'List all session scenes' },
+            { method: 'GET', path: '/thumbnail/{sceneId}.png', params: 'scale', desc: 'Raster thumbnail via CanvasKit' },
+          ].map(ep => `
+            <div style="padding:16px;border:1px solid var(--border);border-radius:8px;margin-bottom:12px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                <span style="background:${ep.method === 'GET' ? '#22c55e' : '#3b82f6'};color:white;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;font-family:var(--mono)">${ep.method}</span>
+                <code style="font-family:var(--mono);font-size:14px">${ep.path}</code>
+              </div>
+              <div class="t-body" style="color:var(--text-muted);font-size:13px">${ep.desc}</div>
+              ${ep.params ? `<div style="margin-top:6px;font-size:12px;color:var(--text-muted)">Params: <code>${ep.params}</code></div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `,
+    });
+    send(res, 200, 'text/html', apiDocsHtml);
+    return true;
+  }
+
+  if (pathname === '/platform/quality') {
+    const scenes = ctx.sessionScenes ?? [];
+    const qualityHtml = renderShell({
+      title: 'Quality Dashboard',
+      sidebar: renderSidebar({ current: 'home' as any }),
+      main: `
+        <div style="padding:32px 40px;max-width:1000px">
+          <h1 class="t-title" style="font-size:28px;font-weight:700;margin:0 0 8px">Quality Dashboard</h1>
+          <p class="t-body" style="color:var(--text-muted);margin:0 0 32px">Aesthetic quality scores across all scenes. Click "Analyze All" to compute.</p>
+          <button data-quality-all class="btn-primary" style="padding:10px 24px;background:var(--accent);color:var(--on-accent);border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:24px"
+            onclick="this.textContent='Analyzing...';this.disabled=true;Promise.all(${JSON.stringify(scenes.map((s: any) => s.id))}.map(function(id){return fetch('/platform/api/aesthetic/'+id).then(function(r){return r.json()})})).then(function(results){var el=document.querySelector('[data-quality-grid]');if(!el)return;el.innerHTML=results.map(function(r,i){if(!r.ok)return '';return '<div style=\\'padding:16px;border:1px solid var(--border);border-radius:8px\\'><div style=\\'font-weight:600\\'>'+${JSON.stringify(scenes.map((s: any) => s.name))}[i]+'</div><div style=\\'font-size:48px;font-weight:800;color:var(--accent);margin:8px 0\\'>'+r.overall+'%</div><div style=\\'color:var(--text-muted);font-size:13px\\'>'+r.overallRating+'</div></div>'}).join('')}).catch(function(){}).finally(function(){var btn=document.querySelector('[data-quality-all]');if(btn){btn.textContent='Re-analyze';btn.disabled=false}})">
+            Analyze All
+          </button>
+          <div data-quality-grid style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px">
+            ${scenes.length === 0 ? '<div class="t-body" style="color:var(--text-muted)">No scenes. Compile a design first.</div>' : '<div class="t-body" style="color:var(--text-muted)">Click "Analyze All" to compute scores.</div>'}
+          </div>
+        </div>
+      `,
+    });
+    send(res, 200, 'text/html', qualityHtml);
+    return true;
+  }
+
+  if (pathname === '/platform/batch') {
+    const { renderBatchPage } = await import('./pages/batch.js');
+    const scenes = ctx.sessionScenes.map((s: any) => ({ id: s.id, slug: s.slug, name: s.name }));
+    const brands = (ctx as any).brands ?? [];
+    send(res, 200, 'text/html', renderBatchPage({ scenes, brands }));
+    return true;
+  }
+
+  if (pathname === '/platform/blocks') {
+    // Block library page — server-rendered list of available blocks
+    try {
+      const blocksModule = await import('../../../core/src/blocks/index.js');
+      if (blocksModule.blockCount() === 0) blocksModule.registerStarterBlocks();
+      const categoryFilter = url.searchParams.get('category') ?? undefined;
+      const blocks: any[] = blocksModule.listBlocks(categoryFilter as any);
+      const categories = [...new Set(blocks.map((b: any) => b.category))].sort();
+
+      const categoryNav = categories.map((c: string) => {
+        const isActive = c === categoryFilter ? ' style="font-weight:700;color:var(--accent)"' : '';
+        return `<a href="/platform/blocks?category=${c}" class="t-body"${isActive}>${c} (${blocks.filter((b: any) => b.category === c).length})</a>`;
+      }).join(' \u00b7 ');
+
+      const blockCards = blocks.map((b: any) =>
+        `<div class="spec-card" style="padding:16px;cursor:pointer;position:relative" data-block-name="${esc(b.name)}">
+          <div class="name" style="font-weight:600">${esc(b.name)}</div>
+          <div class="desc" style="font-size:13px;color:var(--text-muted);margin-top:4px">${esc(b.description)}</div>
+          <div class="meta" style="font-size:12px;color:var(--text-muted);margin-top:8px">${b.slots.length} slot${b.slots.length === 1 ? '' : 's'} \u00b7 ${esc(b.category)}${b.tags ? ' \u00b7 ' + b.tags.join(', ') : ''}</div>
+          <button onclick="event.stopPropagation();fetch('/api/blocks/instantiate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'${esc(b.name)}'})}).then(r=>r.json()).then(d=>{if(d.sceneId)window.location='/platform/project/'+encodeURIComponent('${esc(b.name)}')}).catch(e=>alert('Error: '+e.message))"
+            style="margin-top:12px;padding:6px 16px;background:var(--accent);color:var(--on-accent);border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;width:100%">
+            Add to page
+          </button>
+        </div>`
+      ).join('\n');
+
+      const pageHtml = renderShell({
+        title: 'Block Library',
+        sidebar: renderSidebar({
+          current: 'blocks',
+        }),
+        main: `
+          <div style="padding:32px 40px;max-width:1200px">
+            <h1 class="t-title" style="font-size:28px;font-weight:700;margin:0 0 8px">Block Library</h1>
+            <p class="t-body" style="color:var(--text-muted);margin:0 0 24px">${blocks.length} blocks across ${categories.length} categories.</p>
+            <div style="margin-bottom:24px">${categoryNav}${categoryFilter ? ' \u00b7 <a href="/platform/blocks" class="t-body">All</a>' : ''}</div>
+            <div class="component-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">
+              ${blockCards || '<div class="t-body" style="color:var(--text-muted)">No blocks found.</div>'}
+            </div>
+          </div>
+        `,
+        rightPanel: '',
+      });
+      send(res, 200, 'text/html', pageHtml);
+    } catch (err: any) {
+      send(res, 500, 'text/plain', `Block library error: ${err.message}`);
+    }
     return true;
   }
 

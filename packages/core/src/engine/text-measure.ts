@@ -113,7 +113,7 @@ function measureText(
     return measureWithFont(font, text, fontSize, lh, maxWidth);
   }
 
-  return measureHeuristic(text, fontSize, lh, maxWidth);
+  return measureHeuristic(text, fontSize, lh, maxWidth, fontFamily);
 }
 
 function measureWithFont(
@@ -201,28 +201,60 @@ function measureHeuristic(
   fontSize: number,
   lineHeight: number,
   maxWidth?: number,
+  fontFamily?: string,
 ): MeasureResult {
   if (!text) return { width: 0, height: lineHeight };
 
-  const charWidth = fontSize * SANS_RATIO;
+  const ratio = fontFamily ? getWidthRatio(fontFamily) : SANS_RATIO;
+  const charWidth = fontSize * ratio;
   const lines = text.split('\n');
   let totalHeight = 0;
   let maxLineWidth = 0;
 
   for (const line of lines) {
-    const naturalWidth = line.length * charWidth;
-
     if (!maxWidth || maxWidth >= 1e5) {
+      // No wrapping — single line
+      const naturalWidth = line.length * charWidth;
       maxLineWidth = Math.max(maxLineWidth, naturalWidth);
       totalHeight += lineHeight;
     } else {
-      const numLines = Math.max(1, Math.ceil(naturalWidth / maxWidth));
-      maxLineWidth = Math.max(maxLineWidth, Math.min(naturalWidth, maxWidth));
-      totalHeight += numLines * lineHeight;
+      // Greedy word-wrap: break at word boundaries within maxWidth
+      const wrapped = greedyWrapHeuristic(line, charWidth, maxWidth);
+      for (const wrappedLine of wrapped) {
+        const w = wrappedLine.length * charWidth;
+        maxLineWidth = Math.max(maxLineWidth, Math.min(w, maxWidth));
+        totalHeight += lineHeight;
+      }
     }
   }
 
   return { width: maxLineWidth, height: totalHeight };
+}
+
+/** Greedy word-wrap for heuristic measurement. */
+function greedyWrapHeuristic(text: string, charWidth: number, maxWidth: number): string[] {
+  const words = text.split(/(\s+)/);
+  const lines: string[] = [];
+  let currentLine = '';
+  let currentWidth = 0;
+
+  for (const word of words) {
+    const wordWidth = word.length * charWidth;
+    if (currentWidth + wordWidth > maxWidth && currentLine.length > 0) {
+      lines.push(currentLine.trimEnd());
+      currentLine = word.trimStart();
+      currentWidth = currentLine.length * charWidth;
+    } else {
+      currentLine += word;
+      currentWidth += wordWidth;
+    }
+  }
+
+  if (currentLine.length > 0) {
+    lines.push(currentLine.trimEnd());
+  }
+
+  return lines.length > 0 ? lines : [''];
 }
 
 // ─── TextMeasurer Factory ──────────────────────────────────────

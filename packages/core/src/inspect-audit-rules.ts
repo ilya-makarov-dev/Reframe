@@ -37,6 +37,13 @@ import {
   semanticCaptionReadability,
   semanticTouchTarget,
   semanticLandmarkPresence,
+  aestheticAlignment,
+  aestheticWhitespace,
+  aestheticHarmony,
+  aestheticProportion,
+  aestheticRhythm,
+  aestheticReadability,
+  aestheticOverall,
   type AuditRule,
 } from './audit';
 
@@ -86,6 +93,14 @@ export function buildInspectAuditRules(
     semanticCaptionReadability(),
     semanticTouchTarget(),
     semanticLandmarkPresence(),
+    // Aesthetic quality rules (info severity — advisory)
+    aestheticAlignment(),
+    aestheticWhitespace(),
+    aestheticHarmony(),
+    aestheticProportion(),
+    aestheticRhythm(),
+    aestheticReadability(),
+    aestheticOverall(),
   ];
 
   if (designSystem) {

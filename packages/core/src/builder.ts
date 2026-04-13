@@ -100,6 +100,14 @@ export interface NodeProps {
   // Constraints
   horizontalConstraint?: 'MIN' | 'CENTER' | 'MAX' | 'STRETCH' | 'SCALE';
   verticalConstraint?: 'MIN' | 'CENTER' | 'MAX' | 'STRETCH' | 'SCALE';
+
+  // Stroke weight (shorthand)
+  strokeWeight?: number;
+
+  // Semantic
+  semanticRole?: string;
+  slot?: string;
+  href?: string;
 }
 
 // ─── Node Constructors ────────────────────────────────────────

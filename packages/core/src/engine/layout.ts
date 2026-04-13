@@ -771,3 +771,36 @@ export function ensureSceneLayout(graph: SceneGraph, scopeId?: string): void {
     /* best-effort */
   }
 }
+
+/**
+ * Configure a node as a multi-column grid layout.
+ * Sets layoutMode to HORIZONTAL with WRAP, creating N equal columns.
+ */
+export function configureMultiColumn(
+  graph: SceneGraph,
+  nodeId: string,
+  columns: number,
+  gap: number = 16,
+): void {
+  const node = graph.getNode(nodeId);
+  if (!node) return;
+
+  graph.updateNode(nodeId, {
+    layoutMode: 'HORIZONTAL',
+    layoutWrap: 'WRAP',
+    itemSpacing: gap,
+    counterAxisSpacing: gap,
+    primaryAxisAlign: 'MIN',
+    counterAxisAlign: 'MIN',
+  });
+
+  // Set each child to approximately equal width
+  const parentWidth = node.width;
+  const childWidth = Math.floor((parentWidth - gap * (columns - 1)) / columns);
+
+  for (const childId of node.childIds) {
+    graph.updateNode(childId, {
+      width: childWidth,
+    });
+  }
+}

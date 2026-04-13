@@ -37,7 +37,7 @@ export function cssVarToToken(cssVar: string): string {
 
 // ─── Hex parsing ────────────────────────────────────────────
 
-function hexToColor(hex: string): Color {
+export function hexToColor(hex: string): Color {
   let h = hex.replace('#', '');
   if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
   if (h.length === 4) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2]+h[3]+h[3];
@@ -779,10 +779,23 @@ export function rebrandColorsFromTokens(
    * as an intentional authored inversion — the rebrand must preserve it rather
    * than normalizing it to the brand's default surface, which would both erase
    * creative emphasis AND trap any child text at near-1:1 contrast after the
-   * background flip (the old Stripe "Team" bug). */
+   * background flip (the old Stripe "Team" bug).
+   *
+   * Prefer the import-time `meta.originalPolarity` snapshot over the
+   * current fill color — the current fill may have been written by a
+   * previous brand in a carousel (stripe → ferrari → stripe), and
+   * reading it as "intentional inversion" traps the node in its
+   * previous-brand dark state forever. The snapshot is stamped by
+   * `stampOriginalPolarity` on import and survives clone via the
+   * meta carry-over in `_cloneProps`. */
   function nodeInvertsRootPolarity(nodeId: string): boolean {
     const n = graph.getNode(nodeId);
     if (!n) return false;
+    const meta = (n as any).meta as { originalPolarity?: 'dark' | 'light' } | undefined;
+    if (meta?.originalPolarity) {
+      const originalDark = meta.originalPolarity === 'dark';
+      return originalDark !== sceneDark;
+    }
     const fills = (n as any).fills as any[] | undefined;
     if (!Array.isArray(fills) || fills.length === 0) return false;
     const f = fills[0];
@@ -972,4 +985,54 @@ export function isTokenBound(
   const variable = graph.variables.get(varId);
   if (!variable) return false;
   return variable.collectionId === index.collectionId;
+}
+
+// ─── Resolve token bindings to node properties ─────────────
+
+/**
+ * Walk the subtree and apply current resolved token values to every
+ * bound node property. Call this after switchTokenMode or rotateColors
+ * so that node.fills/strokes/fontSize/etc reflect the new token state.
+ */
+export function resolveTokenBindings(
+  graph: SceneGraph,
+  rootId: string,
+): number {
+  let count = 0;
+
+  function walk(nodeId: string) {
+    const node = graph.getNode(nodeId);
+    if (!node) return;
+
+    for (const [field, varId] of Object.entries(node.boundVariables)) {
+      const variable = graph.variables.get(varId);
+      if (!variable) continue;
+
+      const value = graph.resolveVariable(varId);
+      if (value === undefined) continue;
+
+      const colorMatch = field.match(/^(fills|strokes)\[(\d+)\]\.color$/);
+      if (colorMatch && typeof value === 'object' && 'r' in value) {
+        const arrName = colorMatch[1] as 'fills' | 'strokes';
+        const idx = parseInt(colorMatch[2], 10);
+        const arr = [...((node as any)[arrName] || [])];
+        if (arr[idx]) {
+          arr[idx] = { ...arr[idx], color: value as any };
+          graph.updateNode(nodeId, { [arrName]: arr });
+          count++;
+        }
+      } else if (typeof value === 'number') {
+        graph.updateNode(nodeId, { [field]: value });
+        count++;
+      } else if (typeof value === 'string') {
+        graph.updateNode(nodeId, { [field]: value });
+        count++;
+      }
+    }
+
+    for (const childId of node.childIds) walk(childId);
+  }
+
+  walk(rootId);
+  return count;
 }

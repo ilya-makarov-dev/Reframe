@@ -5161,4 +5161,90 @@ input, textarea, select {
   border: 2px solid var(--surface);
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* ── Pipeline stepper ── */
+.pipeline-stepper {
+  user-select: none;
+}
+.pipeline-step {
+  transition: all var(--t-fast) var(--ease);
+}
+.pipeline-step:hover:not(.active) {
+  background: var(--surface-sunken) !important;
+  color: var(--text-base) !important;
+}
+
+/* ── Variant strip ── */
+.variant-strip {
+  scrollbar-width: thin;
+}
+.variant-card:hover:not(.variant-active) {
+  border-color: var(--border) !important;
+  background: var(--surface-elevated) !important;
+}
+.variant-active {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* ── Quality badge (floating on viewport) ── */
+.quality-badge {
+  opacity: 0.9;
+  transition: opacity 0.2s;
+}
+.quality-badge:hover {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+/* ── Command palette ── */
+.cmd-item:hover {
+  background: var(--surface-sunken) !important;
+}
+
+/* ── Brand picker ── */
+.brand-picker-menu button:hover {
+  background: var(--surface-sunken) !important;
+}
+
+/* ── Dashboard funnel cards ── */
+.cosmos .content button:hover,
+.cosmos .content a:hover {
+  border-color: var(--accent) !important;
+  background: rgba(255,255,255,0.1) !important;
+  transform: translateY(-2px);
+}
+
+/* ── Quality & Tokens tab ── */
+[data-panel="quality"] .t-caption,
+[data-panel="tokens"] .t-caption {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 500;
+}
+[data-quality-metrics] > div {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+[data-tokens-tree] > div:hover {
+  background: var(--surface-elevated);
+  border-radius: 4px;
+}
+
+/* ── Block library cards ── */
+.spec-card[data-block-name] {
+  transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.spec-card[data-block-name]:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+/* ── Batch export page ── */
+[data-batch-results] > div {
+  padding: 8px 12px;
+  background: var(--surface-elevated);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: var(--mono);
+}
 `;

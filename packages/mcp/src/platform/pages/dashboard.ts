@@ -95,7 +95,7 @@ function renderOverview(data: DashboardData): string {
     return `<div class="overview-card-wrap" data-project-slug="${escape(p.slug)}" data-scene-id="${escape(owner.id)}" data-project-name="${escape(displayName)}">
       <a class="overview-card" href="/platform/project/${escape(p.slug)}">
         <div class="overview-thumb">
-          <iframe src="/preview/${escape(owner.id)}" loading="lazy" tabindex="-1"></iframe>
+          <img src="/thumbnail/${escape(owner.id)}.png?scale=1" loading="lazy" alt="${escape(displayName)}" style="width:100%;height:100%;object-fit:cover" onerror="this.onerror=null;this.parentNode.innerHTML='<iframe src=/preview/${escape(owner.id)} loading=lazy tabindex=-1></iframe>'">
           ${p.variantCount > 0 ? `<div class="overview-variant-badge">${p.members.length} scenes</div>` : ''}
         </div>
         <div class="overview-meta">
@@ -127,11 +127,12 @@ function renderOverview(data: DashboardData): string {
         <p class="overview-subtitle">${subtitleText}</p>
       </div>
     </div>
-    <div class="overview-actions">
-      <button class="btn btn-secondary btn-sm empty-path" data-kind="describe">+ Describe</button>
-      <button class="btn btn-secondary btn-sm empty-path" data-kind="url">+ Import URL</button>
-      <button class="btn btn-secondary btn-sm empty-path" data-kind="brand">+ From brand</button>
-      <button class="btn btn-secondary btn-sm empty-path" data-kind="html">+ Paste HTML</button>
+    <div class="overview-actions" style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-secondary btn-sm empty-path" data-kind="describe" style="display:flex;align-items:center;gap:6px"><span style="font-size:14px">🎨</span> Design</button>
+      <a href="/platform/blocks" class="btn btn-secondary btn-sm" style="display:flex;align-items:center;gap:6px;text-decoration:none"><span style="font-size:14px">🧱</span> Build from blocks</a>
+      <button class="btn btn-secondary btn-sm empty-path" data-kind="html" style="display:flex;align-items:center;gap:6px"><span style="font-size:14px">🔄</span> Rebrand</button>
+      <button class="btn btn-secondary btn-sm empty-path" data-kind="audit" style="display:flex;align-items:center;gap:6px"><span style="font-size:14px">📊</span> Audit</button>
+      <a href="/platform/batch" class="btn btn-secondary btn-sm" style="display:flex;align-items:center;gap:6px;text-decoration:none"><span style="font-size:14px">📦</span> Batch export</a>
     </div>
     <div class="overview-grid">${cards}</div>
   </div>`;
@@ -141,13 +142,39 @@ function renderEmpty(): string {
   return `<div class="cosmos">
     ${renderStarField()}
     <div class="content">
-      <h1 class="headline">${greeting()}<br/>No scenes yet.</h1>
-      <p class="body">Describe what you want to build, drop in HTML, or start from one of the 60+ brands in the catalog.</p>
-      <div class="actions">
-        <button class="btn btn-primary empty-path" data-kind="describe">Describe a scene</button>
-        <button class="btn btn-secondary empty-path" data-kind="url">Import URL</button>
-        <button class="btn btn-secondary empty-path" data-kind="brand">From a brand</button>
-        <button class="btn btn-secondary empty-path" data-kind="html">Paste HTML</button>
+      <h1 class="headline" style="font-size:36px;line-height:1.2;margin-bottom:12px">${greeting()}</h1>
+      <p class="body" style="font-size:18px;opacity:0.7;margin-bottom:48px">What do you want to create?</p>
+
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:720px;margin:0 auto 48px">
+        <button class="empty-path" data-kind="describe" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px 20px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:12px;cursor:pointer;color:var(--text-primary);transition:all 0.2s">
+          <span style="font-size:32px">🎨</span>
+          <span style="font-size:15px;font-weight:600">Design</span>
+          <span style="font-size:12px;opacity:0.5;text-align:center">AI writes full page<br>from your brief</span>
+        </button>
+        <button class="empty-path" data-kind="blocks" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px 20px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:12px;cursor:pointer;color:var(--text-primary);transition:all 0.2s"
+          onclick="window.location='/platform/blocks'">
+          <span style="font-size:32px">🧱</span>
+          <span style="font-size:15px;font-weight:600">Build</span>
+          <span style="font-size:12px;opacity:0.5;text-align:center">Pick sections from<br>block library</span>
+        </button>
+        <button class="empty-path" data-kind="html" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px 20px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:12px;cursor:pointer;color:var(--text-primary);transition:all 0.2s">
+          <span style="font-size:32px">🔄</span>
+          <span style="font-size:15px;font-weight:600">Rebrand</span>
+          <span style="font-size:12px;opacity:0.5;text-align:center">Paste HTML, apply<br>any brand</span>
+        </button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px;max-width:480px;margin:0 auto">
+        <button class="empty-path" data-kind="audit" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:24px 20px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;cursor:pointer;color:var(--text-primary);transition:all 0.2s">
+          <span style="font-size:24px">📊</span>
+          <span style="font-size:14px;font-weight:600">Quality Audit</span>
+          <span style="font-size:11px;opacity:0.5">Check any design</span>
+        </button>
+        <a href="/platform/api-docs" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:24px 20px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;cursor:pointer;color:var(--text-primary);transition:all 0.2s;text-decoration:none">
+          <span style="font-size:24px">🔌</span>
+          <span style="font-size:14px;font-weight:600">API Pipeline</span>
+          <span style="font-size:11px;opacity:0.5">REST + batch export</span>
+        </a>
       </div>
     </div>
   </div>`;

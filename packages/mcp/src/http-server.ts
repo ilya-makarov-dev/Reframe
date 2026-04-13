@@ -236,7 +236,7 @@ function invalidatePlatformContextCache(): void {
 // rendered". On MISS we run the full pipeline and store the result.
 // LRU-style eviction at 64 entries prevents unbounded growth.
 
-interface PreviewCacheEntry { body: string; contentType: string; }
+interface PreviewCacheEntry { body: string | Buffer; contentType: string; }
 const previewCache = new Map<string, PreviewCacheEntry>();
 const PREVIEW_CACHE_MAX = 64;
 
@@ -372,6 +372,13 @@ export function startHttpSidecar(port = 4100): void {
 
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
+    // ── Headless API routes (/api/*) ───────────────────────────
+    if (url.pathname.startsWith('/api/')) {
+      const { handleApiRequest } = await import('./api/router.js');
+      const handled = await handleApiRequest(req, res, url);
+      if (handled) return;
+    }
+
     // ── Phase 7.1: Platform routes ───────────────────────────
     // `/platform/*` is dispatched to the new platform router before any of
     // the legacy handlers. When the router returns false the request falls
@@ -434,6 +441,44 @@ export function startHttpSidecar(port = 4100): void {
       const html = exportSite(sitePages, { title: 'reframe site preview', transition: 'fadeSlideUp' });
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(html);
+      return;
+    }
+
+    // ── Thumbnail endpoint: /thumbnail/<sceneId>.png?scale=1 ──
+    if (url.pathname.startsWith('/thumbnail/') && req.method === 'GET') {
+      const thumbTail = url.pathname.split('/thumbnail/')[1];
+      const thumbDot = thumbTail.lastIndexOf('.');
+      const thumbSceneId = thumbDot >= 0 ? thumbTail.slice(0, thumbDot) : thumbTail;
+      const thumbStored = getScene(thumbSceneId);
+      if (!thumbStored) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Scene not found');
+        return;
+      }
+
+      const thumbScale = parseFloat(url.searchParams?.get('scale') ?? '1') || 1;
+      const thumbCacheKey = `${thumbSceneId}:${thumbStored.sessionRevision ?? 0}:thumb:${thumbScale}`;
+      const thumbCached = previewCache.get(thumbCacheKey);
+      if (thumbCached) {
+        res.writeHead(200, { 'Content-Type': 'image/png', 'X-Preview-Cache': 'hit', 'Cache-Control': 'public, max-age=60' });
+        res.end(thumbCached.body);
+        return;
+      }
+
+      try {
+        const { ensureSceneLayout } = await import('../../core/src/engine/layout.js');
+        ensureSceneLayout(thumbStored.graph, thumbStored.rootId);
+        const { exportToRaster, initCanvasKit } = await import('../../core/src/exporters/raster.js');
+        await initCanvasKit();
+        const pngBytes = await exportToRaster(thumbStored.graph, thumbStored.rootId, { format: 'png', scale: thumbScale });
+        const pngBuf = Buffer.from(pngBytes);
+        previewCacheSet(thumbCacheKey, { body: pngBuf, contentType: 'image/png' });
+        res.writeHead(200, { 'Content-Type': 'image/png', 'X-Preview-Cache': 'miss', 'Cache-Control': 'public, max-age=60' });
+        res.end(pngBuf);
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end(`Thumbnail error: ${err.message}`);
+      }
       return;
     }
 
@@ -500,8 +545,19 @@ export function startHttpSidecar(port = 4100): void {
         return;
       }
       if (ext === 'lottie' || ext === 'json') {
+        const { exportToLottie } = await import('../../core/src/exporters/lottie.js');
+        const { buildLottiePreviewHtml } = await import('../../core/src/exporters/lottie-preview.js');
+        const lottieTimeline = stored.timeline ?? { animations: [], loop: true, speed: 1 };
+        let lottieJson: object;
+        try {
+          lottieJson = exportToLottie(stored.graph, stored.rootId, lottieTimeline);
+        } catch {
+          const rootNode = stored.graph.getNode(stored.rootId);
+          lottieJson = { v: '5.7.4', fr: 60, ip: 0, op: 60, w: Math.round(rootNode?.width ?? 1440), h: Math.round(rootNode?.height ?? 900), nm: stored.name, ddd: 0, assets: [], layers: [] };
+        }
+        const html = buildLottiePreviewHtml(lottieJson, stored.name ?? stored.slug);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(`<!DOCTYPE html><html><body><h1>Lottie preview requires a player</h1><p>Open <code>.reframe/exports/${stored.slug}.lottie.json</code> with lottiefiles.com or a native Lottie viewer.</p></body></html>`);
+        res.end(html);
         return;
       }
       // Default: HTML render (same as old /preview/<id> behavior).

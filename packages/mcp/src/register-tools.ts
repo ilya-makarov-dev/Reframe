@@ -33,7 +33,7 @@ import { inspectInputSchema, handleInspect } from './tools/inspect.js';
 import { projectInputSchema, handleProject } from './tools/project.js';
 import { collabInputSchema, handleCollab } from './tools/collab.js';
 
-/** 6 core tools + 1 experimental collab surface = 7 registered tools. */
+/** 7 core tools = 7 registered tools. Self-improvement happens through the pipeline: compile → inspect → edit → inspect. */
 export function registerReframeMcpTools(server: McpServer): void {
 
   // ── 1. DESIGN ──────────────────────────────────────────────
@@ -59,7 +59,7 @@ Do NOT call this tool if you already have a design system loaded in the session 
   // ── 2. COMPILE ─────────────────────────────────────────────
   server.tool(
     'reframe_compile',
-    `Import HTML+CSS into the reframe engine. This is the primary way to create designs — write complete HTML with inline styles, and reframe converts it to an INode AST, runs 23-rule audit with auto-fix, and saves exports.
+    `Import HTML+CSS into the reframe engine. This is the primary way to create designs — write complete HTML with inline styles, and reframe converts it to an INode AST, runs 30+ audit rules with auto-fix, assigns semantic roles (nav, hero, heading, button, etc.), and saves exports.
 
 Use this when creating a NEW design or re-compiling after editing source HTML. Write beautiful, self-contained HTML with inline styles (not classes). Set explicit width on the root element (e.g. 1440px). Every container needs explicit background + text colors.
 
@@ -69,9 +69,9 @@ Two HTML input modes:
 
 Source HTML is auto-saved to .reframe/src/<name>.html on every compile. Edit that file for big changes, then re-compile with file parameter.
 
-Alternative input: blueprint JSON for programmatic/template generation (not for creative work).
+Alternative inputs: blueprint JSON for programmatic generation, or use reframe_project add_block to instantiate from the block library (20+ section templates: hero, features, pricing, testimonials, cta, stats, team, faq, footer, nav, contact, gallery).
 
-Returns: scene ID (e.g. "s1"), node count, audit result (PASS/FAIL with issue details), source HTML path, and export file paths.
+Returns: scene ID (e.g. "s1"), node count, audit result (PASS/FAIL with issue details), source HTML path, and export file paths. Use reframe_inspect with aesthetic: true for design quality scores.
 
 After compile, ALWAYS call reframe_inspect to review the tree and audit. Fix issues with reframe_edit (small tweaks) or edit source HTML + re-compile (big changes).`,
     compileInputSchema,
@@ -109,6 +109,12 @@ Variation ops (were previously standalone reframe_vary/reframe_resize/reframe_it
 - adapt: generate responsive variants at given sizes (smart/contain/cover/stretch/reflow strategies). Each size produces a new session scene.
 - vary: generate a Cartesian variation grid from { brand, density, radius, shadows, typography, mode, colorRotation } axes. Returns N new session scenes, one per axis combination.
 
+Block ops:
+- instantiateBlock: create a new scene from a block template. Requires block name (e.g. "hero-centered", "pricing-3col"). Optional slots for content fill. Use reframe_project list_blocks to browse 17+ templates.
+
+Layout ops:
+- multiColumn: convert a container node into multi-column grid layout. Specify columns (2-12) and gap. Great for feature grids, pricing comparisons.
+
 Both "text" and "characters" are accepted for text content. Path search is case-sensitive and matches the first node found by name.
 
 Returns: list of operations performed, then auto-audit results for all touched scenes. Check the audit section — if issues remain, edit again. Loop until audit passes.`,
@@ -119,13 +125,18 @@ Returns: list of operations performed, then auto-audit results for all touched s
   // ── 4. INSPECT ─────────────────────────────────────────────
   server.tool(
     'reframe_inspect',
-    `View the node tree and run the 23-rule audit on a scene. This is the feedback loop — inspect shows what's wrong, you fix with reframe_edit, then inspect again until clean.
+    `View the node tree, run 30+ audit rules, and optionally compute aesthetic quality scores on a scene. This is the feedback loop — inspect shows what's wrong, you fix with reframe_edit, then inspect again until clean.
 
 Two modes:
-- With sceneId: shows the full node tree (name, type, dimensions, text preview) + audit results with actionable fix suggestions. Each issue tells you exactly which node to update and what property to change.
+- With sceneId: shows the full node tree (name, type, dimensions, text preview) + audit results with actionable fix suggestions. Each issue tells you exactly which node to update and what property to change. Includes semantic skeleton (detected roles: nav, hero, section, footer, etc.).
 - Without sceneId: shows session overview — all scenes with their status, plus intelligent recommendations (stale scenes needing re-audit, systemic issues, export suggestions).
 
-Returns: ASCII node tree (configurable depth/lines), audit results grouped by severity (error > warning > info), and fix instructions referencing reframe_edit operations. For structural comparison, use diffWith parameter to compare two scenes.
+Aesthetic scoring (set aesthetic: true):
+Computes 8 design quality metrics (0-100%): alignment consistency, whitespace balance, visual balance, color harmony, hierarchy clarity, spacing rhythm, text readability, proportionality. Returns overall composite score + per-metric breakdown with ratings (Poor/Fair/Good/Excellent). No other design tool provides quantitative aesthetic evaluation.
+
+Returns: ASCII node tree (configurable depth/lines), audit results grouped by severity (error > warning > info), fix instructions referencing reframe_edit operations, semantic skeleton, and aesthetic scores when requested. For structural comparison, use diffWith parameter.
+
+Also available via API: GET /api/audit/{sceneId}?aesthetic=true
 
 Use this after every compile and every edit cycle. The inspect → edit → inspect loop is the core design refinement workflow. Export only after inspect shows a clean result.`,
     inspectInputSchema,
@@ -137,13 +148,19 @@ Use this after every compile and every edit cycle. The inspect → edit → insp
     'reframe_export',
     `Export a scene to a deliverable format. Auto-saves to .reframe/exports/ and returns the file path.
 
-Formats:
+Formats (10 total):
 - html: static HTML page with inline styles, semantic tags, hover/responsive CSS, token CSS variables. Best for review and web deployment.
-- react: React functional component (TSX) with TypeScript annotations. Includes hover states and responsive media queries when the scene has states/responsive rules.
+- react: React functional component (TSX) with TypeScript annotations. Includes hover states and responsive media queries.
 - svg: vector graphics with text and layout preserved. Good for icons, illustrations, static assets.
-- animated_html: HTML with CSS keyframe animations. Requires animate parameter with presets (fadeIn, slideIn, scaleIn, popIn, bounce, etc.) or stagger config.
+- png: raster image via CanvasKit (Skia WASM). Use scale parameter for retina (e.g. scale: 2 for @2x). Great for thumbnails, social sharing, OG images.
+- pdf: PDF document with embedded raster. Good for print-ready marketing materials, pitch decks.
+- animated_html: HTML with animations. Requires animate parameter with presets (fadeIn, slideIn, scaleIn, popIn, bounce, etc.) or stagger config. Supports engine: 'css' (default) or 'waapi' (Web Animations API with spring physics).
 - lottie: Lottie JSON for native mobile/web animations.
 - site: bundles ALL session scenes into a multi-page app with routing, navigation, and page transitions. Use this for complete website prototypes.
+- transition: animated resize preview (source → target dimensions). Requires transitionTarget parameter.
+
+Also available via Headless API: GET /api/render/{sceneId}?format=html&brand=stripe&viewport=mobile
+Batch API: POST /api/render/batch for N brands × M viewports × K formats in one call.
 
 Returns: export file path and size. The file is ready to open in a browser or import into a project.
 
@@ -182,7 +199,18 @@ Actions:
 - show_component: display a specific component master by name (revision, slots, property definitions, root summary).
 - delete_component: remove a component master from disk. Scenes that still reference it by name will surface as "missing master" on the next load — repair by re-extracting or running reframe_edit unlinkInstance on the stale instance.
 
-Returns: confirmation with file paths for save/load, scene list for list, project summary for status, source HTML block for show_source, ordered op list for history, variant details for add_variant/list_variants/refresh_variants, macro details for macro actions.
+Token actions (W3C DTCG 2025.10 format):
+- export_tokens: export all design tokens from a scene to .reframe/tokens.json in DTCG format. Compatible with Tokens Studio, Style Dictionary v4, Specify. Requires sceneId.
+- import_tokens: import tokens from .reframe/tokens.json into all session scenes. Creates Variables + TokenIndex.
+
+Block library actions (section-level template system):
+- list_blocks: browse 20+ starter blocks by category (hero, features, pricing, testimonials, cta, stats, team, faq, footer, nav, contact, gallery). Use brand param as category filter.
+- get_block: get block definition by name (slots, description, tags).
+- add_block: instantiate a block into the session as a new scene. Requires name. Use description param as JSON slots (e.g. '{"headline":"Ship Faster"}') or as headline text.
+- save_block: extract a scene as a reusable block. Requires sceneId + name.
+- delete_block: remove a block from library. Requires name.
+
+Returns: confirmation with file paths for save/load, scene list for list, project summary for status, source HTML block for show_source, ordered op list for history, variant details for add_variant/list_variants/refresh_variants, macro details for macro actions, token count for export/import_tokens, block list for list_blocks.
 
 Scenes auto-save to disk when a project is open. Stable DOM-path ids survive re-compile so reframe_edit operations keep addressing the same nodes. Variants auto-refresh on every reframe_compile of their base, keeping responsive output in sync with source HTML edits, replayed history operations, and macro applications.`,
     projectInputSchema,
@@ -230,5 +258,6 @@ Intent authoring (add/commit/refine), annotations, threads, and templates are NO
     collabInputSchema,
     handleCollab,
   );
+
 
 }

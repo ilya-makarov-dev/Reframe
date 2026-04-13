@@ -2176,3 +2176,76 @@ function findClosestPaletteColor(
   }
   return best;
 }
+
+// ─── Aesthetic Audit Rules ─────────────────────────────────────
+// Wrap the aesthetic scoring module into standard AuditRule format.
+// All are 'info' severity — advisory, not blocking.
+
+function makeAestheticRule(
+  ruleName: string,
+  label: string,
+  metricName: string,
+  threshold: number,
+  hint: string,
+): AuditRule {
+  return {
+    name: ruleName,
+    check(node: INode, ctx: AuditContext): AuditIssue[] {
+      // Only run on root node (aesthetic is scene-level, not per-node)
+      if (node !== ctx.root) return [];
+      // Aesthetic scoring needs SceneGraph — check if node has graph accessor
+      const graph = (node as any)._graph ?? (node as any).graph;
+      if (!graph) return [];
+      try {
+        const mod = require('./aesthetic/score');
+        const score = mod.computeAestheticScore(graph, node.id);
+        const value: number = (score as Record<string, number>)[metricName];
+        if (typeof value === 'number' && value < threshold) {
+          return [{
+            rule: ruleName,
+            severity: 'info' as const,
+            nodeId: node.id,
+            nodeName: node.name,
+            message: `${label}: ${Math.round(value * 100)}% — ${hint}`,
+          }];
+        }
+      } catch { /* aesthetic module optional or graph not available */ }
+      return [];
+    },
+  };
+}
+
+export function aestheticAlignment(): AuditRule {
+  return makeAestheticRule('aesthetic-alignment', 'Alignment consistency', 'alignment', 0.3,
+    'elements not well-aligned to shared rails. Use consistent x-positions.');
+}
+
+export function aestheticWhitespace(): AuditRule {
+  return makeAestheticRule('aesthetic-whitespace', 'Whitespace balance', 'whitespace', 0.2,
+    'layout too dense or too sparse. Aim for 40-60% content coverage.');
+}
+
+export function aestheticHarmony(): AuditRule {
+  return makeAestheticRule('aesthetic-harmony', 'Color harmony', 'harmony', 0.3,
+    'colors lack harmonious relationships. Use complementary or analogous hues.');
+}
+
+export function aestheticProportion(): AuditRule {
+  return makeAestheticRule('aesthetic-proportion', 'Proportionality', 'proportion', 0.3,
+    'element aspect ratios could be more pleasing. Consider golden ratio (1.618).');
+}
+
+export function aestheticRhythm(): AuditRule {
+  return makeAestheticRule('aesthetic-rhythm', 'Spacing rhythm', 'rhythm', 0.3,
+    'inconsistent gaps between siblings. Use uniform spacing from design system.');
+}
+
+export function aestheticReadability(): AuditRule {
+  return makeAestheticRule('aesthetic-readability', 'Text readability', 'readability', 0.3,
+    'text hard to read. Ideal: 45-75 chars/line, 1.4-1.6x line-height for body.');
+}
+
+export function aestheticOverall(): AuditRule {
+  return makeAestheticRule('aesthetic-overall', 'Overall aesthetic quality', 'overall', 0.3,
+    'design quality below average. Use reframe_inspect aesthetic: true for details.');
+}

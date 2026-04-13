@@ -93,6 +93,9 @@ export const inspectInputSchema = {
     .describe(
       'Layout schematic mode. summary = ~10 lines, section strip + issue clusters (default). focus = broken subtrees only with inline annotations. full = entire tree (expensive — only when explicitly needed). off = skip entirely.',
     ),
+
+  aesthetic: z.boolean().optional().default(false)
+    .describe('Include aesthetic quality score (alignment, whitespace, balance, harmony, hierarchy, rhythm, readability, proportion).'),
 };
 
 // ─── Handler ───────────────────────────────────────────────────
@@ -109,6 +112,7 @@ export async function handleInspect(input: {
   diffTextDetail?: 'full' | 'summary';
   treeMaxDepth?: number;
   treeMaxLines?: number;
+  aesthetic?: boolean;
 }) {
   const session = getSession();
   session.recordToolCall('inspect');
@@ -434,7 +438,40 @@ export async function handleInspect(input: {
     sections.push(formatted);
   }
 
-  // ── d. Diff ──────────────────────────────────────────────────
+  // ── d. Aesthetic Score ───────────────────────────────────────
+
+  if (input.aesthetic) {
+    try {
+      const { computeAestheticScore, scoreToRating } = await import('../../../core/src/aesthetic/index.js');
+      const aestheticScore = computeAestheticScore(graph, rootId);
+
+      sections.push('');
+      sections.push('--- Aesthetic Score ---');
+      const metrics = [
+        ['Alignment', aestheticScore.alignment],
+        ['Whitespace', aestheticScore.whitespace],
+        ['Balance', aestheticScore.balance],
+        ['Harmony', aestheticScore.harmony],
+        ['Hierarchy', aestheticScore.hierarchy],
+        ['Rhythm', aestheticScore.rhythm],
+        ['Readability', aestheticScore.readability],
+        ['Proportion', aestheticScore.proportion],
+      ] as const;
+
+      for (const [name, value] of metrics) {
+        const bar = '█'.repeat(Math.round(value * 10)) + '░'.repeat(10 - Math.round(value * 10));
+        sections.push(`  ${name.padEnd(12)} ${bar} ${(value * 100).toFixed(0).padStart(3)}%  ${scoreToRating(value)}`);
+      }
+      sections.push(`  ${'─'.repeat(40)}`);
+      const overallBar = '█'.repeat(Math.round(aestheticScore.overall * 10)) + '░'.repeat(10 - Math.round(aestheticScore.overall * 10));
+      sections.push(`  ${'Overall'.padEnd(12)} ${overallBar} ${(aestheticScore.overall * 100).toFixed(0).padStart(3)}%  ${scoreToRating(aestheticScore.overall)}`);
+    } catch (err: any) {
+      sections.push('');
+      sections.push(`--- Aesthetic Score --- (error: ${err.message})`);
+    }
+  }
+
+  // ── e. Diff ──────────────────────────────────────────────────
 
   let structuredDiffJson: string | null = null;
 

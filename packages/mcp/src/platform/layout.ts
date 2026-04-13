@@ -127,7 +127,18 @@ export function renderShell(props: ShellProps): string {
       ${crumbsEl}
       <span class="spacer"></span>
       ${props.sceneSlug ? `
-      <!-- Export first — the most common "I'm done, give me the file" action. -->
+      <!-- Brand picker — global toolbar for instant rebrand -->
+      <div class="brand-picker-dropdown" data-brand-picker style="position:relative">
+        <button class="header-btn" title="Switch brand" data-brand-picker-btn style="display:flex;align-items:center;gap:6px">
+          <span style="width:10px;height:10px;border-radius:50%;background:var(--accent);flex-shrink:0"></span>
+          <span style="font-size:12px" data-brand-picker-label>${escape(props.activeBrand ?? 'No brand')}</span>
+        </button>
+        <div class="brand-picker-menu hidden" data-brand-picker-menu style="position:absolute;top:100%;right:0;margin-top:6px;min-width:180px;padding:6px;background:var(--surface-elevated);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.12);z-index:100;display:flex;flex-direction:column;gap:2px">
+          <div style="padding:4px 8px;font-size:10px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em">Apply brand</div>
+        </div>
+      </div>
+      <div class="header-sep"></div>
+      <!-- Export — the most common "I'm done, give me the file" action. -->
       <div class="export-dropdown" data-export-dropdown>
         <button class="header-btn export-btn" title="Export">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v7M4 6l3 3 3-3M3 11h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -137,6 +148,8 @@ export function renderShell(props: ShellProps): string {
           <button data-format="html">HTML</button>
           <button data-format="react">React TSX</button>
           <button data-format="svg">SVG</button>
+          <button data-format="png">PNG</button>
+          <button data-format="pdf">PDF</button>
           <button data-format="animated_html">Animated HTML</button>
           <button data-format="lottie">Lottie</button>
           <button data-format="site">Site bundle</button>
@@ -214,7 +227,7 @@ export interface SidebarOpts {
   scenes?: SidebarSceneItem[];
   components?: SidebarComponentItem[];
   macros?: SidebarMacroItem[];
-  current?: 'home' | 'scene' | 'project-canvas' | 'components' | 'design-system' | 'macros';
+  current?: 'home' | 'scene' | 'project-canvas' | 'components' | 'design-system' | 'macros' | 'blocks';
   activeBrand?: string;
 }
 
@@ -290,7 +303,18 @@ export function renderSidebar(opts: SidebarOpts): string {
     <span>Library</span>
   </a>`);
 
-  // 4. Recipes — was "Macros". "Macro" reads as emacs/Excel jargon and
+  // 4. Blocks — section template library (hero, features, pricing, etc.)
+  parts.push(`<a class="side-nav-item ${active === 'blocks' ? 'active' : ''}" href="/platform/blocks">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
+      <rect x="9" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
+      <rect x="2" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
+      <rect x="9" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
+    </svg>
+    <span>Blocks</span>
+  </a>`);
+
+  // 5. Recipes — was "Macros". "Macro" reads as emacs/Excel jargon and
   //    doesn't hint at what the thing does. A recipe is a sequence of
   //    steps you apply to remake something — that matches exactly what
   //    these are (ordered op templates with role placeholders that

@@ -91,6 +91,15 @@ packages/studio/
 .mcp.json
 !.mcp.json.example
 
+# ─── Playwright ─────────────────────────────────────────
+# Browser binaries are installed globally, test results are ephemeral.
+test-results/
+playwright-report/
+
 # ─── Phase scratch reports outside .reframe/ ────────────
 phase*-report.md
 *-scratch.md
+
+# ─── Ad-hoc test/stress scripts in root ─────────────────
+test-*.ts
+test-*.js

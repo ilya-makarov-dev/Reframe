@@ -102,7 +102,12 @@ export const compileInputSchema = {
   })]).optional().default(true),
 
   // Export
-  exports: z.array(z.enum(['html', 'svg', 'react'])).optional().default(['html']),
+  exports: z.array(z.enum(['html', 'svg', 'react', 'png', 'pdf'])).optional().default(['html']),
+
+  // AI classification (opt-in: uses LLM to assign semantic roles if classify callback available)
+  aiClassify: z.boolean().optional().default(false).describe('Use AI (LLM) for semantic role classification. Falls back to heuristic if unavailable.'),
+
+  layoutBackend: z.enum(['yoga', 'taffy']).optional().default('yoga').describe('Layout engine: yoga (default, mature flexbox) or taffy (Rust, spec-faithful CSS Grid). Taffy requires yoga-layout-taffy npm package.'),
 };
 
 // ─── Types ────────────────────────────────────────────────────
@@ -142,7 +147,9 @@ interface CompileInput {
     minFontSize?: number;
     minContrast?: number;
   };
-  exports?: Array<'html' | 'svg' | 'react'>;
+  exports?: Array<'html' | 'svg' | 'react' | 'png' | 'pdf'>;
+  aiClassify?: boolean;
+  layoutBackend?: 'yoga' | 'taffy';
 }
 
 // ─── Handler ──────────────────────────────────────────────────
@@ -151,6 +158,16 @@ export async function handleCompile(input: CompileInput) {
   const t0 = Date.now();
   const session = getSession();
   session.recordToolCall('compile');
+
+  // ─── Layout backend ──
+  if (input.layoutBackend && input.layoutBackend !== 'yoga') {
+    try {
+      const { setLayoutBackend } = await import('../../../core/src/engine/yoga-init.js');
+      setLayoutBackend(input.layoutBackend);
+    } catch {
+      // Already initialized or backend not available — ignore
+    }
+  }
 
   // ─── Resolve file → html ──
   if (input.file && !input.html) {
@@ -502,14 +519,31 @@ export async function handleCompile(input: CompileInput) {
       const classifyResult = await classifyScene(graph, rootId, {
         designSystem: ds as any,
         multiSlot: true,
+        // When aiClassify is enabled, use lower confidence threshold for
+        // more aggressive role assignment (catches more nodes)
+        ...(input.aiClassify ? { preserveExisting: false } : {}),
       });
       const dist = Object.entries(classifyResult.distribution)
         .filter(([k]) => k !== 'other')
         .sort(([, a], [, b]) => b - a)
         .map(([role, n]) => `${role}=${n}`)
         .join(', ');
-      if (dist) {
-        semanticSummary = `Semantic: ${dist} (${classifyResult.classified}/${classifyResult.candidates} nodes)`;
+      // When aiClassify enabled, also run the node-property detector to fill gaps
+      // at a lower confidence threshold (catches buttons, badges, inputs the
+      // frame-aware classifier misses)
+      if (input.aiClassify) {
+        const { autoDetectRoles } = await import('../../../core/src/semantic/index.js');
+        const extraDetected = autoDetectRoles(graph, rootId, 0.4); // lower threshold
+        classifyResult.classified += extraDetected;
+      }
+
+      const updatedDist = Object.entries(classifyResult.distribution)
+        .filter(([k]) => k !== 'other')
+        .sort(([, a], [, b]) => b - a)
+        .map(([role, n]) => `${role}=${n}`)
+        .join(', ');
+      if (dist || updatedDist) {
+        semanticSummary = `Semantic: ${updatedDist || dist} (${classifyResult.classified}/${classifyResult.candidates} nodes)${input.aiClassify ? ' [enhanced]' : ''}`;
       }
     } catch (err: any) {
       // Classifier is best-effort — never block compile if it fails.
@@ -692,6 +726,27 @@ export async function handleCompile(input: CompileInput) {
             exportResults.react = exportToReact(wrappedRoot);
             break;
           }
+          case 'png': {
+            const { exportToRaster, initCanvasKit } = await import('../../../core/src/exporters/raster.js');
+            await initCanvasKit();
+            const pngBytes = await exportToRaster(graph, rootId, { format: 'png', scale: 1 });
+            const { getExportsBaseDir: getPngDir } = await import('../store.js');
+            const pngPath = require('path').join(getPngDir(), `${sceneName}.png`);
+            require('fs').mkdirSync(require('path').dirname(pngPath), { recursive: true });
+            require('fs').writeFileSync(pngPath, pngBytes);
+            exportResults.png = `[binary ${pngBytes.length} bytes]`;
+            break;
+          }
+          case 'pdf': {
+            const { exportToPdf } = await import('../../../core/src/exporters/pdf.js');
+            const pdfBytes = await exportToPdf(graph, rootId, { title: sceneName });
+            const { getExportsBaseDir: getPdfDir } = await import('../store.js');
+            const pdfPath = require('path').join(getPdfDir(), `${sceneName}.pdf`);
+            require('fs').mkdirSync(require('path').dirname(pdfPath), { recursive: true });
+            require('fs').writeFileSync(pdfPath, pdfBytes);
+            exportResults.pdf = `[binary ${pdfBytes.length} bytes]`;
+            break;
+          }
         }
         session.trackExport(sceneId, fmt);
       } catch (err: any) {
@@ -718,6 +773,13 @@ export async function handleCompile(input: CompileInput) {
     if (semanticSummary) {
       sections.push(`    ${semanticSummary}`);
     }
+
+    // Aesthetic quality score (quick, adds ~2ms)
+    try {
+      const { computeAestheticScore, scoreToRating } = await import('../../../core/src/aesthetic/index.js');
+      const aesthetic = computeAestheticScore(graph, rootId);
+      sections.push(`    Quality: ${Math.round(aesthetic.overall * 100)}% ${scoreToRating(aesthetic.overall)} (alignment:${Math.round(aesthetic.alignment * 100)} harmony:${Math.round(aesthetic.harmony * 100)} readability:${Math.round(aesthetic.readability * 100)})`);
+    } catch { /* aesthetic scoring optional */ }
 
     // Report source HTML path (for agent to read/edit later)
     const stored = getScene(sceneId);

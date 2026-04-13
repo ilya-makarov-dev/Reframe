@@ -773,8 +773,7 @@ export const PLATFORM_JS = `
   function showVerbPanel(verb, html, onSubmit) {
     // Remove any existing verb panel.
     closeVerbPanel();
-    var frame = $('.viewport-frame');
-    if (!frame) return;
+    var frame = $('.viewport-frame') || $('.main') || document.querySelector('.app') || document.body;
     var panel = document.createElement('div');
     panel.className = 'verb-panel show';
     panel.setAttribute('data-verb-panel', verb);
@@ -2417,6 +2416,376 @@ export const PLATFORM_JS = `
   }
 
   // ── Macro apply buttons (macros page) ────────────────
+  // ── Brand picker in global toolbar ─────────────────────────────────
+  function bindBrandPicker() {
+    var pickerBtn = $('[data-brand-picker-btn]');
+    var pickerMenu = $('[data-brand-picker-menu]');
+    if (!pickerBtn || !pickerMenu) return;
+
+    pickerBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var isHidden = pickerMenu.classList.contains('hidden');
+      pickerMenu.classList.toggle('hidden');
+      if (isHidden) {
+        // Fetch brands
+        fetch('/platform/api/brands')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var brands = data.brands || data || [];
+            if (!Array.isArray(brands)) brands = [];
+            var items = brands.map(function(b) {
+              var name = typeof b === 'string' ? b : b.name || b.slug || '';
+              return '<button class="brand-picker-item" style="display:block;width:100%;text-align:left;padding:8px 12px;border:none;background:transparent;border-radius:6px;cursor:pointer;font-size:13px;color:var(--text-base);font-family:var(--sans)" data-brand-apply="' + name + '">' + name + '</button>';
+            }).join('');
+            if (items) {
+              pickerMenu.innerHTML = '<div style="padding:4px 8px;font-size:10px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em">Apply brand</div>' + items;
+              pickerMenu.querySelectorAll('[data-brand-apply]').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                  var brand = btn.getAttribute('data-brand-apply');
+                  pickerMenu.classList.add('hidden');
+                  // Apply brand via rebrand API
+                  var sid = state.currentSceneId || document.querySelector('[data-session]')?.getAttribute('data-session');
+                  if (!sid || !brand) return;
+                  var label = $('[data-brand-picker-label]');
+                  if (label) label.textContent = brand;
+                  fetch('/platform/api/rebrand/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sceneId: sid, brand: brand })
+                  }).then(function() {
+                    // Refresh preview
+                    var iframe = document.querySelector('.viewport-frame iframe');
+                    if (iframe) iframe.src = iframe.src.split('?')[0] + '?t=' + Date.now();
+                  });
+                });
+              });
+            }
+          })
+          .catch(function() {});
+      }
+    });
+
+    // Close on outside click
+    document.addEventListener('click', function() { pickerMenu.classList.add('hidden'); });
+  }
+
+  // ── Command Palette (Cmd+K) ────────────────────────────────────────
+  var commandPaletteEl = null;
+
+  function toggleCommandPalette() {
+    if (commandPaletteEl) {
+      commandPaletteEl.remove();
+      commandPaletteEl = null;
+      return;
+    }
+
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding-top:20vh;backdrop-filter:blur(4px)';
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) { overlay.remove(); commandPaletteEl = null; } });
+
+    var palette = document.createElement('div');
+    palette.style.cssText = 'width:560px;background:var(--surface-elevated);border:1px solid var(--border);border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,0.2);overflow:hidden';
+
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Type a command...';
+    input.style.cssText = 'width:100%;padding:16px 20px;border:none;outline:none;background:transparent;font-size:16px;color:var(--text-base);font-family:var(--sans)';
+    input.setAttribute('autofocus', '');
+
+    var results = document.createElement('div');
+    results.style.cssText = 'max-height:320px;overflow-y:auto;padding:8px';
+
+    var commands = [
+      { icon: '\uD83C\uDFA8', label: 'Design from scratch', desc: 'AI writes full page from your brief', action: function() { var btn = document.querySelector('[data-kind="describe"]'); if(btn) btn.click(); } },
+      { icon: '\uD83E\uDDF1', label: 'Build from blocks', desc: 'Pick sections from block library', action: function() { window.location.href = '/platform/blocks'; } },
+      { icon: '\uD83D\uDD04', label: 'Rebrand', desc: 'Paste HTML, apply any brand', action: function() { var btn = document.querySelector('[data-kind="html"]'); if(btn) btn.click(); } },
+      { icon: '\uD83D\uDCCA', label: 'Quality audit', desc: 'Check design quality (37 rules + 8 metrics)', action: function() { var tab = document.querySelector('[data-tab="quality"]'); if(tab) tab.click(); } },
+      { icon: '\uD83D\uDCE6', label: 'Batch export', desc: 'N brands \u00D7 M viewports \u00D7 K formats', action: function() { window.location.href = '/platform/batch'; } },
+      { icon: '\uD83C\uDFAD', label: 'Switch brand', desc: 'Apply a different brand to this design', action: function() { var tab = document.querySelector('[data-tab="rebrand"]'); if(tab) tab.click(); } },
+      { icon: '\uD83C\uDFB2', label: 'Generate variants', desc: 'Density \u00D7 Radius \u00D7 Shadows grid', action: function() { var tab = document.querySelector('[data-tab="vary"]'); if(tab) tab.click(); } },
+      { icon: '\u2B07\uFE0F', label: 'Export HTML', desc: 'Static HTML with inline styles', action: function() { var btn = document.querySelector('[data-format="html"]'); if(btn) btn.click(); } },
+      { icon: '\uD83D\uDDBC\uFE0F', label: 'Export PNG', desc: 'Raster image via CanvasKit', action: function() { var btn = document.querySelector('[data-format="png"]'); if(btn) btn.click(); } },
+      { icon: '\uD83D\uDCC4', label: 'Export PDF', desc: 'Print-ready PDF document', action: function() { var btn = document.querySelector('[data-format="pdf"]'); if(btn) btn.click(); } },
+      { icon: '\u269B\uFE0F', label: 'Export React', desc: 'TSX with TypeScript annotations', action: function() { var btn = document.querySelector('[data-format="react"]'); if(btn) btn.click(); } },
+      { icon: '\uD83C\uDF10', label: 'Export Site', desc: 'Multi-page app with routing', action: function() { var btn = document.querySelector('[data-format="site"]'); if(btn) btn.click(); } },
+      { icon: '\uD83D\uDD11', label: 'Tokens', desc: 'View/export design tokens (DTCG)', action: function() { var tab = document.querySelector('[data-tab="tokens"]'); if(tab) tab.click(); } },
+      { icon: '\uD83D\uDD0C', label: 'API docs', desc: 'Headless render API reference', action: function() { window.location.href = '/platform/api-docs'; } },
+    ];
+
+    function renderResults(filter) {
+      var q = (filter || '').toLowerCase();
+      var filtered = q ? commands.filter(function(c) { return c.label.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q); }) : commands;
+      results.innerHTML = filtered.map(function(cmd, i) {
+        return '<div class="cmd-item" data-cmd-idx="' + commands.indexOf(cmd) + '" style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;cursor:pointer;transition:background 0.1s' + (i === 0 ? ';background:var(--surface-sunken)' : '') + '">'
+          + '<span style="font-size:18px;width:24px;text-align:center">' + cmd.icon + '</span>'
+          + '<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:500;color:var(--text-base)">' + cmd.label + '</div>'
+          + '<div style="font-size:12px;color:var(--text-muted)">' + cmd.desc + '</div></div>'
+          + '</div>';
+      }).join('');
+
+      results.querySelectorAll('.cmd-item').forEach(function(item) {
+        item.addEventListener('click', function() {
+          var idx = parseInt(item.getAttribute('data-cmd-idx') || '0');
+          overlay.remove();
+          commandPaletteEl = null;
+          if (commands[idx]) commands[idx].action();
+        });
+        item.addEventListener('mouseenter', function() {
+          results.querySelectorAll('.cmd-item').forEach(function(i) { i.style.background = 'transparent'; });
+          item.style.background = 'var(--surface-sunken)';
+        });
+      });
+    }
+
+    input.addEventListener('input', function() { renderResults(input.value); });
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { overlay.remove(); commandPaletteEl = null; }
+      if (e.key === 'Enter') {
+        var active = results.querySelector('.cmd-item[style*="surface-sunken"]') || results.querySelector('.cmd-item');
+        if (active) active.click();
+      }
+    });
+
+    palette.appendChild(input);
+    palette.appendChild(results);
+    overlay.appendChild(palette);
+    document.body.appendChild(overlay);
+    commandPaletteEl = overlay;
+    renderResults('');
+    setTimeout(function() { input.focus(); }, 50);
+  }
+
+  // ── Variant strip: show scene variants as thumbnails below preview ──
+  function bindVariantStrip() {
+    var strip = $('[data-variant-strip]');
+    var items = $('[data-variant-items]');
+    if (!strip || !items) return;
+
+    // Fetch quality score for a scene (cached per session)
+    var qualityCache = {};
+    function getQuality(sceneId, cb) {
+      if (qualityCache[sceneId] !== undefined) { cb(qualityCache[sceneId]); return; }
+      fetch('/platform/api/aesthetic/' + sceneId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var score = data.ok ? data.overall : null;
+          qualityCache[sceneId] = score;
+          cb(score);
+        })
+        .catch(function() { qualityCache[sceneId] = null; cb(null); });
+    }
+
+    function qualityColor(score) {
+      if (score === null || score === undefined) return 'var(--text-muted)';
+      if (score >= 80) return '#22c55e';
+      if (score >= 60) return '#eab308';
+      if (score >= 30) return '#f97316';
+      return '#ef4444';
+    }
+
+    // Fetch all scenes and populate variant strip
+    function refreshVariantStrip() {
+      fetch('/api/scenes')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (!data.scenes || data.scenes.length < 2) {
+            strip.style.display = 'none';
+            return;
+          }
+          strip.style.display = 'block';
+
+          var currentSession = state.currentSceneId || document.querySelector('[data-session]')?.getAttribute('data-session');
+
+          items.innerHTML = data.scenes.map(function(scene) {
+            var isActive = scene.id === currentSession;
+            return '<div class="variant-card' + (isActive ? ' variant-active' : '') + '" data-variant-scene="' + scene.id + '" style="'
+              + 'display:inline-flex;flex-direction:column;gap:6px;padding:6px;border-radius:8px;cursor:pointer;min-width:140px;flex-shrink:0;'
+              + 'border:2px solid ' + (isActive ? 'var(--accent)' : 'transparent') + ';'
+              + 'background:' + (isActive ? 'rgba(var(--accent-rgb,0,113,227),0.06)' : 'var(--surface)') + ';'
+              + 'transition:all 0.15s">'
+              + '<div style="width:136px;height:80px;border-radius:4px;overflow:hidden;background:var(--surface-sunken);position:relative">'
+              + '<img src="/thumbnail/' + scene.id + '.png?scale=1" loading="lazy" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display=&quot;none&quot;">'
+              + '<span class="variant-quality-badge" data-vq-scene="' + scene.id + '" style="position:absolute;top:4px;right:4px;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,0.6);color:#fff;font-size:10px;font-weight:600;font-family:var(--mono);display:none"></span>'
+              + '</div>'
+              + '<div style="font-size:11px;font-weight:500;color:var(--text-base);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:136px">' + (scene.name || scene.id) + '</div>'
+              + '<div style="font-size:10px;color:var(--text-muted)">' + (scene.size || '') + ' \u00B7 ' + (scene.nodes || '?') + ' nodes</div>'
+              + '</div>';
+          }).join('');
+
+          // Fetch quality scores for each variant
+          data.scenes.forEach(function(scene) {
+            getQuality(scene.id, function(score) {
+              var badge = document.querySelector('[data-vq-scene="' + scene.id + '"]');
+              if (badge && score !== null) {
+                badge.textContent = score + '%';
+                badge.style.display = 'block';
+                badge.style.color = qualityColor(score);
+              }
+            });
+          });
+
+          // Click handler: switch main preview to clicked variant
+          items.querySelectorAll('[data-variant-scene]').forEach(function(card) {
+            card.addEventListener('click', function() {
+              var sceneId = card.getAttribute('data-variant-scene');
+              if (!sceneId) return;
+              var iframe = document.querySelector('.viewport-frame iframe');
+              if (iframe) iframe.src = '/preview/' + sceneId + '?t=' + Date.now();
+              items.querySelectorAll('.variant-card').forEach(function(c) {
+                c.style.border = '2px solid transparent';
+                c.style.background = 'var(--surface)';
+                c.classList.remove('variant-active');
+              });
+              card.style.border = '2px solid var(--accent)';
+              card.style.background = 'rgba(var(--accent-rgb,0,113,227),0.06)';
+              card.classList.add('variant-active');
+              state.currentSceneId = sceneId;
+              // Update floating quality badge for new active scene
+              refreshQualityBadge(sceneId);
+            });
+          });
+
+          // Populate floating quality badge for current scene
+          if (currentSession) refreshQualityBadge(currentSession);
+        })
+        .catch(function() { strip.style.display = 'none'; });
+    }
+
+    // Floating quality badge on the viewport
+    function refreshQualityBadge(sceneId) {
+      var badge = $('[data-quality-badge]');
+      if (!badge) return;
+      getQuality(sceneId, function(score) {
+        if (score !== null) {
+          badge.querySelector('[data-quality-badge-score]').textContent = score + '% Quality';
+          badge.style.display = 'block';
+          badge.style.background = 'rgba(0,0,0,0.75)';
+          badge.style.color = qualityColor(score);
+        } else {
+          badge.style.display = 'none';
+        }
+      });
+
+      // Click badge → open quality tab
+      badge.onclick = function() {
+        var tab = document.querySelector('[data-tab="quality"]');
+        if (tab) tab.click();
+      };
+    }
+
+    // Also fetch badge for initial scene on load
+    var initSid = state.currentSceneId || document.querySelector('[data-session]')?.getAttribute('data-session');
+    if (initSid) {
+      setTimeout(function() { refreshQualityBadge(initSid); }, 500);
+    }
+
+    refreshVariantStrip();
+    var origHandleEvent = handleEvent;
+    handleEvent = function(ev) {
+      origHandleEvent(ev);
+      if (ev.type === 'session:scenes' || ev.type === 'scene:saved' || ev.type === 'scene:deleted') {
+        qualityCache = {}; // invalidate on changes
+        refreshVariantStrip();
+      }
+    };
+  }
+
+  // ── Pipeline stepper interactivity ──
+  function bindPipelineStepper() {
+    var steps = $$('.pipeline-step');
+    if (steps.length === 0) return;
+
+    steps.forEach(function(step) {
+      step.addEventListener('click', function() {
+        var target = step.getAttribute('data-step');
+        if (!target) return;
+
+        // Update active state
+        steps.forEach(function(s) {
+          s.style.background = 'transparent';
+          s.style.color = 'var(--text-muted)';
+          s.classList.remove('active');
+        });
+        step.style.background = 'var(--accent)';
+        step.style.color = 'var(--on-accent)';
+        step.classList.add('active');
+
+        // Switch right panel based on step
+        var tabMap = {
+          generate: 'sections',
+          review: 'quality',
+          refine: 'rebrand',
+          ship: null, // triggers export dropdown
+        };
+
+        var tabName = tabMap[target];
+        if (tabName) {
+          // Click the corresponding right panel tab
+          var tab = document.querySelector('[data-tab="' + tabName + '"]');
+          if (tab) tab.click();
+        }
+
+        if (target === 'ship') {
+          // Open export dropdown
+          var exportBtn = document.querySelector('[data-export-dropdown] .export-btn');
+          if (exportBtn) exportBtn.click();
+        }
+      });
+    });
+  }
+
+  function bindBatchExport() {
+    var btn = $('[data-batch-generate]');
+    if (!btn) return;
+    btn.addEventListener('click', function() {
+      var scenes = $$('[data-batch-scenes] input:checked').map(function(el) { return el.value; });
+      var formats = $$('[data-batch-formats] input:checked').map(function(el) { return el.value; });
+      var brands = $$('[data-batch-brands] input:checked').map(function(el) { return el.value; });
+      var viewports = $$('[data-batch-viewports] input:checked').map(function(el) {
+        return { name: el.value, width: parseInt(el.getAttribute('data-w') || '1440'), height: parseInt(el.getAttribute('data-h') || '900') };
+      });
+
+      if (scenes.length === 0 || formats.length === 0) {
+        var status = $('[data-batch-status]');
+        if (status) status.textContent = 'Select at least one scene and one format.';
+        return;
+      }
+
+      var statusEl = $('[data-batch-status]');
+      if (statusEl) statusEl.textContent = 'Generating...';
+      btn.disabled = true;
+
+      // For each scene, call batch API
+      var allResults = [];
+      var pending = scenes.length;
+      scenes.forEach(function(sceneId) {
+        var body = JSON.stringify({
+          sceneId: sceneId,
+          formats: formats,
+          brands: brands.length > 0 ? brands : undefined,
+          viewports: viewports.length > 0 ? viewports : undefined,
+        });
+        fetch('/api/render/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.results) allResults = allResults.concat(data.results);
+            pending--;
+            if (pending <= 0) {
+              btn.disabled = false;
+              if (statusEl) statusEl.textContent = allResults.length + ' files generated.';
+              var resultsEl = $('[data-batch-results]');
+              if (resultsEl) {
+                resultsEl.innerHTML = allResults.map(function(r) {
+                  return '<div>' + (r.brand || '') + ' ' + (r.viewport || '') + ' ' + r.format + ' \u2014 ' + (r.size > 0 ? Math.round(r.size / 1024) + 'KB' : 'ERR') + '</div>';
+                }).join('');
+              }
+            }
+          })
+          .catch(function() { pending--; });
+      });
+    });
+  }
+
   function bindMacroApplyBtns() {
     const pageEl = $('[data-macro-current-scene]');
     const sceneSlug = pageEl ? (pageEl.getAttribute('data-macro-current-scene') || null) : null;
@@ -3325,13 +3694,19 @@ export const PLATFORM_JS = `
         } else if (kind === 'html') {
           showVerbPanel('Paste HTML',
             '<textarea class="ask-input" style="height:160px;resize:vertical;font-family:var(--mono);font-size:12px" data-vp-field="html" placeholder="Paste your full HTML here\u2026"></textarea>' +
-            '<div class="ask-hint">Compiles directly into a scene — no agent needed</div>',
+            '<div style="margin-top:12px"><label style="font-size:12px;color:var(--text-muted)">Brand (optional):</label>' +
+            '<input class="ask-input" type="text" placeholder="e.g. stripe, airbnb, linear" data-vp-field="brand" style="margin-top:4px;font-size:13px"></div>' +
+            '<div class="ask-hint">Compiles HTML into a scene. Add brand to auto-rebrand.</div>',
             function(panel) {
               var textarea = panel.querySelector('[data-vp-field="html"]');
+              var brandInput = panel.querySelector('[data-vp-field="brand"]');
               var html = textarea ? textarea.value.trim() : '';
+              var brand = brandInput ? brandInput.value.trim() : '';
               if (!html) return;
               flash('Compiling\u2026', 'info');
-              api('/platform/api/import', { html: html })
+              var body = { html: html };
+              if (brand) body.brand = brand;
+              api('/platform/api/import', body)
                 .then(function(data) {
                   if (data && data.slug) {
                     flash('Compiled! Redirecting\u2026', 'success');
@@ -3343,6 +3718,30 @@ export const PLATFORM_JS = `
                 .catch(function() { flash('Compile failed', 'error'); });
             }
           );
+        } else if (kind === 'audit') {
+          showVerbPanel('Quality Audit',
+            '<textarea class="ask-input" style="height:160px;resize:vertical;font-family:var(--mono);font-size:12px" data-vp-field="html" placeholder="Paste HTML to audit\u2026"></textarea>' +
+            '<div class="ask-hint">Compiles and runs 37 audit rules + 8 aesthetic quality metrics.</div>',
+            function(panel) {
+              var textarea = panel.querySelector('[data-vp-field="html"]');
+              var html = textarea ? textarea.value.trim() : '';
+              if (!html) return;
+              flash('Auditing\u2026', 'info');
+              api('/platform/api/import', { html: html })
+                .then(function(data) {
+                  if (data && data.slug) {
+                    flash('Audit complete! Redirecting\u2026', 'success');
+                    // Redirect and auto-open quality tab
+                    location.href = '/platform/scene/' + data.slug + '?tab=quality';
+                  } else {
+                    flash('Audit failed', 'error');
+                  }
+                })
+                .catch(function() { flash('Audit failed', 'error'); });
+            }
+          );
+        } else if (kind === 'blocks') {
+          window.location.href = '/platform/blocks';
         }
       });
     });
@@ -3367,6 +3766,13 @@ export const PLATFORM_JS = `
       if (threadPanelOpen && e.key === 'Escape') {
         closeThreadPanel();
         e.preventDefault();
+        return;
+      }
+
+      // Command-K: open/close command palette
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        toggleCommandPalette();
         return;
       }
 
@@ -3488,8 +3894,86 @@ export const PLATFORM_JS = `
         if (target === 'vary' && !state.varyPanelLoaded) {
           initVaryPanel();
         }
+        // Quality tab: fetch aesthetic score
+        if (target === 'quality') {
+          var analyzeBtn = $('[data-quality-analyze]');
+          if (analyzeBtn && !analyzeBtn._bound) {
+            analyzeBtn._bound = true;
+            analyzeBtn.addEventListener('click', function() {
+              var sid = state.currentSceneId || document.querySelector('[data-session]')?.getAttribute('data-session');
+              if (!sid) return;
+              analyzeBtn.textContent = 'Analyzing...';
+              analyzeBtn.disabled = true;
+              fetch('/platform/api/aesthetic/' + sid)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                  if (!data.ok) { analyzeBtn.textContent = 'Error'; return; }
+                  var scoreEl = $('[data-quality-score]');
+                  if (scoreEl) {
+                    scoreEl.innerHTML = '<div style="font-size:48px;font-weight:800;color:var(--accent)">' + data.overall + '%</div>'
+                      + '<div class="t-caption" style="color:var(--text-muted)">' + data.overallRating + '</div>';
+                  }
+                  var metricsEl = $('[data-quality-metrics]');
+                  if (metricsEl && data.metrics) {
+                    metricsEl.innerHTML = data.metrics.map(function(m) {
+                      var filled = Math.round(m.score / 10);
+                      var bar = '\u2588'.repeat(filled) + '\u2591'.repeat(10 - filled);
+                      var color = m.score >= 60 ? 'var(--text-base)' : m.score >= 30 ? '#d4a017' : '#e74c3c';
+                      return '<div style="display:flex;align-items:center;gap:8px;font-size:13px">'
+                        + '<span style="width:80px;color:var(--text-muted)">' + m.name + '</span>'
+                        + '<span style="font-family:var(--mono);color:' + color + '">' + bar + '</span>'
+                        + '<span style="width:32px;text-align:right;font-weight:600">' + m.score + '%</span>'
+                        + '</div>';
+                    }).join('');
+                  }
+                  analyzeBtn.textContent = 'Re-analyze';
+                  analyzeBtn.disabled = false;
+                })
+                .catch(function() { analyzeBtn.textContent = 'Analyze Quality'; analyzeBtn.disabled = false; });
+            });
+          }
+        }
+        // Tokens tab: fetch token list
+        if (target === 'tokens') {
+          var sid = state.currentSceneId || document.querySelector('[data-session]')?.getAttribute('data-session');
+          if (sid) {
+            fetch('/platform/api/tokens/' + sid)
+              .then(function(r) { return r.json(); })
+              .then(function(data) {
+                var tree = $('[data-tokens-tree]');
+                if (!tree || !data.ok) return;
+                if (data.count === 0) {
+                  tree.innerHTML = '<div class="t-caption" style="color:var(--text-muted);padding:16px;text-align:center">No tokens defined.</div>';
+                  return;
+                }
+                tree.innerHTML = data.tokens.map(function(t) {
+                  var swatch = t.type === 'COLOR' && typeof t.value === 'string' && t.value.startsWith('#')
+                    ? '<span style="display:inline-block;width:14px;height:14px;border-radius:3px;background:' + t.value + ';border:1px solid var(--border);vertical-align:middle;margin-right:6px"></span>'
+                    : '';
+                  return '<div style="display:flex;align-items:center;gap:4px;font-size:12px;padding:3px 0">'
+                    + swatch
+                    + '<span style="color:var(--text-base);font-family:var(--mono)">' + t.name + '</span>'
+                    + '<span style="margin-left:auto;color:var(--text-muted)">' + (typeof t.value === 'string' ? t.value : JSON.stringify(t.value)) + '</span>'
+                    + '</div>';
+                }).join('');
+              })
+              .catch(function() {});
+          }
+        }
       });
     });
+
+    // Auto-open tab from URL ?tab= param (e.g. from audit redirect)
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var autoTab = params.get('tab');
+      if (autoTab) {
+        var targetTab = document.querySelector('[data-tab="' + autoTab + '"]');
+        if (targetTab) {
+          setTimeout(function() { targetTab.click(); }, 300);
+        }
+      }
+    } catch(e) {}
   }
 
   // ── Rebrand panel ──────────────────────────────────────────
@@ -5549,6 +6033,10 @@ export const PLATFORM_JS = `
     bindTimelineScrubber();
     bindSidebarActions();
     bindContextMenu();
+    bindBatchExport();
+    bindVariantStrip();
+    bindPipelineStepper();
+    bindBrandPicker();
     refreshAnnotations();
     // Run audit + timeline after measurements arrive (deferred —
     // measurements come async via postMessage from the inject script).

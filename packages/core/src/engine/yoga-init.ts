@@ -1,18 +1,43 @@
 /**
- * Yoga WASM Auto-Initialization
+ * Layout Engine Auto-Initialization
  *
- * Loads yoga-layout (WASM) and registers it with the layout engine.
+ * Supports two backends:
+ *   - 'yoga' (default): yoga-layout WASM — mature flexbox, custom grid
+ *   - 'taffy': yoga-layout-taffy WASM — spec-faithful Flexbox + CSS Grid
+ *
  * Call initYoga() once at startup before computing layouts.
+ * Call setLayoutBackend('taffy') BEFORE initYoga() to switch backends.
  */
 
 import { setYoga, setTextMeasurer } from './layout';
 import type { YogaInstance } from './layout';
 import { initTextMeasurer, createTextMeasurer } from './text-measure';
 
+// ─── Backend Selection ──────────────────────────────────────
+
+export type LayoutBackend = 'yoga' | 'taffy';
+
+let _backend: LayoutBackend = 'yoga';
 let initialized = false;
 
 /**
- * Initialize the Yoga WASM layout engine and text measurer.
+ * Set the layout backend before initialization.
+ * Must be called BEFORE initYoga().
+ */
+export function setLayoutBackend(backend: LayoutBackend): void {
+  if (initialized) {
+    throw new Error('Cannot change layout backend after initialization. Call setLayoutBackend() before initYoga().');
+  }
+  _backend = backend;
+}
+
+/** Get the current layout backend. */
+export function getLayoutBackend(): LayoutBackend {
+  return _backend;
+}
+
+/**
+ * Initialize the layout engine (Yoga or Taffy) and text measurer.
  * Safe to call multiple times — only initializes once.
  */
 export async function initYoga(): Promise<void> {
@@ -20,10 +45,39 @@ export async function initYoga(): Promise<void> {
 
   // Use Function constructor to prevent TypeScript from converting import() to require()
   const dynamicImport = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<any>;
-  const Yoga = await dynamicImport('yoga-layout');
-  const y = Yoga.default ?? Yoga;
 
-  const instance: YogaInstance = {
+  if (_backend === 'taffy') {
+    // Taffy backend: yoga-layout-taffy is a Yoga-compatible WASM wrapper
+    // around Taffy (Rust) with real CSS Grid support (auto-flow, named lines, areas)
+    try {
+      const Taffy = await dynamicImport('yoga-layout-taffy');
+      const t = Taffy.default ?? Taffy;
+      const instance: YogaInstance = adaptYogaCompatible(t);
+      setYoga(instance);
+    } catch {
+      // Taffy not installed — fall back to Yoga
+      console.warn('yoga-layout-taffy not available, falling back to yoga-layout');
+      _backend = 'yoga';
+      const Yoga = await dynamicImport('yoga-layout');
+      const y = Yoga.default ?? Yoga;
+      setYoga(adaptYogaCompatible(y));
+    }
+  } else {
+    const Yoga = await dynamicImport('yoga-layout');
+    const y = Yoga.default ?? Yoga;
+    setYoga(adaptYogaCompatible(y));
+  }
+
+  // Initialize text measurement (opentype.js)
+  await initTextMeasurer();
+  setTextMeasurer(createTextMeasurer());
+
+  initialized = true;
+}
+
+/** Adapt a Yoga-compatible module (yoga-layout or yoga-layout-taffy) into our YogaInstance. */
+function adaptYogaCompatible(y: any): YogaInstance {
+  return {
     Node: { create: () => y.Node.create() },
     DIRECTION_LTR: y.DIRECTION_LTR,
     FLEX_DIRECTION_ROW: y.FLEX_DIRECTION_ROW,
@@ -54,12 +108,4 @@ export async function initYoga(): Promise<void> {
     GUTTER_COLUMN: y.GUTTER_COLUMN,
     GUTTER_ROW: y.GUTTER_ROW,
   };
-
-  setYoga(instance);
-
-  // Initialize text measurement (opentype.js)
-  await initTextMeasurer();
-  setTextMeasurer(createTextMeasurer());
-
-  initialized = true;
 }

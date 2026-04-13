@@ -1643,5 +1643,73 @@ export async function handleNodeEditApi(
     return true;
   }
 
+  // ── GET /platform/api/aesthetic/:sceneId ──
+  const aestheticMatch = pathname.match(/^\/platform\/api\/aesthetic\/(.+)$/);
+  if (aestheticMatch && req.method === 'GET') {
+    const sceneId = aestheticMatch[1];
+    const store = await getStore();
+    const scene = store.getScene(sceneId);
+    if (!scene) {
+      sendError(res, 404, `scene ${sceneId} not found`);
+      return true;
+    }
+    try {
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(scene.graph, scene.rootId);
+      const { computeAestheticScore, scoreToRating } = await import('../../../../core/src/aesthetic/index.js');
+      const score = computeAestheticScore(scene.graph, scene.rootId);
+      const metrics = Object.entries(score)
+        .filter(([key]) => key !== 'overall')
+        .map(([key, value]) => ({
+          name: key,
+          score: Math.round((value as number) * 100),
+          rating: scoreToRating(value as number),
+        }));
+      sendJson(res, 200, {
+        ok: true,
+        sceneId,
+        overall: Math.round(score.overall * 100),
+        overallRating: scoreToRating(score.overall),
+        metrics,
+      });
+    } catch (err: any) {
+      sendError(res, 500, `Aesthetic scoring failed: ${err.message}`);
+    }
+    return true;
+  }
+
+  // ── GET /platform/api/tokens/:sceneId ──
+  const tokensMatch = pathname.match(/^\/platform\/api\/tokens\/(.+)$/);
+  if (tokensMatch && req.method === 'GET') {
+    const sceneId = tokensMatch[1];
+    const store = await getStore();
+    const scene = store.getScene(sceneId);
+    if (!scene) {
+      sendError(res, 404, `scene ${sceneId} not found`);
+      return true;
+    }
+    try {
+      const tokens: Array<{ name: string; type: string; value: unknown }> = [];
+      for (const variable of scene.graph.variables.values()) {
+        const firstModeValue = Object.values(variable.valuesByMode)[0];
+        let displayValue: unknown = firstModeValue;
+        if (variable.type === 'COLOR' && typeof firstModeValue === 'object' && firstModeValue !== null && 'r' in (firstModeValue as any)) {
+          const c = firstModeValue as { r: number; g: number; b: number };
+          displayValue = `#${Math.round(c.r * 255).toString(16).padStart(2, '0')}${Math.round(c.g * 255).toString(16).padStart(2, '0')}${Math.round(c.b * 255).toString(16).padStart(2, '0')}`;
+        }
+        tokens.push({
+          name: variable.name,
+          type: variable.type,
+          value: displayValue,
+        });
+      }
+      tokens.sort((a, b) => a.name.localeCompare(b.name));
+      sendJson(res, 200, { ok: true, sceneId, count: tokens.length, tokens });
+    } catch (err: any) {
+      sendError(res, 500, `Token listing failed: ${err.message}`);
+    }
+    return true;
+  }
+
   return false;
 }

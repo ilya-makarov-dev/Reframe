@@ -39,3 +39,10 @@ export {
   type ClassifyResult,
   type SemanticSlot,
 } from './classify';
+
+export {
+  aiClassifyScene,
+  type AiClassifyOptions,
+  type AiClassifyResult,
+  type AiRoleAssignment,
+} from './ai-classify';

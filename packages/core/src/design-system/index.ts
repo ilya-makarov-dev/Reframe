@@ -47,8 +47,16 @@ export {
   tokenToCssVar,
   cssVarToToken,
   colorToHex,
+  hexToColor,
   TOKEN_COLLECTION_NAME,
   MODE_LIGHT,
   MODE_DARK,
 } from './tokens';
 export type { TokenIndex, TokenInfo, TokenizeOptions } from './tokens';
+
+export {
+  exportToDTCG,
+  importFromDTCG,
+  designSystemToDTCG,
+} from './dtcg';
+export type { DTCGToken, DTCGGroup, DTCGFile, DTCGImportOptions } from './dtcg';

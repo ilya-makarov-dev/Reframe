@@ -148,7 +148,54 @@ export {
   type DesignSystemComponents,
   type DesignSystemLayout,
   type DesignSystemResponsive,
+  // DTCG Token Interop
+  exportToDTCG,
+  importFromDTCG,
+  designSystemToDTCG,
+  type DTCGToken,
+  type DTCGGroup,
+  type DTCGFile,
+  type DTCGImportOptions,
 } from './design-system';
+
+// ── Aesthetic Scoring ──
+export {
+  computeAestheticScore,
+  measureAlignment,
+  measureWhitespace,
+  measureHarmony,
+  measureProportion,
+  measureRhythm,
+  measureReadability,
+  scoreToRating,
+  AESTHETIC_WEIGHTS,
+  type AestheticScore,
+} from './aesthetic';
+
+// ── Block Library ──
+export {
+  registerBlock,
+  getBlock,
+  removeBlock,
+  listBlocks,
+  searchBlocks,
+  listBlockNames,
+  blockCount,
+  clearBlocks,
+  saveBlock,
+  loadBlock,
+  deleteBlockFile,
+  loadBlocksFromDisk,
+  listBlockFiles,
+  instantiateBlock,
+  registerStarterBlocks,
+  ALL_BLOCK_CATEGORIES,
+  type BlockCategory,
+  type BlockSlot,
+  type BlockDefinition,
+  type BlockInstantiateParams,
+  type InstantiateResult,
+} from './blocks';
 
 // ── Headless Adaptation ──
 export {
@@ -315,6 +362,8 @@ export {
   scaleIn, scaleOut, popIn, revealLeft, revealUp,
   pulse, shake, bounce, typewriter, colorShift, blurIn,
 } from './animation';
+export { timelineToWaapi, type WaapiOutput, type WaapiNodeAnimation } from './animation/to-waapi';
+export { timelineToTheatre, type TheatreProject, type TheatreSheet } from './animation/to-theatre';
 export type {
   Easing, EasingPreset, CubicBezier, SpringConfig,
   AnimatableProperties, AnimatableProperty,
@@ -395,6 +444,7 @@ export {
   computeLayout,
   computeAllLayouts,
   ensureSceneLayout,
+  configureMultiColumn,
   setTextMeasurer,
 } from './engine/layout';
 export {
@@ -403,7 +453,7 @@ export {
   collectFontKeys,
   setFontRegistrar,
 } from './engine/fonts';
-export { initYoga } from './engine/yoga-init';
+export { initYoga, setLayoutBackend, getLayoutBackend, type LayoutBackend } from './engine/yoga-init';
 
 // ── Config types (CLI logger interfaces) ──
 export type { BuildLogger } from './config/build';

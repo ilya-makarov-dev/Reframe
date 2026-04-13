@@ -44,6 +44,18 @@ import type { Operation } from '../../../core/src/ops/types.js';
 import type { ProjectManifest, SceneEntry } from '../../../core/src/project/types.js';
 import { detectBrandDrift } from '../../../core/src/project/types.js';
 import { parseDesignMd } from '../../../core/src/design-system/index.js';
+import { exportToDTCG, importFromDTCG } from '../../../core/src/design-system/dtcg.js';
+import {
+  registerStarterBlocks,
+  listBlocks as listRegistryBlocks,
+  getBlock,
+  instantiateBlock,
+  saveBlock as saveBlockToDisk,
+  loadBlocksFromDisk,
+  deleteBlockFile,
+  blockCount,
+} from '../../../core/src/blocks/index.js';
+import type { BlockCategory } from '../../../core/src/blocks/types.js';
 import { serializeGraph } from '../../../core/src/serialize.js';
 import {
   getScene,
@@ -54,7 +66,8 @@ import {
 } from '../store.js';
 import { getSession } from '../session.js';
 import { emitProjectEvent } from '../events.js';
-import { resolve, normalize, relative } from 'path';
+import { resolve, normalize, relative, join } from 'path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 
 /**
  * Resolve and optionally constrain project dir to cwd (set REFRAME_PROJECT_ALLOW_ABSOLUTE=1 to skip).
@@ -120,6 +133,8 @@ export const projectInputSchema = {
       'add_variant', 'list_variants', 'refresh_variants',
       'save_macro', 'list_macros', 'apply_macro', 'delete_macro',
       'list_components', 'show_component', 'delete_component',
+      'export_tokens', 'import_tokens',
+      'list_blocks', 'get_block', 'add_block', 'save_block', 'delete_block',
     ])
     .describe(
       'Action: init, open, save, load, list, status, delete, save_design, list_brands, set_active_brand, show_source, history, history_clear, add_variant, list_variants, refresh_variants, save_macro, list_macros, apply_macro, delete_macro, list_components (show every component master stored in the project), show_component (return a component master with its slots + revisions), delete_component (remove a component master from disk — scenes that reference it by name will show as missing on next load)',
@@ -178,6 +193,13 @@ export async function handleProject(input: {
       case 'list_components': return doListComponents();
       case 'show_component': return doShowComponent(input);
       case 'delete_component': return doDeleteComponent(input);
+      case 'export_tokens': return doExportTokens(input);
+      case 'import_tokens': return doImportTokens();
+      case 'list_blocks': return doListBlocks(input);
+      case 'get_block': return doGetBlock(input);
+      case 'add_block': return doAddBlock(input);
+      case 'save_block': return doSaveBlock(input);
+      case 'delete_block': return doDeleteBlock(input);
       case 'render_project': return doRenderProject();
       case 'project_graph': return doProjectGraph();
       default:
@@ -232,6 +254,9 @@ function doOpen(input: { dir?: string }) {
 
   const manifest = loadProject(projectDir);
   setProjectDir(projectDir);
+
+  // Auto-register block library on project open
+  ensureBlocks();
 
   emitProjectEvent({ type: 'project:opened', manifest });
 
@@ -789,6 +814,211 @@ function doProjectGraph() {
       { type: 'text' as const, text: JSON.stringify(json, null, 2) },
     ],
   };
+}
+
+// ─── Block Library ──────────────────────────────────────────
+
+let _blocksInitialized = false;
+
+function ensureBlocks(): void {
+  if (_blocksInitialized) return;
+  _blocksInitialized = true;
+  // Load starter blocks
+  registerStarterBlocks();
+  // Load project blocks from disk
+  const dir = getProjectDir();
+  if (dir) loadBlocksFromDisk(dir);
+}
+
+function doListBlocks(input: { brand?: string }) {
+  ensureBlocks();
+  const category = input.brand as BlockCategory | undefined; // reuse 'brand' param as category filter
+  const blocks = listRegistryBlocks(category ?? undefined);
+  if (blocks.length === 0) return ok('No blocks found.' + (category ? ` Category: ${category}` : ''));
+
+  const lines = [`Block library: ${blocks.length} blocks` + (category ? ` in "${category}"` : '')];
+  const byCategory = new Map<string, string[]>();
+  for (const b of blocks) {
+    const cat = byCategory.get(b.category) ?? [];
+    cat.push(`  ${b.name} — ${b.description} (${b.slots.length} slots)`);
+    byCategory.set(b.category, cat);
+  }
+  for (const [cat, names] of byCategory) {
+    lines.push(`\n[${cat}]`);
+    lines.push(...names);
+  }
+  return ok(lines.join('\n'));
+}
+
+function doGetBlock(input: { name?: string }) {
+  if (!input.name) return err('name is required for get_block');
+  ensureBlocks();
+  const block = getBlock(input.name);
+  if (!block) return err(`Block "${input.name}" not found. Use list_blocks to see available blocks.`);
+  return {
+    content: [{
+      type: 'text' as const,
+      text: `Block: ${block.name}\nCategory: ${block.category}\nDescription: ${block.description}\nSlots: ${block.slots.map(s => `${s.name} (${s.type})`).join(', ')}\nTags: ${block.tags?.join(', ') ?? 'none'}`,
+    }],
+  };
+}
+
+function doAddBlock(input: { name?: string; description?: string; sceneId?: string }) {
+  if (!input.name) return err('name is required for add_block (block name to instantiate)');
+  ensureBlocks();
+
+  const block = getBlock(input.name);
+  if (!block) return err(`Block "${input.name}" not found. Use list_blocks to see available blocks.`);
+
+  // Parse slots from description field (JSON) if provided
+  let slots: Record<string, string> = {};
+  if (input.description) {
+    try {
+      slots = JSON.parse(input.description);
+    } catch {
+      // Treat description as headline slot
+      slots = { headline: input.description };
+    }
+  }
+
+  const result = instantiateBlock(block, slots);
+
+  // Store in session
+  const sceneId = storeScene(result.graph, result.rootId, undefined, { slug: block.name, name: block.name });
+
+  return ok(`Block "${block.name}" instantiated as scene ${sceneId} (${result.filledSlots}/${result.totalSlots} slots filled, ${result.graph.nodes.size} nodes)`);
+}
+
+function doSaveBlock(input: { sceneId?: string; name?: string; description?: string }) {
+  if (!input.sceneId) return err('sceneId is required for save_block');
+  if (!input.name) return err('name is required for save_block');
+
+  const stored = getScene(input.sceneId);
+  if (!stored) return err(`Scene "${input.sceneId}" not found`);
+
+  // Serialize the scene graph
+  const { serializeGraph } = require('../../../core/src/serialize.js');
+  const scene = serializeGraph(stored.graph, stored.rootId);
+
+  const def = {
+    version: 1 as const,
+    category: 'content' as const, // default category
+    name: input.name,
+    description: input.description ?? `Custom block from scene ${input.sceneId}`,
+    slots: [],
+    tree: scene.root,
+  };
+
+  // Save to disk if project dir exists
+  const dir = getProjectDir();
+  if (dir) {
+    const path = saveBlockToDisk(dir, def);
+    return ok(`Block "${input.name}" saved to ${path}`);
+  }
+
+  // Register in memory only
+  const { registerBlock } = require('../../../core/src/blocks/registry.js');
+  registerBlock(def);
+  return ok(`Block "${input.name}" registered in memory (no project dir — use init to persist)`);
+}
+
+function doDeleteBlock(input: { name?: string }) {
+  if (!input.name) return err('name is required for delete_block');
+  ensureBlocks();
+
+  const block = getBlock(input.name);
+  if (!block) return err(`Block "${input.name}" not found`);
+
+  const dir = getProjectDir();
+  if (dir) {
+    deleteBlockFile(dir, block.category, block.name);
+  }
+
+  const { removeBlock } = require('../../../core/src/blocks/registry.js');
+  removeBlock(input.name);
+  return ok(`Block "${input.name}" deleted`);
+}
+
+// ─── Token Export/Import ────────────────────────────────────
+
+function doExportTokens(input: { sceneId?: string }) {
+  // Strategy: defineTokens auto-saves tokens.json to .reframe/ during edit.
+  // This action either re-exports from graph or returns the existing file.
+
+  // Try to export from graph first
+  if (input.sceneId) {
+    const stored = getScene(input.sceneId);
+    if (stored) {
+      const dtcg = exportToDTCG(stored.graph);
+      const tokenCount = countTokens(dtcg);
+      if (tokenCount > 0) {
+        const dir = getProjectDir();
+        const filePath = dir ? join(dir, 'tokens.json') : join(process.cwd(), '.reframe', 'tokens.json');
+        const dirPath = dir ?? join(process.cwd(), '.reframe');
+        if (!existsSync(dirPath)) mkdirSync(dirPath, { recursive: true });
+        writeFileSync(filePath, JSON.stringify(dtcg, null, 2), 'utf-8');
+        return ok(`Exported ${tokenCount} tokens to ${filePath} (W3C DTCG 2025.10 format)`);
+      }
+    }
+  }
+
+  // Fallback: check if tokens.json already exists (auto-saved by defineTokens)
+  const dir = getProjectDir() ?? join(process.cwd(), '.reframe');
+  const filePath = join(dir, 'tokens.json');
+  if (existsSync(filePath)) {
+    try {
+      const raw = readFileSync(filePath, 'utf-8');
+      const dtcg = JSON.parse(raw);
+      const tokenCount = countTokens(dtcg);
+      return ok(`Token file exists at ${filePath} (${tokenCount} tokens, W3C DTCG 2025.10 format). Run defineTokens to regenerate.`);
+    } catch {
+      return err('tokens.json exists but is malformed. Run defineTokens to regenerate.');
+    }
+  }
+
+  return err('No tokens found. Run reframe_edit defineTokens to create tokens from a brand, which auto-saves to .reframe/tokens.json.');
+}
+
+function doImportTokens() {
+  const dir = getProjectDir();
+  const filePath = dir ? join(dir, 'tokens.json') : join(process.cwd(), '.reframe', 'tokens.json');
+  if (!existsSync(filePath)) {
+    return err(`No tokens.json found at ${filePath}. Place a DTCG .tokens.json file there.`);
+  }
+
+  const raw = readFileSync(filePath, 'utf-8');
+  let dtcg: Record<string, unknown>;
+  try {
+    dtcg = JSON.parse(raw);
+  } catch {
+    return err(`Failed to parse ${filePath} as JSON.`);
+  }
+
+  // Apply to all scenes in session
+  const scenes = listSessionScenes();
+  let totalImported = 0;
+  for (const scene of scenes) {
+    const stored = getScene(scene.id);
+    if (!stored) continue;
+    const index = importFromDTCG(stored.graph, dtcg as any);
+    totalImported += index.tokens.size;
+  }
+
+  return ok(`Imported tokens from ${filePath} into ${scenes.length} scene(s) (${totalImported} token bindings created)`);
+}
+
+/** Count tokens in a DTCG tree. */
+function countTokens(node: Record<string, unknown>): number {
+  let count = 0;
+  for (const [key, val] of Object.entries(node)) {
+    if (key.startsWith('$')) continue;
+    if (val && typeof val === 'object' && '$value' in (val as Record<string, unknown>)) {
+      count++;
+    } else if (val && typeof val === 'object') {
+      count += countTokens(val as Record<string, unknown>);
+    }
+  }
+  return count;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────

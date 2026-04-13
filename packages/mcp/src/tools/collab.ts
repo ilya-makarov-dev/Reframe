@@ -42,10 +42,12 @@ import {
 // ─── Schema ──────────────────────────────────────────────────
 
 export const collabInputSchema = {
-  action: z.enum(['list', 'process', 'respond']).describe(
-    'list = peek queued intents without popping. ' +
-    'process = batch-pop up to batchSize queued intents and transition them to processing. ' +
-    'respond = after generating ops, mark intent as proposed with optional summary/opIds.',
+  action: z.enum(['list', 'process', 'respond', 'start_session', 'sync_status']).describe(
+    'list = peek queued intents. ' +
+    'process = batch-pop queued intents. ' +
+    'respond = mark intent as proposed. ' +
+    'start_session = start a CRDT collaboration session for a scene (requires sceneId param). ' +
+    'sync_status = show active collaboration sessions.',
   ),
   batchSize: z.number().int().positive().max(20).optional().default(5).describe(
     'Used by `process` only — max intents to pop in one call. Default 5, max 20.',
@@ -59,14 +61,18 @@ export const collabInputSchema = {
   opIds: z.array(z.string()).optional().describe(
     'Used by `respond` — op IDs the agent generated in response to this intent.',
   ),
+  sceneId: z.string().optional().describe(
+    'Scene ID for start_session — creates a CRDT collaboration session for this scene.',
+  ),
 };
 
 interface CollabInput {
-  action: 'list' | 'process' | 'respond';
+  action: 'list' | 'process' | 'respond' | 'start_session' | 'sync_status';
   batchSize?: number;
   intentId?: string;
   summary?: string;
   opIds?: string[];
+  sceneId?: string;
 }
 
 // ─── Handler ─────────────────────────────────────────────────
@@ -147,6 +153,40 @@ export async function handleCollab(input: CollabInput) {
         return text(`Intent ${input.intentId} → proposed. Platform UI will surface this for human accept/reject.${summaryLine}`);
       } catch (e: any) {
         return text(`reframe_collab respond ERROR: ${e?.message ?? e}`);
+      }
+    }
+
+    case 'start_session': {
+      if (!input.sceneId) {
+        return text('reframe_collab start_session: sceneId required');
+      }
+      try {
+        const { createSession, findSessionForScene } = await import('../../../core/src/collab/sync.js');
+        const existing = findSessionForScene(input.sceneId);
+        if (existing) {
+          return text(`Collaboration session already active for scene ${input.sceneId}: ${existing.id} (${existing.peers.size} peers)`);
+        }
+        const session = createSession(input.sceneId);
+        return text(`Collaboration session started: ${session.id} for scene ${input.sceneId}. Peers can join via WebSocket or SSE.`);
+      } catch (e: any) {
+        return text(`start_session ERROR: ${e?.message ?? e}`);
+      }
+    }
+
+    case 'sync_status': {
+      try {
+        const { listSessions } = await import('../../../core/src/collab/sync.js');
+        const sessions = listSessions();
+        if (sessions.length === 0) {
+          return text('No active collaboration sessions. Use start_session with a sceneId to begin.');
+        }
+        const lines = ['Active collaboration sessions:', ''];
+        for (const s of sessions) {
+          lines.push(`  ${s.id} → scene:${s.sceneId} (${s.peers} peers, ${s.ops} ops)`);
+        }
+        return text(lines.join('\n'));
+      } catch (e: any) {
+        return text(`sync_status ERROR: ${e?.message ?? e}`);
       }
     }
   }

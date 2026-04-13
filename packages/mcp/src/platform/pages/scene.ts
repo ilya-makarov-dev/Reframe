@@ -98,12 +98,38 @@ export function renderScenePageRightPanel(data: Pick<SceneData, 'brands' | 'acti
         <div data-vary-grid-results style="margin-top:12px;display:flex;flex-direction:column;gap:6px"></div>
       </div>
     </div>`;
+  // Quality tab — aesthetic score radar + per-metric bars
+  const qualityPanelHtml = `
+    <div data-panel="quality" style="display:none;flex:1;flex-direction:column;min-height:0;overflow-y:auto;padding:16px;gap:16px">
+      <div class="t-caption" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em">Design Quality Score</div>
+      <div data-quality-score style="text-align:center;padding:16px 0">
+        <div class="t-caption" style="color:var(--text-muted)">Click "Analyze" to compute</div>
+      </div>
+      <button data-quality-analyze class="btn-primary" style="padding:10px 16px;background:var(--accent);color:var(--on-accent);border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;width:100%">Analyze Quality</button>
+      <div data-quality-metrics style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
+    </div>`;
+
+  // Tokens tab — token tree with color swatches
+  const tokensPanelHtml = `
+    <div data-panel="tokens" style="display:none;flex:1;flex-direction:column;min-height:0;overflow-y:auto;padding:16px;gap:16px">
+      <div class="t-caption" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em">Design Tokens</div>
+      <div data-tokens-tree style="display:flex;flex-direction:column;gap:4px">
+        <div class="t-caption" style="color:var(--text-muted);padding:16px;text-align:center">No tokens defined. Use reframe_edit defineTokens to create tokens from a brand.</div>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:12px;display:flex;gap:8px">
+        <button data-tokens-export class="btn-sm" style="flex:1;padding:8px;background:var(--surface);color:var(--text-base);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px">Export DTCG</button>
+        <button data-tokens-import class="btn-sm" style="flex:1;padding:8px;background:var(--surface);color:var(--text-base);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px">Import</button>
+      </div>
+    </div>`;
+
   return `
     <div class="right-tabs">
       <button class="right-tab active" data-tab="sections">Sections</button>
       <button class="right-tab" data-tab="design">Design</button>
       <button class="right-tab" data-tab="rebrand">Rebrand</button>
       <button class="right-tab" data-tab="vary">Vary</button>
+      <button class="right-tab" data-tab="quality">Quality</button>
+      <button class="right-tab" data-tab="tokens">Tokens</button>
     </div>
     <div class="sections-panel" data-panel="sections" style="display:flex;flex:1;flex-direction:column;min-height:0;overflow-y:auto;padding:12px">
       <div id="sections-list">
@@ -118,6 +144,8 @@ export function renderScenePageRightPanel(data: Pick<SceneData, 'brands' | 'acti
     </div>
     ${rebrandPanelHtml}
     ${varyPanelHtml}
+    ${qualityPanelHtml}
+    ${tokensPanelHtml}
     ${threadPanelHtml}
   `;
 }
@@ -177,7 +205,26 @@ function renderViewportHero(data: SceneData): string {
   // the bottom meta line was removed (dimensions live in the header
   // crumb, brand is shown in the sidebar). The viewport becomes a
   // cleaner single-surface zone.
-  return `<div class="viewport-area">
+  return `
+    <div class="pipeline-stepper" style="display:flex;align-items:center;justify-content:center;gap:0;padding:12px 40px;background:var(--surface-elevated);border-bottom:1px solid var(--border-subtle)">
+      <div class="pipeline-step active" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-radius:6px;font-size:13px;font-weight:500;background:var(--accent);color:var(--on-accent);cursor:pointer" data-step="generate">
+        <span style="font-size:14px">1</span> Generate
+      </div>
+      <div style="width:24px;height:1px;background:var(--border)"></div>
+      <div class="pipeline-step" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-radius:6px;font-size:13px;font-weight:500;color:var(--text-muted);cursor:pointer" data-step="review">
+        <span style="font-size:14px">2</span> Review
+      </div>
+      <div style="width:24px;height:1px;background:var(--border)"></div>
+      <div class="pipeline-step" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-radius:6px;font-size:13px;font-weight:500;color:var(--text-muted);cursor:pointer" data-step="refine">
+        <span style="font-size:14px">3</span> Refine
+      </div>
+      <div style="width:24px;height:1px;background:var(--border)"></div>
+      <div class="pipeline-step" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-radius:6px;font-size:13px;font-weight:500;color:var(--text-muted);cursor:pointer" data-step="ship">
+        <span style="font-size:14px">4</span> Ship
+      </div>
+    </div>
+
+    <div class="viewport-area">
     <div class="viewport-toolbar">
       <div class="switcher" role="tablist">
         <button class="vp-btn active" data-vp="original" title="Original (${data.width}×${data.height})" aria-label="Original">
@@ -205,8 +252,20 @@ function renderViewportHero(data: SceneData): string {
       <div class="annotation-marks-html"></div>
       <div class="mode-banner" role="status" aria-live="polite"></div>
       <div class="capture"></div>
+      <!-- Quality badge: floating ambient score overlay -->
+      <div class="quality-badge" data-quality-badge
+        style="position:absolute;top:12px;right:12px;padding:6px 12px;border-radius:8px;background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);color:#fff;font-size:12px;font-weight:600;font-family:var(--mono);z-index:10;cursor:pointer;transition:all 0.2s;display:none"
+        title="Design quality score — click to see details">
+        <span data-quality-badge-score>—</span>
+      </div>
     </div>
     ${renderCanvasTools()}
+
+    <!-- Variant strip: populated by JS after vary/adapt operations -->
+    <div class="variant-strip" data-variant-strip style="display:none;padding:12px 20px;background:var(--surface-elevated);border-top:1px solid var(--border-subtle);overflow-x:auto;white-space:nowrap">
+      <div class="variant-strip-label" style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Variants</div>
+      <div class="variant-strip-items" data-variant-items style="display:flex;gap:12px;overflow-x:auto;padding-bottom:4px"></div>
+    </div>
   </div>`;
 }
 

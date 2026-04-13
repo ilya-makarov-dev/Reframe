@@ -257,6 +257,22 @@ export async function adapt(
   // For standalone usage, extract it
   const resultGraph = extractGraph(result);
 
+  // Post-adapt: enforce minimum touch target (44×44px) on interactive elements.
+  // Reflow can shrink buttons below WCAG minimums — clamp them back up.
+  if (resultGraph) {
+    const MIN_TOUCH = 44;
+    for (const node of resultGraph.nodes.values()) {
+      const isInteractive = node.semanticRole === 'button' || node.semanticRole === 'cta' ||
+        node.semanticRole === 'link' || node.semanticRole === 'input';
+      if (isInteractive && (node.width < MIN_TOUCH || node.height < MIN_TOUCH)) {
+        resultGraph.updateNode(node.id, {
+          width: Math.max(node.width, MIN_TOUCH),
+          height: Math.max(node.height, MIN_TOUCH),
+        });
+      }
+    }
+  }
+
   return {
     root: result,
     graph: resultGraph,

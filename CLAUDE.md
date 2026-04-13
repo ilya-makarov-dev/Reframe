@@ -171,9 +171,29 @@ vector primitives (ELLIPSE / STAR / POLYGON / LINE / VECTOR) as inline
 qualify. Gracefully falls back to divs if anything throws. Opt-out
 via `svgDecorations: false`.
 
+## Headless API
+
+REST endpoints at `http://localhost:4100/api/`:
+```
+GET  /api/render/{sceneId}?format=html&brand=stripe&scale=2
+POST /api/render/batch   { sceneId, formats[], brands[], viewports[] }
+GET  /api/tokens/{sceneId}?format=dtcg
+POST /api/tokens/{sceneId}   (DTCG JSON body)
+GET  /api/audit/{sceneId}?aesthetic=true
+GET  /api/blocks?category=hero
+POST /api/blocks/instantiate  { name, slots }
+GET  /api/scenes
+GET  /thumbnail/{sceneId}.png?scale=1
+```
+
 ## Common Gotchas
 
 - linkedom (HTML import) does not compute CSS flex constraints — avoid deeply nested flex without explicit widths
 - Audit overflow rules respect `clipsContent` — flex containers with explicit dimensions auto-clip
 - `reframe_compile` shows warnings inline now — fix them before export
 - Brand DESIGN.md files cached in `.reframe/brands/` — delete to re-fetch
+- Token export: `defineTokens` auto-saves `.reframe/tokens.json` (DTCG format)
+- Block library: 17 starter blocks auto-registered on first `list_blocks` or `add_block`
+- Aesthetic scoring: 8 metrics (alignment, whitespace, balance, harmony, hierarchy, rhythm, readability, proportion)
+- PNG/PDF export: requires CanvasKit WASM (auto-initialized on first call)
+- Layout backend: default Yoga, switchable to Taffy via `setLayoutBackend('taffy')` before `initYoga()`

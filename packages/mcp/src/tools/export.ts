@@ -12,6 +12,7 @@ import { exportToHtml } from '../../../core/src/exporters/html.js';
 import { exportToReact } from '../../../core/src/exporters/react.js';
 import { exportToAnimatedHtml } from '../../../core/src/exporters/animated-html.js';
 import { exportToLottie } from '../../../core/src/exporters/lottie.js';
+import { buildLottiePreviewHtml } from '../../../core/src/exporters/lottie-preview.js';
 import { exportSite } from '../../../core/src/exporters/site.js';
 import { exportResizeTransition } from '../../../core/src/exporters/transition.js';
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
@@ -20,6 +21,7 @@ import { runWithHostAsync } from '../../../core/src/host/context.js';
 import { validateTimeline, computeDuration } from '../../../core/src/animation/timeline.js';
 import { presets, stagger as staggerFn, listPresets } from '../../../core/src/animation/presets.js';
 import type { ITimeline, INodeAnimation } from '../../../core/src/animation/types.js';
+import { exportToRaster, initCanvasKit } from '../../../core/src/exporters/raster.js';
 import { exportSvgFromGraph } from '../engine.js';
 import { resolveScene, getScene, listScenes, getExportsBaseDir } from '../store.js';
 import { getSession } from '../session.js';
@@ -31,7 +33,7 @@ import { makeToolJsonErrorResult } from '../tool-result.js';
 
 export const exportInputSchema = {
   sceneId: z.string().describe('Scene ID to export. For "transition" format, this is the SOURCE scene — pair with transitionTarget.'),
-  format: z.enum(['html', 'svg', 'png', 'react', 'animated_html', 'lottie', 'site', 'transition'])
+  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'animated_html', 'lottie', 'theatre', 'site', 'transition'])
     .describe('Output format. "site" bundles multiple scenes into a clickable multi-page HTML app with routing and transitions. "transition" exports an HTML that animates source → target geometry, pair with transitionTarget.'),
   transitionTarget: z.string().optional()
     .describe('Target scene ID for "transition" format. Typically a resized version of sceneId produced by reframe_resize.'),
@@ -175,7 +177,7 @@ function buildTimeline(
 
 export async function handleExport(input: {
   sceneId: string;
-  format: 'html' | 'svg' | 'png' | 'react' | 'animated_html' | 'lottie' | 'site' | 'transition';
+  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'animated_html' | 'lottie' | 'theatre' | 'site' | 'transition';
   fullDocument?: boolean;
   dataAttributes?: boolean;
   cssClasses?: boolean;
@@ -293,12 +295,65 @@ export async function handleExport(input: {
       }
 
       case 'png': {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: 'PNG export requires CanvasKit runtime. PNG export requires CanvasKit WASM runtime (not available in all environments).',
-          }],
-        };
+        // PNG export via CanvasKit WASM — binary output, early return
+        try {
+          await initCanvasKit();
+          const pngBytes = await exportToRaster(graph, rootId, {
+            format: 'png',
+            scale: input.scale ?? 1,
+          });
+
+          // Write binary to .reframe/exports/
+          const pngStored = getScene(sceneId);
+          const pngSlug = pngStored?.slug ?? sceneId;
+          const pngExportDir = getExportsBaseDir();
+          if (!existsSync(pngExportDir)) mkdirSync(pngExportDir, { recursive: true });
+          const pngPath = join(pngExportDir, `${pngSlug}.png`);
+          writeFileSync(pngPath, pngBytes);
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `PNG exported → ${pngPath} (${pngBytes.length} bytes, ${Math.ceil(graph.getNode(rootId)!.width * (input.scale ?? 1))}×${Math.ceil(graph.getNode(rootId)!.height * (input.scale ?? 1))}px)`,
+            }],
+          };
+        } catch (pngErr: any) {
+          return makeToolJsonErrorResult(
+            `PNG export failed: ${pngErr.message}`,
+            'export.png.failed',
+            { cause: pngErr.message },
+          );
+        }
+      }
+
+      case 'pdf': {
+        // PDF export via CanvasKit → PNG → PDF wrapper
+        try {
+          const { exportToPdf } = await import('../../../core/src/exporters/pdf.js');
+          const pdfBytes = await exportToPdf(graph, rootId, {
+            title: getScene(sceneId)?.name ?? sceneId,
+          });
+
+          const pdfStored = getScene(sceneId);
+          const pdfSlug = pdfStored?.slug ?? sceneId;
+          const pdfExportDir = getExportsBaseDir();
+          if (!existsSync(pdfExportDir)) mkdirSync(pdfExportDir, { recursive: true });
+          const pdfPath = join(pdfExportDir, `${pdfSlug}.pdf`);
+          writeFileSync(pdfPath, pdfBytes);
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `PDF exported → ${pdfPath} (${pdfBytes.length} bytes)`,
+            }],
+          };
+        } catch (pdfErr: any) {
+          return makeToolJsonErrorResult(
+            `PDF export failed: ${pdfErr.message}`,
+            'export.pdf.failed',
+            { cause: pdfErr.message },
+          );
+        }
       }
 
       case 'animated_html': {
@@ -312,6 +367,19 @@ export async function handleExport(input: {
       case 'lottie': {
         const lottie = exportToLottie(graph, rootId, timeline!);
         content = JSON.stringify(lottie);
+        break;
+      }
+
+      case 'theatre': {
+        // Theatre.js project JSON — import into Theatre.js Studio for animation editing
+        const { timelineToTheatre } = await import('../../../core/src/animation/to-theatre.js');
+        const theatreTimeline = timeline ?? { animations: [], loop: false, speed: 1 };
+        const project = timelineToTheatre(theatreTimeline, getScene(sceneId)?.name);
+        if (!project) {
+          content = JSON.stringify({ error: 'No animations to export. Add animations first via reframe_export with animate parameter.' });
+        } else {
+          content = JSON.stringify(project, null, 2);
+        }
         break;
       }
 
@@ -399,7 +467,7 @@ export async function handleExport(input: {
   // Auto-save exported file to .reframe/exports/
   const extMap: Record<string, string> = {
     html: 'html', svg: 'svg', react: 'tsx', animated_html: 'animated.html',
-    lottie: 'lottie.json', site: 'html', png: 'png', transition: 'transition.html',
+    lottie: 'lottie.json', theatre: 'theatre.json', site: 'html', png: 'png', pdf: 'pdf', transition: 'transition.html',
   };
   const ext = extMap[format] ?? format;
   const exportDir = getExportsBaseDir();
@@ -413,6 +481,18 @@ export async function handleExport(input: {
   try {
     writeFileSync(filePath, content, 'utf-8');
   } catch {}
+
+  // Lottie: also write a self-contained preview HTML with lottie-web player
+  let lottiePreviewPath: string | undefined;
+  if (format === 'lottie') {
+    const previewName = `${slug}.lottie.preview.html`;
+    lottiePreviewPath = join(exportDir, previewName);
+    try {
+      const lottieJson = JSON.parse(content);
+      const previewHtml = buildLottiePreviewHtml(lottieJson, stored?.name ?? slug);
+      writeFileSync(lottiePreviewPath, previewHtml, 'utf-8');
+    } catch {}
+  }
 
   const absPath = filePath.replace(/\\/g, '/');
   // Per-format preview URL. HTML/SVG/TSX get a distinct live-rendered
@@ -440,6 +520,10 @@ export async function handleExport(input: {
     previewUrl = `http://localhost:4100/preview/${sceneId}${previewExtMap[format]}`;
   }
   sections.push(`Exported **${format === 'site' ? 'site' : slug}**  ${previewUrl} → [${fileName}](${absPath}) (${(content.length / 1024).toFixed(1)}KB)`);
+  if (lottiePreviewPath) {
+    const previewAbs = lottiePreviewPath.replace(/\\/g, '/');
+    sections.push(`  → [${slug}.lottie.preview.html](${previewAbs}) (open in browser to play)`);
+  }
 
   return {
     content: [{ type: 'text' as const, text: sections.join('\n') }],

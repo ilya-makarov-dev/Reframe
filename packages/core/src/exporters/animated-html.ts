@@ -22,6 +22,8 @@ export interface AnimatedHtmlExportOptions {
   backgroundColor?: string;
   /** Include responsive meta viewport (default: true) */
   responsive?: boolean;
+  /** Animation engine: 'css' for @keyframes (default), 'waapi' for Web Animations API */
+  engine?: 'css' | 'waapi';
 }
 
 // ─── Main Export ───────────────────────────────────────────────
@@ -105,17 +107,37 @@ export function exportToAnimatedHtml(
     <span>${(totalDuration / 1000).toFixed(1)}s${loop ? ' (loop)' : ''}</span>
   </div>` : '';
 
+  // WAAPI engine: replace CSS animations with JS-based WAAPI
+  let waapiScript = '';
+  if (options.engine === 'waapi') {
+    try {
+      // Dynamic import to avoid circular deps
+      const { timelineToWaapi } = require('../animation/to-waapi.js');
+      const waapi = timelineToWaapi(timeline);
+      if (waapi.script) {
+        waapiScript = `\n  <script>${waapi.script}</script>`;
+      }
+    } catch {
+      // Fallback: CSS animations already in cssBlocks
+    }
+  }
+
+  // When WAAPI engine, strip CSS animation rules but keep other styles (positioning, colors)
+  const styleContent = options.engine === 'waapi'
+    ? cssBlocks.filter(b => !b.includes('@keyframes')).join('\n    ')
+    : cssBlocks.join('\n    ');
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">${viewport}
   <title>${escapeHtml(root.name)} — Animated</title>
   <style>
-    ${cssBlocks.join('\n    ')}${bg}
+    ${styleContent}${bg}
   </style>
 </head>
 <body>
-  ${html}${controlsHtml}
+  ${html}${controlsHtml}${waapiScript}
 </body>
 </html>`;
 }

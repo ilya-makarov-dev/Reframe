@@ -112,6 +112,23 @@ export function renderProjectCanvas(data: CanvasData): string {
   // the canvas (top-right corner). The canvas fills the whole main
   // region edge-to-edge for maximum workspace.
   const main = `
+    <div class="pipeline-stepper" style="display:flex;align-items:center;justify-content:center;gap:0;padding:12px 40px;background:var(--surface-elevated);border-bottom:1px solid var(--border-subtle)">
+      <div class="pipeline-step active" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-radius:6px;font-size:13px;font-weight:500;background:var(--accent);color:var(--on-accent);cursor:pointer" data-step="generate">
+        <span>1</span> Generate
+      </div>
+      <div style="width:24px;height:1px;background:var(--border)"></div>
+      <div class="pipeline-step" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-radius:6px;font-size:13px;font-weight:500;color:var(--text-muted);cursor:pointer" data-step="review">
+        <span>2</span> Review
+      </div>
+      <div style="width:24px;height:1px;background:var(--border)"></div>
+      <div class="pipeline-step" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-radius:6px;font-size:13px;font-weight:500;color:var(--text-muted);cursor:pointer" data-step="refine">
+        <span>3</span> Refine
+      </div>
+      <div style="width:24px;height:1px;background:var(--border)"></div>
+      <div class="pipeline-step" style="display:flex;align-items:center;gap:8px;padding:6px 16px;border-radius:6px;font-size:13px;font-weight:500;color:var(--text-muted);cursor:pointer" data-step="ship">
+        <span>4</span> Ship
+      </div>
+    </div>
     <div class="viewport-area canvas-mode" data-content-w="${maxX}" data-content-h="${maxY}">
       <div class="viewport-frame canvas-viewport" data-viewport="canvas" data-canvas-viewport data-session="${escape(owner.id)}">
         <div class="canvas-world" data-canvas-world>

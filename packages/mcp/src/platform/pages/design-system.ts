@@ -30,6 +30,13 @@ export function renderDesignSystemPage(data: DesignSystemData): string {
     <h1 class="page-title">Design system</h1>
     <p class="page-lead">${data.brand ? `Active brand: <strong>${escape(data.brand)}</strong>. Changes propagate to every scene via token binding.` : 'No brand loaded. Run <code>reframe_design action=extract</code> to load one.'}</p>
 
+    <div style="display:flex;gap:12px;margin-bottom:24px">
+      <button onclick="fetch('/api/tokens/'+(document.querySelector('[data-session]')?.getAttribute('data-session')||'s1')+'?format=dtcg').then(r=>r.json()).then(d=>{var a=document.createElement('a');a.href='data:application/json,'+encodeURIComponent(JSON.stringify(d,null,2));a.download='tokens.json';a.click()}).catch(e=>alert('Export failed: '+e.message))"
+        style="padding:8px 16px;background:var(--surface);color:var(--text-base);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px">
+        Export DTCG .tokens.json
+      </button>
+    </div>
+
     ${renderColorSection(data.colors ?? [])}
     ${renderTypographySection(data.typography ?? [], data.primaryFont, data.secondaryFont)}
     ${renderRadiusSection(data.radiusScale ?? [])}

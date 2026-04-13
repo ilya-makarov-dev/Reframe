@@ -463,6 +463,23 @@ const operationSchema = z.discriminatedUnion('op', [
     namePrefix: z.string().optional().describe('Prefix for generated scene names'),
     limit: z.number().optional().describe('Max variants to generate (safety cap, default 64)'),
   }),
+
+  // Instantiate a block from the block library into the session
+  z.object({
+    op: z.literal('instantiateBlock'),
+    block: z.string().describe('Block name to instantiate (e.g. "hero-centered", "pricing-3col"). Use reframe_project list_blocks to see available blocks.'),
+    slots: z.record(z.string()).optional().describe('Slot values to fill: { headline: "Ship Faster", subtitle: "..." }'),
+    sceneId: z.string().optional(),
+  }),
+
+  // Configure a node as multi-column grid layout
+  z.object({
+    op: z.literal('multiColumn'),
+    path: z.string().describe('Node path to configure as multi-column grid'),
+    columns: z.number().int().min(2).max(12).describe('Number of columns (2-12)'),
+    gap: z.number().optional().default(16).describe('Gap between columns in px (default: 16)'),
+    sceneId: z.string().optional(),
+  }),
 ]);
 
 export const editInputSchema = {
@@ -1517,6 +1534,24 @@ export async function handleEdit(input: {
 
         const parsedDs = session.getOrParseDesignMd(designMdStr, parseDesignMd);
         const tokenIndex = tokenizeDesignSystem(stored.graph, parsedDs, { darkMode: op.darkMode ?? false });
+        // Auto-export DTCG tokens to .reframe/tokens.json when project is open
+        try {
+          const { exportToDTCG } = await import('../../../core/src/design-system/dtcg.js');
+          const dtcg = exportToDTCG(stored.graph);
+          const tokenKeys = Object.keys(dtcg).filter(k => !k.startsWith('$'));
+          if (tokenKeys.length > 0) {
+            const projectDir = getWorkspaceRoot();
+            if (projectDir) {
+              const fs = await import('fs');
+              const path = await import('path');
+              const reframeDir = path.join(projectDir, '.reframe');
+              if (!fs.existsSync(reframeDir)) fs.mkdirSync(reframeDir, { recursive: true });
+              const tokensPath = path.join(reframeDir, 'tokens.json');
+              fs.writeFileSync(tokensPath, JSON.stringify(dtcg, null, 2), 'utf-8');
+              results.push(`DTCG tokens auto-saved to ${tokensPath} (${tokenKeys.length} groups)`);
+            }
+          }
+        } catch { /* DTCG auto-export is best-effort */ }
         const sessId = findSessionId(sceneId);
         if (sessId) setTokenIndex(sessId, tokenIndex);
 
@@ -1834,6 +1869,72 @@ export async function handleEdit(input: {
         } catch (e: any) {
           results.push(`VARY ERROR: ${e?.message ?? e}`);
         }
+        break;
+      }
+
+      case 'instantiateBlock': {
+        // Instantiate a block from the block library into the current scene
+        try {
+          const { getBlock, instantiateBlock: instBlock, registerStarterBlocks, blockCount } = await import('../../../core/src/blocks/index.js');
+          if (blockCount() === 0) registerStarterBlocks();
+
+          const blockName = (op as any).block ?? (op as any).name;
+          if (!blockName) {
+            results.push('instantiateBlock: block name is required');
+            break;
+          }
+
+          const block = getBlock(blockName);
+          if (!block) {
+            results.push(`instantiateBlock: block "${blockName}" not found. Use reframe_project list_blocks to see available blocks.`);
+            break;
+          }
+
+          const slots = (op as any).slots ?? {};
+          const result = instBlock(block, slots);
+
+          // Store as a new scene
+          const newSceneId = storeScene(result.graph, result.rootId, undefined, {
+            slug: blockName,
+            name: block.description || blockName,
+          });
+
+          touchedScenes.add(newSceneId);
+          results.push(`instantiateBlock: "${blockName}" → ${newSceneId} (${result.filledSlots}/${result.totalSlots} slots, ${result.graph.nodes.size} nodes)`);
+        } catch (e: any) {
+          results.push(`instantiateBlock ERROR: ${e?.message ?? e}`);
+        }
+        break;
+      }
+
+      case 'multiColumn': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('multiColumn: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`multiColumn: scene "${sceneId}" not found`); break; }
+        touchedScenes.add(sceneId);
+
+        const targetPath = (op as any).path as string;
+        const columns = (op as any).columns as number;
+        const gap = (op as any).gap ?? 16;
+
+        // Find node by path/name
+        let nodeId: string | undefined;
+        for (const [id, node] of stored.graph.nodes) {
+          if (node.name === targetPath || id === targetPath) {
+            nodeId = id;
+            break;
+          }
+        }
+
+        if (!nodeId) {
+          results.push(`multiColumn: node "${targetPath}" not found`);
+          break;
+        }
+
+        const { configureMultiColumn } = await import('../../../core/src/engine/layout.js');
+        configureMultiColumn(stored.graph, nodeId, columns, gap);
+        results.push(`multiColumn: "${targetPath}" → ${columns} columns, ${gap}px gap`);
         break;
       }
     }
