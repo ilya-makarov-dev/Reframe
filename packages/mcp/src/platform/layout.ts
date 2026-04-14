@@ -314,6 +314,15 @@ export function renderSidebar(opts: SidebarOpts): string {
     <span>Blocks</span>
   </a>`);
 
+  // 4b. Constructor — block-based page builder
+  parts.push(`<a class="side-nav-item ${active === 'blocks' ? '' : ''}" href="/platform/constructor">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3 2h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M2 6h12M2 10h12" stroke="currentColor" stroke-width="1.2" opacity="0.5"/>
+    </svg>
+    <span>Constructor</span>
+  </a>`);
+
   // 5. Recipes — was "Macros". "Macro" reads as emacs/Excel jargon and
   //    doesn't hint at what the thing does. A recipe is a sequence of
   //    steps you apply to remake something — that matches exactly what
@@ -330,7 +339,7 @@ export function renderSidebar(opts: SidebarOpts): string {
 
   parts.push(`</nav>`);
 
-  // 5. Layers — scene-scoped, only on scene/canvas pages.
+  // 6. Layers — scene-scoped, only on scene/canvas pages.
   if (active === 'scene') {
     parts.push(`<div class="sidebar-section layers-section">
       <div class="sidebar-title">Layers</div>

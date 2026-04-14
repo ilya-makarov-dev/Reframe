@@ -107,6 +107,13 @@ export function renderScenePageRightPanel(data: Pick<SceneData, 'brands' | 'acti
       </div>
       <button data-quality-analyze class="btn-primary" style="padding:10px 16px;background:var(--accent);color:var(--on-accent);border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;width:100%">Analyze Quality</button>
       <div data-quality-metrics style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
+      <div style="border-top:1px solid var(--border);padding-top:16px;margin-top:16px">
+        <div class="t-caption" style="color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Brand Fidelity</div>
+        <div data-brand-fidelity-score style="text-align:center;padding:8px 0">
+          <div class="t-caption" style="color:var(--text-muted)">Click "Analyze" above to compute</div>
+        </div>
+        <div data-brand-fidelity-breakdown style="display:flex;flex-direction:column;gap:4px"></div>
+      </div>
     </div>`;
 
   // Tokens tab — token tree with color swatches

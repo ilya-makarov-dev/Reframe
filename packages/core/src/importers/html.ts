@@ -81,7 +81,13 @@ export async function importFromHtml(
   html: string,
   options: HtmlImportOptions = {},
 ): Promise<HtmlImportResult> {
-  let parsed = await parseWithLinkedom(html);
+  // Tailwind preprocessor: resolve Tailwind classes → inline styles before parsing.
+  // Enables importing from the entire Tailwind ecosystem (HyperUI, Tailblocks, etc.)
+  // and LLM-generated Tailwind HTML.
+  const { preprocessTailwind } = await import('./tailwind-preprocessor.js');
+  const processedHtml = await preprocessTailwind(html);
+
+  let parsed = await parseWithLinkedom(processedHtml);
   let dom = parsed.dom;
   let { linkedomStyles, cssVars, mediaRules } = parsed;
 

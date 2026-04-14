@@ -141,6 +141,127 @@ export async function handlePlatformRequest(
         pathname.startsWith('/platform/api/variations/')) {
       return handleVariationsApi(req, res, ctx);
     }
+    // Constructor compose endpoint
+    if (pathname === '/platform/api/constructor/compose' && req.method === 'POST') {
+      try {
+        const body = await readBody(req);
+        const { blocks: blockNames, brand } = JSON.parse(body);
+
+        if (!Array.isArray(blockNames) || blockNames.length === 0) {
+          sendJson(res, 400, { ok: false, error: 'blocks array required' });
+          return true;
+        }
+
+        const blocksModule = await import('../../../core/src/blocks/index.js');
+        if (blocksModule.blockCount() === 0) blocksModule.registerStarterBlocks();
+
+        const { composePage } = await import('../../../core/src/content/compose.js');
+        const result = composePage(blockNames.map((name: string) => ({ block: name })));
+
+        if (result.blocks.length === 0) {
+          sendJson(res, 400, { ok: false, error: 'No valid blocks found. Not found: ' + result.notFound.join(', ') });
+          return true;
+        }
+
+        const { storeScene } = await import('../store.js');
+        const pageName = blockNames.map((n: string) => n.split('-')[0]).join('-');
+        const sessionId = storeScene(result.graph, result.rootId, undefined, {
+          slug: pageName,
+          name: pageName.replace(/[-]/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        });
+
+        sendJson(res, 200, { ok: true, sceneId: sessionId, slug: pageName, blockCount: result.blocks.length, notFound: result.notFound });
+      } catch (err: any) {
+        sendJson(res, 500, { ok: false, error: err.message });
+      }
+      return true;
+    }
+
+    // Section refinement — extract one section + build agent prompt
+    if (pathname === '/platform/api/constructor/refine' && req.method === 'POST') {
+      try {
+        const body = await readBody(req);
+        const { sceneId, sectionIndex, prompt } = JSON.parse(body);
+
+        if (!sceneId || sectionIndex === undefined || !prompt) {
+          sendJson(res, 400, { ok: false, error: 'sceneId + sectionIndex + prompt required' });
+          return true;
+        }
+
+        const { getScene } = await import('../store.js');
+        const scene = getScene(sceneId);
+        if (!scene) {
+          sendJson(res, 404, { ok: false, error: `scene ${sceneId} not found` });
+          return true;
+        }
+
+        const { buildRefineContext, formatRefinePrompt, listPageSections } = await import('../../../core/src/content/refine.js');
+
+        // Get design system if available
+        let designMd: string | undefined;
+        try { designMd = ctx.getDesignMd?.() ?? undefined; } catch {}
+
+        const refineCtx = buildRefineContext(scene.graph, scene.rootId, sectionIndex, prompt, designMd);
+        if (!refineCtx) {
+          sendJson(res, 400, { ok: false, error: `section index ${sectionIndex} not found` });
+          return true;
+        }
+
+        const agentPrompt = formatRefinePrompt(refineCtx);
+        const sections = listPageSections(scene.graph, scene.rootId);
+
+        sendJson(res, 200, {
+          ok: true,
+          agentPrompt,
+          sectionHtml: refineCtx.section.html,
+          sectionName: refineCtx.section.info.name,
+          totalSections: sections.length,
+        });
+      } catch (err: any) {
+        sendJson(res, 500, { ok: false, error: err.message });
+      }
+      return true;
+    }
+
+    // List sections in a composed page
+    if (pathname === '/platform/api/constructor/sections-list' && req.method === 'GET') {
+      try {
+        const sceneId = url.searchParams.get('sceneId');
+        if (!sceneId) {
+          sendJson(res, 400, { ok: false, error: 'sceneId required' });
+          return true;
+        }
+
+        const { getScene } = await import('../store.js');
+        const scene = getScene(sceneId);
+        if (!scene) {
+          sendJson(res, 404, { ok: false, error: `scene ${sceneId} not found` });
+          return true;
+        }
+
+        const { listPageSections } = await import('../../../core/src/content/refine.js');
+        const sections = listPageSections(scene.graph, scene.rootId);
+        sendJson(res, 200, { ok: true, sections });
+      } catch (err: any) {
+        sendJson(res, 500, { ok: false, error: err.message });
+      }
+      return true;
+    }
+
+    // Section library listing
+    if (pathname === '/platform/api/constructor/sections' && req.method === 'GET') {
+      try {
+        const { loadSectionRegistry } = await import('../../../core/src/sections/manifest.js');
+        const path = await import('path');
+        const sectionsDir = path.join(__dirname, '..', '..', '..', 'core', 'src', 'sections');
+        const registry = loadSectionRegistry(sectionsDir);
+        sendJson(res, 200, { ok: true, ...registry });
+      } catch (err: any) {
+        sendJson(res, 500, { ok: false, error: err.message });
+      }
+      return true;
+    }
+
     return handleIntentApi(req, res, ctx);
   }
 
@@ -348,6 +469,35 @@ export async function handlePlatformRequest(
     return true;
   }
 
+  // ── Constructor (/platform/constructor) ────────────────────
+  if (pathname === '/platform/constructor') {
+    try {
+      const blocksModule = await import('../../../core/src/blocks/index.js');
+      if (blocksModule.blockCount() === 0) blocksModule.registerStarterBlocks();
+      const blocks: any[] = blocksModule.listBlocks();
+      const categories = [...new Set(blocks.map((b: any) => b.category))].sort() as string[];
+
+      const { renderConstructor } = await import('./pages/constructor.js');
+      const pageHtml = renderConstructor({
+        blocks: blocks.map((b: any) => ({
+          name: b.name,
+          category: b.category,
+          description: b.description,
+          slotCount: b.slots?.length ?? 0,
+          tags: b.tags ?? [],
+        })),
+        categories,
+        brands: (ctx as any).brands ?? [],
+        activeBrand: (ctx as any).activeBrand,
+      });
+
+      send(res, 200, 'text/html', pageHtml);
+    } catch (err: any) {
+      send(res, 500, 'text/plain', `Constructor error: ${err.message}`);
+    }
+    return true;
+  }
+
   // ── Legacy scene route → canvas redirect ─────────────────
   // The isolated-scene page (/platform/scene/:slug) used to be the
   // primary edit surface, but we consolidated everything onto the
@@ -397,6 +547,19 @@ function send(res: ServerResponse, code: number, contentType: string, body: stri
     'Cache-Control': 'no-store, no-cache, must-revalidate',
   });
   res.end(body);
+}
+
+function sendJson(res: ServerResponse, code: number, data: unknown): void {
+  send(res, code, 'application/json', JSON.stringify(data));
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    req.on('error', reject);
+  });
 }
 
 function buildDashboardData(ctx: PlatformContext) {

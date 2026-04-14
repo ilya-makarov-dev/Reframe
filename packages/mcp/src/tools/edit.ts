@@ -19,6 +19,7 @@ import { setHost } from '../../../core/src/host/context.js';
 import { storeScene, getScene, resolveScene, setTokenIndex, getTokenIndex, findSessionId, bumpSceneSessionRevision, getWorkspaceRoot } from '../store.js';
 import { coreProjectIo } from '../project-io.js';
 import { autoSaveScene, getProjectDir } from './project.js';
+import { loadBrandDesignMd } from './compile.js';
 import { appendOp, nextOpId } from '../../../core/src/project/history.js';
 import type { Operation } from '../../../core/src/ops/types.js';
 import { exportScene, inspectScene } from '../engine.js';
@@ -1519,15 +1520,29 @@ export async function handleEdit(input: {
         let designMdStr = op.designMd ?? input.designMd ?? effectiveDesignMd ?? session.activeDesignMd;
 
         // If designMd looks like a brand slug (short, no newlines, no markdown),
-        // resolve it from the project's brand registry on disk.
+        // resolve it: (1) project brand registry on disk, (2) loadBrandDesignMd
+        // (npm/local cache — same path as reframe_design), (3) session active brand.
         if (designMdStr && designMdStr.length < 80 && !designMdStr.includes('\n') && !designMdStr.includes('#')) {
+          const slug = designMdStr;
+          let resolved: string | undefined;
+          // Try project brand registry first
           try {
             const projectDir = getWorkspaceRoot();
-            const loaded = coreProjectIo().loadBrandFromProject(projectDir, designMdStr);
-            if (loaded) {
-              designMdStr = loaded.content;
-            }
-          } catch { /* fall through — treat as literal content */ }
+            const loaded = coreProjectIo().loadBrandFromProject(projectDir, slug);
+            if (loaded) resolved = loaded.content;
+          } catch { /* no project or brand not in registry */ }
+          // Fallback: load via npm/local cache (same as reframe_design extract)
+          if (!resolved) {
+            try {
+              const loaded = await loadBrandDesignMd(slug);
+              if (loaded?.trim()) resolved = loaded;
+            } catch { /* brand not found */ }
+          }
+          // Fallback: session active brand (already loaded by reframe_design)
+          if (!resolved && session.activeDesignMd) {
+            resolved = session.activeDesignMd;
+          }
+          if (resolved) designMdStr = resolved;
         }
 
         if (!designMdStr) { results.push('DEFINE_TOKENS ERROR: designMd required (load with reframe_design first)'); break; }
@@ -1598,6 +1613,7 @@ export async function handleEdit(input: {
         results.push(
           `DEFINE_TOKENS ${tokenList.length} tokens (${colorCount} colors, ${numCount} numbers, ${strCount} strings, ${modeCount} mode(s)) — ${boundCount} bindings, ${rebrandCount} rebranded, inherit: ${inheritanceResult.typography}t/${inheritanceResult.buttons}b/${inheritanceResult.cards}c/${inheritanceResult.badges}bg/${inheritanceResult.inputs}i/${inheritanceResult.navs}n`
         );
+
         break;
       }
 

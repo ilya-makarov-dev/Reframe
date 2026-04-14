@@ -309,9 +309,22 @@ export function deleteScene(projectDir: string, sceneId: string): boolean {
   const filePath = sceneFilePath(projectDir, entry);
   const targetSlug = entry.slug ?? entry.id;
 
-  // Remove file
+  // Soft delete: move to .reframe/trash/ instead of hard delete.
+  // Trash preserves scene files so user can recover if needed.
+  const trashDir = path.join(reframeDir(projectDir), 'trash');
+  if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir, { recursive: true });
+
   if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
+    const trashPath = path.join(trashDir, `${targetSlug}.scene.json`);
+    try {
+      fs.renameSync(filePath, trashPath);
+    } catch {
+      // Fallback to copy + delete if rename fails (cross-device)
+      try {
+        fs.copyFileSync(filePath, trashPath);
+        fs.unlinkSync(filePath);
+      } catch { /* best-effort — at least remove from manifest */ }
+    }
   }
 
   // Remove any Phase 3 history log — dangling history on a deleted scene would
@@ -331,7 +344,11 @@ export function deleteScene(projectDir: string, sceneId: string): boolean {
       if (s.variantOf === targetSlug) {
         const variantPath = sceneFilePath(projectDir, s);
         if (fs.existsSync(variantPath)) {
-          try { fs.unlinkSync(variantPath); } catch { /* best-effort */ }
+          const variantSlug = s.slug ?? s.id;
+          const variantTrash = path.join(trashDir, `${variantSlug}.scene.json`);
+          try { fs.renameSync(variantPath, variantTrash); } catch {
+            try { fs.copyFileSync(variantPath, variantTrash); fs.unlinkSync(variantPath); } catch { /* best-effort */ }
+          }
         }
         cascade.push(i);
       }

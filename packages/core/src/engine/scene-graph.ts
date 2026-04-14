@@ -736,4 +736,5 @@ export class SceneGraph {
       delete node.boundVariables[field];
     }
   }
+
 }

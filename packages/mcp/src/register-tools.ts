@@ -33,7 +33,7 @@ import { inspectInputSchema, handleInspect } from './tools/inspect.js';
 import { projectInputSchema, handleProject } from './tools/project.js';
 import { collabInputSchema, handleCollab } from './tools/collab.js';
 
-/** 7 core tools = 7 registered tools. Self-improvement happens through the pipeline: compile → inspect → edit → inspect. */
+/** 7 tools: 6 pipeline + project + collab. Self-improvement happens through the pipeline: compile → inspect → edit → inspect. */
 export function registerReframeMcpTools(server: McpServer): void {
 
   // ── 1. DESIGN ──────────────────────────────────────────────
@@ -261,3 +261,4 @@ Intent authoring (add/commit/refine), annotations, threads, and templates are NO
 
 
 }
+

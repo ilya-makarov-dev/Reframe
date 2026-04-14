@@ -2,7 +2,7 @@
   "name": "reframe",
   "private": true,
   "version": "0.1.0",
-  "description": "Programmable design engine — parse, validate, transform, export.",
+  "description": "Universal typed-graph engine — import, audit, transform, export. Design and knowledge as first-class domains.",
   "workspaces": [
     "packages/*"
   ],
@@ -29,5 +29,10 @@
   "devDependencies": {
     "playwright": "^1.59.1",
     "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "flowbite": "^4.0.1",
+    "sortablejs": "^1.15.7",
+    "tw-to-css": "^0.0.12"
   }
 }

@@ -576,3 +576,4 @@ export interface VariableCollection {
   defaultModeId: string;
   variableIds: string[];
 }
+

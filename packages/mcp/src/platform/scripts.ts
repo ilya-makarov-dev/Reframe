@@ -3928,6 +3928,32 @@ export const PLATFORM_JS = `
                   }
                   analyzeBtn.textContent = 'Re-analyze';
                   analyzeBtn.disabled = false;
+                  // Also fetch Brand Fidelity from audit endpoint
+                  fetch('/platform/api/audit?sceneId=' + sid)
+                    .then(function(r) { return r.json(); })
+                    .then(function(auditData) {
+                      var bfEl = $('[data-brand-fidelity-score]');
+                      var bfBreak = $('[data-brand-fidelity-breakdown]');
+                      if (bfEl && auditData.brandFidelity) {
+                        var bf = auditData.brandFidelity;
+                        bfEl.innerHTML = '<div style="font-size:36px;font-weight:800;color:var(--accent)">' + bf.score + '</div>'
+                          + '<div class="t-caption" style="color:var(--text-muted)">' + bf.rating + '</div>';
+                        if (bfBreak) {
+                          var dims = bf.breakdown;
+                          bfBreak.innerHTML = Object.keys(dims).map(function(k) {
+                            var val = Math.round(dims[k] * 100);
+                            var label = k.replace(/([A-Z])/g, ' $1').replace(/^./, function(c) { return c.toUpperCase(); });
+                            var color = val >= 70 ? 'var(--text-base)' : val >= 40 ? '#d4a017' : '#e74c3c';
+                            return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0">'
+                              + '<span style="color:var(--text-muted)">' + label + '</span>'
+                              + '<span style="font-weight:600;color:' + color + '">' + val + '%</span>'
+                              + '</div>';
+                          }).join('');
+                        }
+                      } else if (bfEl) {
+                        bfEl.innerHTML = '<div class="t-caption" style="color:var(--text-muted)">No brand loaded</div>';
+                      }
+                    }).catch(function() {});
                 })
                 .catch(function() { analyzeBtn.textContent = 'Analyze Quality'; analyzeBtn.disabled = false; });
             });

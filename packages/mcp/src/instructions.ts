@@ -26,5 +26,7 @@ HTML rules: inline styles only, width on root (1440px), explicit colors on every
 
 SOURCE HTML: compile auto-saves your HTML to .reframe/src/<name>.html. For small fixes use reframe_edit (INode props). For big changes, edit the source file and re-compile: reframe_compile({ file: ".reframe/src/home.html", name: "home" }).
 
+WIKI: wiki/ contains project knowledge (architecture, gotchas, patterns, brand intelligence). Read wiki/index.md for catalog. Read relevant pages before work to avoid known pitfalls.
+
 Call reframe_inspect() without sceneId for design language reference, INode properties, and spacing guide.`;
 }

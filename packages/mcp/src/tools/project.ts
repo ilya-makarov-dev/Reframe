@@ -66,8 +66,17 @@ import {
 } from '../store.js';
 import { getSession } from '../session.js';
 import { emitProjectEvent } from '../events.js';
+import { loadAllScenes } from '../../../core/src/project/io.js';
+import { buildInspectAuditRules } from '../../../core/src/inspect-audit-rules.js';
+import { auditProject, formatProjectAudit } from '../../../core/src/project-audit.js';
+import { detectPatternsFromGraphs, formatPatternDetection } from '../../../core/src/pattern-detection.js';
+import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
+import { extractContent } from '../../../core/src/content/extract.js';
+import { applyContent, formatApplyResult } from '../../../core/src/content/apply.js';
+import { createPageFromTemplate, buildSite, formatBuildSiteResult } from '../../../core/src/content/constructor.js';
+import { composePage, formatComposeResult } from '../../../core/src/content/compose.js';
 import { resolve, normalize, relative, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 
 /**
  * Resolve and optionally constrain project dir to cwd (set REFRAME_PROJECT_ALLOW_ABSOLUTE=1 to skip).
@@ -135,6 +144,9 @@ export const projectInputSchema = {
       'list_components', 'show_component', 'delete_component',
       'export_tokens', 'import_tokens',
       'list_blocks', 'get_block', 'add_block', 'save_block', 'delete_block',
+      'product_audit', 'detect_patterns', 'list_trash', 'restore', 'empty_trash',
+      'extract_content', 'apply_content',
+      'create_from_template', 'build_site', 'compose_page',
     ])
     .describe(
       'Action: init, open, save, load, list, status, delete, save_design, list_brands, set_active_brand, show_source, history, history_clear, add_variant, list_variants, refresh_variants, save_macro, list_macros, apply_macro, delete_macro, list_components (show every component master stored in the project), show_component (return a component master with its slots + revisions), delete_component (remove a component master from disk — scenes that reference it by name will show as missing on next load)',
@@ -202,9 +214,19 @@ export async function handleProject(input: {
       case 'delete_block': return doDeleteBlock(input);
       case 'render_project': return doRenderProject();
       case 'project_graph': return doProjectGraph();
+      case 'product_audit': return doProductAudit(input);
+      case 'detect_patterns': return doDetectPatterns(input);
+      case 'extract_content': return doExtractContent(input);
+      case 'apply_content': return doApplyContent(input);
+      case 'create_from_template': return doCreateFromTemplate(input);
+      case 'build_site': return doBuildSite(input);
+      case 'compose_page': return doComposePage(input);
+      case 'list_trash': return doListTrash();
+      case 'restore': return doRestore(input);
+      case 'empty_trash': return doEmptyTrash();
       default:
         return err(
-          `Unknown action "${input.action}". Use: init, open, save, load, list, status, delete, save_design, list_brands, set_active_brand, show_source, history, history_clear, add_variant, list_variants, refresh_variants, save_macro, list_macros, apply_macro, delete_macro, list_components, show_component, delete_component, render_project, project_graph`,
+          `Unknown action "${input.action}". Use: init, open, save, load, list, status, delete, save_design, list_brands, set_active_brand, show_source, history, history_clear, add_variant, list_variants, refresh_variants, save_macro, list_macros, apply_macro, delete_macro, list_components, show_component, delete_component, render_project, project_graph, product_audit, detect_patterns, extract_content, apply_content`,
         );
     }
   } catch (e: any) {
@@ -1019,6 +1041,410 @@ function countTokens(node: Record<string, unknown>): number {
     }
   }
   return count;
+}
+
+// ─── Product Audit (Multi-Scene Intelligence) ───────────────
+
+function doProductAudit(input: { group?: string; designMd?: string }) {
+  if (!_projectDir) return err('No project open. Use "init" or "open" first.');
+  const projectDir = _projectDir;
+
+  try {
+    const allScenes = loadAllScenes(projectDir);
+    if (allScenes.length === 0) return err('No scenes in project.');
+
+    // Parse design system if available
+    let ds: ReturnType<typeof parseDesignMd> | undefined;
+    if (input.designMd) {
+      ds = parseDesignMd(input.designMd);
+    } else {
+      // Try loading from project's active brand
+      try {
+        const manifest = loadProject(projectDir);
+        if (manifest.activeBrand) {
+          const brand = loadBrandFromProject(projectDir, manifest.activeBrand);
+          if (brand) ds = parseDesignMd(brand.content);
+        }
+      } catch { /* no brand, no problem */ }
+    }
+
+    // Build scenes map (wrap SceneNode → INode via StandaloneNode)
+    const scenesMap = new Map<string, {
+      graph: any;
+      rootId: string;
+      root: any;
+      name: string;
+    }>();
+
+    for (const scene of allScenes) {
+      // Filter by group if specified
+      if (input.group && scene.entry.group !== input.group) continue;
+      const rawRoot = scene.graph.getNode(scene.rootId);
+      if (!rawRoot) continue;
+      const wrappedRoot = new StandaloneNode(scene.graph, rawRoot);
+      scenesMap.set(scene.entry.slug, {
+        graph: scene.graph,
+        rootId: scene.rootId,
+        root: wrappedRoot,
+        name: scene.entry.name,
+      });
+    }
+
+    if (scenesMap.size === 0) return err('No matching scenes found.');
+
+    // Build audit rules
+    const rules = buildInspectAuditRules(ds);
+
+    const result = auditProject(scenesMap as any, {
+      rules,
+      designSystem: ds,
+      group: input.group,
+    });
+
+    return ok(formatProjectAudit(result));
+  } catch (e: any) {
+    return err(`Product audit failed: ${e.message}`);
+  }
+}
+
+// ─── Pattern Detection (Emergent Design System) ─────────────
+
+function doDetectPatterns(input: { sceneId?: string }) {
+  if (!_projectDir) return err('No project open. Use "init" or "open" first.');
+  const projectDir = _projectDir;
+
+  try {
+    const allScenes = loadAllScenes(projectDir);
+    if (allScenes.length < 2) return err('Need at least 2 scenes for pattern detection.');
+
+    const graphsMap = new Map<string, {
+      graph: import('../../../core/src/engine/scene-graph.js').SceneGraph;
+      rootId: string;
+    }>();
+
+    for (const scene of allScenes) {
+      // Skip variants — only analyze base scenes
+      if (scene.entry.variantOf) continue;
+      graphsMap.set(scene.entry.slug, {
+        graph: scene.graph,
+        rootId: scene.rootId,
+      });
+    }
+
+    if (graphsMap.size < 2) return err('Need at least 2 base scenes for pattern detection.');
+
+    const result = detectPatternsFromGraphs(graphsMap, {
+      minOccurrences: 2,
+      minDepth: 2,
+      maxCandidates: 15,
+    });
+
+    return ok(formatPatternDetection(result));
+  } catch (e: any) {
+    return err(`Pattern detection failed: ${e.message}`);
+  }
+}
+
+// ─── Content (Markdown Control Layer) ────────────────────────
+
+function doExtractContent(input: { sceneId?: string }) {
+  if (!input.sceneId) return err('sceneId required for extract_content.');
+
+  try {
+    // Try session first, then project
+    let graph: any;
+    let rootId: string;
+
+    const resolved = getScene(input.sceneId);
+    if (resolved) {
+      graph = resolved.graph;
+      rootId = resolved.rootId;
+    } else if (_projectDir) {
+      const loaded = loadSceneFromProject(_projectDir, input.sceneId);
+      graph = loaded.graph;
+      rootId = loaded.rootId;
+    } else {
+      return err('Scene not in session and no project open.');
+    }
+
+    const rawRoot = graph.getNode(rootId);
+    if (!rawRoot) return err('Root node not found.');
+
+    const wrappedRoot = new StandaloneNode(graph, rawRoot);
+    const projection = extractContent(wrappedRoot as any, input.sceneId);
+
+    // Save to .reframe/content/ if project is open
+    if (_projectDir) {
+      const contentDir = join(_projectDir, '.reframe', 'content');
+      if (!existsSync(contentDir)) mkdirSync(contentDir, { recursive: true });
+      const slug = input.sceneId.replace(/[^a-z0-9-]/gi, '-');
+      const contentPath = join(contentDir, `${slug}.md`);
+      writeFileSync(contentPath, projection.markdown, 'utf-8');
+    }
+
+    const stats = projection.stats;
+    const header = `Content extracted: ${stats.sections} sections, ${stats.headings} headings, ${stats.paragraphs} texts, ${stats.links} links, ${stats.images} images`;
+
+    return ok(`${header}\n${ _projectDir ? `Saved to .reframe/content/${input.sceneId}.md\n` : ''}\n---\n\n${projection.markdown}`);
+  } catch (e: any) {
+    return err(`Extract failed: ${e.message}`);
+  }
+}
+
+function doApplyContent(input: { sceneId?: string; designMd?: string }) {
+  if (!input.sceneId) return err('sceneId required for apply_content.');
+
+  try {
+    // Load the scene
+    let graph: any;
+    let rootId: string;
+
+    const resolved = getScene(input.sceneId);
+    if (resolved) {
+      graph = resolved.graph;
+      rootId = resolved.rootId;
+    } else if (_projectDir) {
+      const loaded = loadSceneFromProject(_projectDir, input.sceneId);
+      graph = loaded.graph;
+      rootId = loaded.rootId;
+    } else {
+      return err('Scene not in session and no project open.');
+    }
+
+    // Load markdown from .reframe/content/ or from designMd param (repurposed as markdown input)
+    let markdown: string | null = null;
+
+    if (input.designMd) {
+      // designMd field repurposed as markdown content for apply
+      markdown = input.designMd;
+    } else if (_projectDir) {
+      const slug = input.sceneId.replace(/[^a-z0-9-]/gi, '-');
+      const contentPath = join(_projectDir, '.reframe', 'content', `${slug}.md`);
+      if (existsSync(contentPath)) {
+        markdown = readFileSync(contentPath, 'utf-8');
+      }
+    }
+
+    if (!markdown) return err('No markdown content. Pass via designMd parameter or save to .reframe/content/<slug>.md first.');
+
+    const result = applyContent(graph, markdown);
+    return ok(formatApplyResult(result));
+  } catch (e: any) {
+    return err(`Apply failed: ${e.message}`);
+  }
+}
+
+// ─── Trash (soft-delete recovery) ────────────────────────────
+
+function doListTrash() {
+  if (!_projectDir) return err('No project open.');
+  const trashDir = join(_projectDir, '.reframe', 'trash');
+  if (!existsSync(trashDir)) return ok('Trash is empty.');
+  const files = readdirSync(trashDir).filter(f => f.endsWith('.scene.json'));
+  if (files.length === 0) return ok('Trash is empty.');
+  const items = files.map(f => {
+    const slug = f.replace('.scene.json', '');
+    const stat = require('fs').statSync(join(trashDir, f));
+    const age = Math.round((Date.now() - stat.mtimeMs) / 60000);
+    return `  ${slug} (deleted ${age}m ago)`;
+  });
+  return ok(`Trash (${files.length} scenes):\n${items.join('\n')}\n\nRestore: reframe_project({ action: "restore", sceneId: "<slug>" })\nEmpty: reframe_project({ action: "empty_trash" })`);
+}
+
+function doRestore(input: { sceneId?: string }) {
+  if (!_projectDir) return err('No project open.');
+  if (!input.sceneId) return err('sceneId (slug) required for restore.');
+  const trashDir = join(_projectDir, '.reframe', 'trash');
+  const trashFile = join(trashDir, `${input.sceneId}.scene.json`);
+  if (!existsSync(trashFile)) return err(`"${input.sceneId}" not found in trash.`);
+
+  const scenesDir = join(_projectDir, '.reframe', 'scenes');
+  const targetFile = join(scenesDir, `${input.sceneId}.scene.json`);
+
+  // Move back from trash to scenes
+  require('fs').renameSync(trashFile, targetFile);
+
+  // Re-add to manifest
+  const manifest = loadProject(_projectDir);
+  const raw = JSON.parse(readFileSync(targetFile, 'utf-8'));
+  const root = raw.root || {};
+  const now = new Date().toISOString();
+  manifest.scenes.push({
+    id: input.sceneId,
+    slug: input.sceneId,
+    name: root.name || input.sceneId,
+    file: `scenes/${input.sceneId}.scene.json`,
+    width: root.width || 1440,
+    height: root.height || 900,
+    nodes: 0,
+    created: now,
+    updated: now,
+  });
+  manifest.updated = now;
+  writeFileSync(join(_projectDir, '.reframe', 'project.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+
+  return ok(`Restored "${input.sceneId}" from trash.`);
+}
+
+function doEmptyTrash() {
+  if (!_projectDir) return err('No project open.');
+  const trashDir = join(_projectDir, '.reframe', 'trash');
+  if (!existsSync(trashDir)) return ok('Trash already empty.');
+  const files = readdirSync(trashDir);
+  for (const f of files) {
+    require('fs').unlinkSync(join(trashDir, f));
+  }
+  return ok(`Emptied trash (${files.length} files permanently deleted).`);
+}
+
+// ─── Compose Page (Blocks → Page) ────────────────────────────
+
+function doComposePage(input: { name?: string; designMd?: string; tags?: string[] }) {
+  // designMd field carries the blocks config as JSON array:
+  // [{"block":"nav-simple"},{"block":"hero-centered","slots":{"headline":"My App"}}]
+  // OR name field carries comma-separated block names: "nav-simple,hero-centered,pricing-3col"
+
+  let blockInputs: Array<{ block: string; slots?: Record<string, string> }> = [];
+
+  if (input.designMd) {
+    try {
+      blockInputs = JSON.parse(input.designMd);
+    } catch {
+      return err('designMd must be a JSON array of {block, slots?} objects.');
+    }
+  } else if (input.name) {
+    // Simple mode: comma-separated block names
+    blockInputs = input.name.split(',').map(b => ({ block: b.trim() }));
+  } else {
+    return err('Provide block names via name (comma-separated) or designMd (JSON array).');
+  }
+
+  if (blockInputs.length === 0) return err('No blocks specified.');
+
+  try {
+    // Ensure starter blocks are registered
+    const { registerStarterBlocks } = require('../../../core/src/blocks/index.js');
+    registerStarterBlocks();
+
+    const result = composePage(blockInputs);
+
+    // Store the composed page in session
+    const pageName = blockInputs.map(b => b.block.split('-')[0]).join('-');
+    const group = input.tags?.[0] ?? undefined;
+
+    const sessionId = storeScene(result.graph, result.rootId, {
+      slug: pageName,
+      name: pageName.replace(/[-_]/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+      group,
+    } as any);
+
+    const formatted = formatComposeResult(result);
+    return ok(`${formatted}\n\nSession ID: ${sessionId}\nInspect: reframe_inspect({ sceneId: "${sessionId}" })`);
+  } catch (e: any) {
+    return err(`Compose page failed: ${e.message}`);
+  }
+}
+
+// ─── Constructor (Template → Pages → Site) ──────────────────
+
+function doCreateFromTemplate(input: { sceneId?: string; name?: string; designMd?: string }) {
+  if (!input.sceneId) return err('sceneId required (template scene ID).');
+  if (!input.name) return err('name required (new page slug, e.g. "site/features").');
+  if (!input.designMd) return err('designMd required (markdown content for this page).');
+
+  try {
+    // Resolve template scene
+    const resolved = getScene(input.sceneId);
+    if (!resolved) return err(`Template scene "${input.sceneId}" not found in session.`);
+
+    const { graph: templateGraph, rootId: templateRootId } = resolved;
+
+    // Parse name: "site/features" → group="site", slug="features", name="Features"
+    const nameParts = input.name.split('/');
+    const slug = nameParts[nameParts.length - 1];
+    const group = nameParts.length > 1 ? nameParts.slice(0, -1).join('/') : undefined;
+    const displayName = slug.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+    // Create page from template
+    const result = createPageFromTemplate(
+      templateGraph,
+      templateRootId,
+      slug,
+      displayName,
+      input.designMd,
+    );
+
+    // Store in session
+    const sessionId = storeScene(result.graph, result.rootId, {
+      slug: input.name.replace(/\//g, '-'),
+      name: displayName,
+      group,
+    } as any);
+
+    const cr = result.contentResult;
+    return ok(
+      `Page "${displayName}" created from template.\n` +
+      `Session ID: ${sessionId}\n` +
+      `Content: ${cr.updated} edits applied, ${cr.skipped.length} skipped.\n` +
+      `\nNext: reframe_inspect({ sceneId: "${sessionId}" }) to verify, or create more pages.`,
+    );
+  } catch (e: any) {
+    return err(`Create from template failed: ${e.message}`);
+  }
+}
+
+function doBuildSite(input: { sceneId?: string; name?: string }) {
+  if (!input.sceneId) return err('sceneId required (template scene ID).');
+  if (!_projectDir) return err('No project open. Use "init" or "open" first.');
+
+  try {
+    // Resolve template scene
+    const resolved = getScene(input.sceneId);
+    if (!resolved) return err(`Template scene "${input.sceneId}" not found in session.`);
+
+    const { graph: templateGraph, rootId: templateRootId } = resolved;
+
+    // Scan .reframe/content/ for .md files
+    const contentDir = join(_projectDir, '.reframe', 'content');
+    if (!existsSync(contentDir)) return err('No .reframe/content/ directory. Extract content first.');
+
+    const readdirSync = require('fs').readdirSync as (p: string) => string[];
+    const mdFiles = readdirSync(contentDir).filter((f: string) => f.endsWith('.md'));
+
+    if (mdFiles.length === 0) return err('No .md files in .reframe/content/. Extract content or add files.');
+
+    // Build pages
+    const siteGroup = input.name || 'site';
+    const pages = mdFiles.map((f: string) => {
+      const slug = f.replace(/\.md$/, '');
+      const name = slug.replace(/[-_]/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
+      const markdown = readFileSync(join(contentDir, f), 'utf-8');
+      return { slug, name, markdown };
+    });
+
+    const result = buildSite(templateGraph, templateRootId, pages);
+
+    // Store all pages in session
+    const sessionIds: string[] = [];
+    for (const page of result.pages) {
+      const sessionId = storeScene(page.graph, page.rootId, {
+        slug: `${siteGroup}-${page.slug}`,
+        name: page.name,
+        group: siteGroup,
+      } as any);
+      sessionIds.push(sessionId);
+    }
+
+    const summary = formatBuildSiteResult(result);
+    const sessionList = sessionIds.map((id, i) => `  ${id}: ${result.pages[i].name}`).join('\n');
+
+    return ok(
+      `${summary}\n\nSession scenes:\n${sessionList}\n\n` +
+      `Export: reframe_export({ sceneId: "${sessionIds[0]}", format: "site" })`,
+    );
+  } catch (e: any) {
+    return err(`Build site failed: ${e.message}`);
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────

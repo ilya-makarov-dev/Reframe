@@ -96,6 +96,9 @@ export const inspectInputSchema = {
 
   aesthetic: z.boolean().optional().default(false)
     .describe('Include aesthetic quality score (alignment, whitespace, balance, harmony, hierarchy, rhythm, readability, proportion).'),
+
+  brandFidelity: z.boolean().optional().default(false)
+    .describe('Include Brand Fidelity Score (0-100): color/typography/spacing/radius/component compliance + palette usage. Requires designMd.'),
 };
 
 // ─── Handler ───────────────────────────────────────────────────
@@ -106,6 +109,7 @@ export async function handleInspect(input: {
   audit?: boolean | { minFontSize?: number; minContrast?: number };
   assert?: Array<{ type: string; value?: any }>;
   designMd?: string;
+  brandFidelity?: boolean;
   diffWith?: string;
   diffStructured?: boolean;
   diffStructuredDetail?: 'full' | 'summary';
@@ -468,6 +472,23 @@ export async function handleInspect(input: {
     } catch (err: any) {
       sections.push('');
       sections.push(`--- Aesthetic Score --- (error: ${err.message})`);
+    }
+  }
+
+  // ── d2. Brand Fidelity Score ─────────────────────────────────
+
+  if (input.brandFidelity && ds) {
+    try {
+      const { computeBrandFidelity, formatBrandFidelity } = await import('../../../core/src/brand-fidelity.js');
+      const fidelityRoot = new StandaloneNode(graph, rawRoot);
+      const fidelityResult = computeBrandFidelity(fidelityRoot, ds);
+
+      sections.push('');
+      sections.push('--- Brand Fidelity ---');
+      sections.push(formatBrandFidelity(fidelityResult));
+    } catch (err: any) {
+      sections.push('');
+      sections.push(`--- Brand Fidelity --- (error: ${err.message})`);
     }
   }
 

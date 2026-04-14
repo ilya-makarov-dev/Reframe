@@ -151,7 +151,7 @@ export type ProjectEvent =
   | { type: 'project:updated'; manifest: ProjectManifest }
   | { type: 'design-system:updated'; path: string }
   /** Snapshot of MCP session list (HTTP sidecar). Not persisted to disk. */
-  | { type: 'session:scenes'; scenes: unknown[] };
+  | { type: 'session:scenes'; scenes: unknown[] }
 
 // ─── Helpers ─────────────────────────────────────────────────
 

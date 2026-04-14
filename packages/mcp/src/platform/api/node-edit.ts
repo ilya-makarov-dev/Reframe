@@ -1434,7 +1434,16 @@ export async function handleNodeEditApi(
         } : null,
       }));
 
-      const body = JSON.stringify({ ok: true, score, counts, findings });
+      // Brand Fidelity Score (when design system available)
+      let brandFidelity: any = null;
+      if (designSystem) {
+        try {
+          const { computeBrandFidelity } = await import('../../../../core/src/brand-fidelity.js');
+          brandFidelity = computeBrandFidelity(wrappedRoot as any, designSystem);
+        } catch { /* brand fidelity optional */ }
+      }
+
+      const body = JSON.stringify({ ok: true, score, counts, findings, brandFidelity });
       auditCacheSet(cacheKey, body);
       res.writeHead(200, {
         'Content-Type': 'application/json; charset=utf-8',

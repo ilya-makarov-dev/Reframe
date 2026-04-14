@@ -179,7 +179,6 @@ function renderEmpty(): string {
     </div>
   </div>`;
 }
-
 function renderStarField(): string {
   let seed = 0x12345678;
   const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0xFFFFFFFF; };

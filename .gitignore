@@ -87,6 +87,13 @@ packages/studio/
 # package source + user actions.
 .reframe/
 
+# ─── Wiki knowledge base (git-tracked for contributors) ──
+# Karpathy-style knowledge base: architecture docs, operational gotchas,
+# design craft, brand intelligence. Git-tracked so contributors get it
+# on clone. Personal vault config and research materials stay local.
+wiki/.obsidian/
+wiki/raw/
+
 # ─── MCP config (user-specific paths/api keys) ──────────
 .mcp.json
 !.mcp.json.example

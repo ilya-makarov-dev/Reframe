@@ -1,14 +1,14 @@
-<h3 align="center">The Programmable Design Engine</h3>
+<h3 align="center">Universal Typed-Graph Engine</h3>
 <p align="center">
   <img src=".github/logotype.png" alt="Reframe" width="100%">
 </p>
-<p align="center">Parse · Validate · Transform · Export</p>
+<p align="center">Import · Graph · Audit · Transform · Export</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-0.1.0-7c3aed?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/node-%3E%3D18-43853d?style=flat-square" alt="node">
-  <img src="https://img.shields.io/badge/MCP-7_tools-ff6b6b?style=flat-square" alt="MCP tools">
+  <img src="https://img.shields.io/badge/MCP-8_tools-ff6b6b?style=flat-square" alt="MCP tools">
   <img src="https://img.shields.io/badge/audit-37_rules-10b981?style=flat-square" alt="audit rules">
   <img src="https://img.shields.io/badge/exports-10_formats-f59e0b?style=flat-square" alt="export formats">
   <img src="https://img.shields.io/badge/blocks-17_templates-8b5cf6?style=flat-square" alt="block templates">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#mcp-pipeline">MCP Pipeline</a> · <a href="#inode--the-design-ast">INode AST</a> · <a href="#platform">Platform</a> · <a href="#how-its-different">Comparison</a> · <a href="#license">License</a>
+  <a href="#quick-start">Quick Start</a> · <a href="#mcp-pipeline">MCP Pipeline</a> · <a href="#inode--the-design-ast">INode AST</a> · <a href="#platform">Platform</a> · <a href="wiki/">Wiki Knowledge Base</a> · <a href="#license">License</a>
 </p>
 
 ---
@@ -28,7 +28,9 @@
 
 **🚀 v0.1.0 — developer preview**
 
-Not a release yet — the engine is feature-complete and stabilising. HTML import, 37-rule audit with auto-fix (including 8 aesthetic quality metrics), semantic resize, and 10 export formats run end-to-end. **7 MCP tools** drive AI agents in Claude Code, Cursor, and any MCP-compatible client. 60+ brand design systems available via [`getdesign`](https://www.npmjs.com/package/getdesign) npm, with **full brand inheritance** (rebrand applies component recipes, not just colors). **17 section blocks** (hero, features, pricing, testimonials, CTA, stats, team, FAQ, footer, nav, contact, gallery) for rapid page assembly. **W3C DTCG token interop** for Figma/Style Dictionary compatibility. **Headless REST API** for batch rendering and CI/CD. Platform UI at `:4100/platform` is a **design production pipeline** — dashboard with 5 entry points, pipeline stepper, brand picker, quality scoring, and batch export.
+A universal typed-graph engine. Import any structured content → typed node graph → validate against rules → transform deterministically → export to any format. **INode is to structured content what AST is to code.**
+
+Two domains ship with v1: **Visual Design** (HTML → INode → 37-rule audit → 10 export formats) and **Knowledge** (markdown wiki → knowledge graph → audit → site/API). **8 MCP tools** drive AI agents in Claude Code, Cursor, and any MCP-compatible client. 60+ brand design systems via [`getdesign`](https://www.npmjs.com/package/getdesign) npm with full brand inheritance. 17 section blocks for rapid page assembly. W3C DTCG token interop. Headless REST API for batch rendering and CI/CD. Platform UI at `:4100/platform` serves both design canvas and wiki knowledge graph. Git-tracked [wiki/](wiki/) with 30 pages of architecture, patterns, and project vision — queryable via `reframe_wiki` MCP tool.
 
 </td>
 </tr>
@@ -40,16 +42,18 @@ Not a release yet — the engine is feature-complete and stabilising. HTML impor
 
 | | | |
 |:---:|:---:|:---:|
-| **🎨 Design AST** | **🤖 AI-Native Pipeline** | **⚡ Multi-Target Output** |
-| INode — 80+ properties. Universal format for visual design. Open, portable, version-controlled. | 7 MCP tools. AI writes HTML, Reframe validates, adapts, exports. Works with any MCP client. | One design → HTML, React, SVG, PNG, PDF, Lottie, Animated HTML (CSS/WAAPI), Theatre.js, Multi-page Site. |
-| **✅ 37-Rule Audit + Quality** | **🔄 Deterministic Resize** | **👁 Platform** |
-| Contrast, accessibility, brand compliance, component specs, font features, spacing. 8 aesthetic metrics (alignment, harmony, readability, rhythm, proportion). Auto-fix. | Not scaling — re-layout. Classifies elements, remaps to guide templates. Milliseconds. No AI. | Design production pipeline at `:4100/platform`. Dashboard with 5 workflows, pipeline stepper, brand picker, quality scoring, block library, batch export. |
+| **🎨 Typed Graph Engine** | **🤖 AI-Native Pipeline** | **⚡ Multi-Target Output** |
+| INode — 80+ properties. Universal IR for structured content. Domains (design, knowledge) are plugins, engine is the constant. | 8 MCP tools. QUERY wiki → design → compile → audit → export → INGEST wiki. Works with any MCP client. | One graph → HTML, React, SVG, PNG, PDF, Lottie, Animated HTML, Site. Wiki → site, search API, knowledge graph. |
+| **✅ 37-Rule Audit + Quality** | **🔄 Deterministic Transforms** | **👁 Unified Platform** |
+| Visual: contrast, accessibility, brand compliance, spacing, aesthetic scoring. Knowledge: broken links, orphans, stale pages, contradictions. Auto-fix. | Rebrand, resize, vary — no AI. Ingest, compile, lint — no AI. Same inputs → same outputs, always. | Design canvas + wiki knowledge graph at `:4100/platform`. Dashboard, artboards, graph view, knowledge tab, batch export. |
 
 ---
 
 ## What is Reframe?
 
-Reframe does for design what compilers do for code. An intermediate representation (**INode**), a validation layer (**37 audit rules** including aesthetic quality scoring), an adaptation engine (**semantic resize**), a section block library, W3C DTCG token interop, and multi-target output (10 formats).
+A universal typed-graph engine. Like LLVM compiles any language to any platform via IR — reframe compiles any structured content to any output via **INode**.
+
+Design is the first domain (HTML → INode → audit → html/react/svg/png). Knowledge is the second (markdown → wiki graph → audit → site/API). The engine is content-agnostic: typed nodes, graph operations, validation rules, deterministic transforms, multi-format export. Domains are plugins.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -105,8 +109,8 @@ Reframe does for design what compilers do for code. An intermediate representati
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-> **Any input. One AST. Any output.**  
-> AI agents write HTML. Developers write TypeScript with `@reframe/ui`. Platform canvas reads the same SceneGraph for review and variation work. All paths converge on INode — the engine validates, adapts, and exports to any format.
+> **Any input. One graph. Any output.**  
+> AI agents write HTML → engine validates and exports design. LLMs query wiki → engine validates and serves knowledge. All paths converge on the typed graph — import, audit, transform, export. The pipeline is the constant. The content is the variable.
 
 ---
 

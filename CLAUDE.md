@@ -1,6 +1,10 @@
-# reframe — Programmable Design Engine
+# reframe — Universal Typed-Graph Engine
 
-YOU are the designer. reframe is your rendering engine. You write HTML+CSS, reframe compiles, validates, exports. **Be creative. Every design should feel different.**
+Import → Graph → Audit → Transform → Export. INode is to structured content what AST is to code.
+Design is the first domain. Knowledge is the second. The engine is content-agnostic.
+
+**For design work:** YOU are the designer. Write HTML+CSS, reframe compiles, validates, exports. Be creative.
+**For knowledge work:** Wiki is the knowledge graph. QUERY before work, INGEST after work.
 
 ## Build & Test
 
@@ -11,13 +15,17 @@ npx tsc --noEmit -p packages/core/tsconfig.json   # typecheck core
 npx tsc --noEmit -p packages/mcp/tsconfig.json    # typecheck mcp
 ```
 
-## MCP Pipeline (always this order)
+## Pipeline (QUERY → design → compile → inspect → edit → export → INGEST)
+
+Wiki is part of the pipeline, not optional. Every session starts with QUERY, ends with INGEST.
 
 ```
+0. QUERY wiki     → load relevant knowledge BEFORE starting work
+     Read wiki/index.md → find relevant page → Read that page
+
 1. reframe_design → load brand context
      action: "list"                         → browse 60+ brands
      action: "extract", brand: "stripe"     → full DESIGN.md (300+ lines)
-     action: "extract", url: "https://..."  → extract from any site
 
 2. reframe_compile → YOU write full HTML with inline styles, pass to compile
      html: "<div style='width:1440px'>..."  → first compile
@@ -26,9 +34,17 @@ npx tsc --noEmit -p packages/mcp/tsconfig.json    # typecheck mcp
 3. reframe_inspect → review 23-rule audit → reframe_edit to fix → re-inspect
 
 4. reframe_export → deliver (html/react/svg/animated_html/lottie/site)
+
+5. INGEST wiki    → record non-obvious learnings AFTER work is done
+     Edit wiki/engine/audit.md → append entry at end
+     Edit wiki/log.md → append log line
 ```
 
-## Tools (6 core + 1 experimental = 7 registered)
+**Step 0 is mandatory.** Before writing HTML, debugging, rebranding — read relevant wiki pages first. Don't re-derive what's already known.
+
+**Step 5 is mandatory.** If you learned something non-obvious (a gotcha, a pattern, a fix), write it into the relevant wiki page. If the session was routine and nothing surprising happened, skip.
+
+## Tools (7 registered)
 
 ```
 reframe_design     brand load/list/extract (local or npx getdesign)
@@ -40,10 +56,60 @@ reframe_project    persistence — save/load/history/snapshots/components/macros
 reframe_collab     EXPERIMENTAL — async intent queue worker stub
 ```
 
-Consolidated down from 12 tools. The removed six were either overlapping
-(iterate/resize/vary now live as `reframe_edit` ops) or half-built UI
-collaboration layers whose core APIs still power the Platform UI via
-HTTP but aren't exposed to the agent directly (intent/annotate/thread).
+## Wiki — Knowledge Graph (Karpathy model)
+
+`wiki/` is a git-tracked Obsidian knowledge graph. **No MCP tool — just Read/Write files directly.**
+
+**QUERY (before work):** Read `wiki/index.md` → find relevant page → Read it.
+**INGEST (after work):** Edit relevant wiki page → append entry at end → Edit `wiki/log.md`.
+**RAW (research):** User drops files in `wiki/raw/` → you Read them → extract knowledge → Write to wiki pages.
+
+**When to QUERY:**
+- About to compile HTML → Read wiki/engine/compiler.md
+- About to rebrand → Read wiki/engine/tokens.md
+- About to debug audit → Read wiki/engine/audit.md
+- Working with brand X → Read wiki/brands/brands-overview.md
+- Any uncertainty → read wiki first, act second
+
+**When to INGEST:**
+- Discovered a non-obvious fix → append to relevant engine/ page
+- Design pattern that worked → append to relevant craft/ page
+- First deep use of a brand → create wiki/brands/{slug}.md
+- Engine behavior not obvious from code → append to relevant page
+
+**Entry format:**
+```
+## [Short title]
+**Context:** what was happening
+**Learning:** the non-obvious thing. Link related: [[other-page]]
+**Applies when:** when to use this
+```
+
+**When NOT to ingest:** routine operations, what code comments explain, session state.
+
+### Processing raw materials
+
+When the user drops files in `wiki/raw/` (articles, messages, research):
+1. Read the raw material
+2. Extract non-obvious knowledge
+3. Write into the right wiki page (vision/, engine/, craft/, decisions/)
+4. Append to wiki/log.md
+5. The raw file stays as source of truth, wiki gets the compiled knowledge
+
+### Wiki sections
+
+| Section | What's there |
+|---|---|
+| `wiki/vision/` | Why reframe exists, principles, roadmap, research |
+| `wiki/architecture/` | How it works: INode, pipeline, design-system, platform, tools, aesthetic, animation, ops, host, builder, ui-library, resize-internals, content-compiler |
+| `wiki/engine/` | What breaks: compiler, audit, tokens, resize, export gotchas |
+| `wiki/craft/` | What works: layout, typography, color, components, responsive, motion |
+| `wiki/brands/` | Brand archetypes and per-brand intelligence |
+| `wiki/contributing/` | How-to: quickstart, architecture-map, common-tasks |
+| `wiki/decisions/` | Key decisions with rationale |
+| `wiki/raw/` | Gitignored: drop articles, messages, research here |
+
+Full catalog: `wiki/index.md`. Open `wiki/` in Obsidian for graph view.
 
 ## reframe_edit — the one place for mutations
 
@@ -57,16 +123,6 @@ Flow:           iterate (audit+fix loop),
                 vary    (Cartesian brand × density × radius × … grid)
 ```
 
-`defineTokens` runs the full brand inheritance pipeline when called with
-a brand slug or DESIGN.md: tokenize → auto-bind → semantic rebrand +
-contrast-aware text color selection → component recipe application
-(button/card/badge/input/nav specs from the parsed DesignSystem).
-One call = "make this scene look like Spotify/Stripe/Ferrari".
-
-`vary` is pure-deterministic design space exploration — no AI. Takes
-axes, generates N cloned scenes via Cartesian product, each with the
-recipe applied in sequence.
-
 ## HTML Rules
 
 - Inline styles only (no classes)
@@ -78,113 +134,9 @@ recipe applied in sequence.
 
 ## DESIGN.md = Brand Context
 
-Agent receives the **full DESIGN.md** from `reframe_design` — 300+ lines with exact colors, typography (with OpenType features), button variants with hover states, card/badge/input/nav specs, spacing scale, shadows, do's/don'ts.
+Agent receives the **full DESIGN.md** from `reframe_design` — 300+ lines with exact colors, typography, button variants, card/badge/input/nav specs, spacing scale, shadows.
 
-**IMPORTANT:** Read the DESIGN.md carefully. Use those exact values. The 23-rule audit validates your HTML against all of it.
-
-Brands come from `getdesign` npm. Custom: copy `DESIGN.md.example`, fill in your values.
-
-## Source HTML Workflow
-
-Compile auto-saves to `.reframe/src/<name>.html`. Small fixes → `reframe_edit`. Big changes → edit source file → re-compile with `file` param.
-
-## Architecture
-
-```
-packages/core    INode AST, SceneGraph, layout (Yoga), audit (23 rules),
-                 importers, exporters, design-system parser + inheritance,
-                 tokens (contrast-aware rebrand), variations, resize
-packages/mcp     MCP server (6 core + 1 experimental = 7 tools), session,
-                 auto-fix, brand catalog, snapshots, Platform UI at
-                 localhost:4100/platform (canvas-based design tool)
-packages/cli     reframe build/test, config loader (uses @reframe/core
-                 as a package import — not relative paths — so CLI builds
-                 don't recompile all of core)
-```
-
-## Platform UI (localhost:4100/platform)
-
-Canvas-based design tool — not a sidebar viewer. The UI mirrors the
-agent's data model 1:1 so what you see in the browser is exactly what
-reframe_compile/edit produced.
-
-- **Dashboard** groups scenes into projects (by common prefix +
-  variantOf metadata). Each card shows the owner + variant count.
-- **Project canvas** (`/platform/project/:slug`) is a pan/zoom Figma-
-  style workspace containing every variant of the project at native
-  size. Artboards are lazy-loaded iframes (IntersectionObserver);
-  `resizeArtboardToContent` measures real scrollHeight after load and
-  grows each frame so nothing renders as a cropped window.
-- **Right panel**: Layers / Properties / Audit / Variations tabs.
-  Variations tab posts to `/platform/api/variations/apply` and
-  `/platform/api/variations/grid` (pure variation transforms, no AI).
-- **History dropdown**: lists ops log + named snapshots. Snapshot
-  save/restore hits `/platform/api/history/...` endpoints backed by an
-  in-memory snapshot store (`packages/mcp/src/snapshots.ts`, LRU 30
-  per scene). Revert-to replays inverse ops atomically via
-  `ops.prevProps`.
-- **Perf**: dual-stack bind (`::`) kills the Windows localhost 200ms
-  penalty. `buildPlatformContext` cached 2s. Preview cache LRU 64
-  keyed on `sceneId:revision:ext`. Audit cache LRU 64. SSE refreshers
-  debounced 300–1000ms per channel.
-
-## Brand Inheritance
-
-`reframe_edit { op: "defineTokens", brand: "stripe" }` is the one-shot
-"rebrand this scene" pipeline:
-
-1. Parse DESIGN.md → DesignSystem (colors, typography, button/card/
-   badge/input/nav specs). Parser uses a line-by-line walker with
-   fuzzy section matching so `Cards & Containers` / `Cards` / etc all
-   hit the same extractor.
-2. Tokenize + auto-bind every node to the right token role.
-3. `rebrandColorsFromTokens` with polarity detection (scene dark vs
-   brand dark) and **contrast-aware text selection** — walks up
-   parents from the text node to find the effective background, then
-   ranks token candidates by WCAG contrast ratio. (The previous bug
-   was reading the text node's own fill as "background" and returning
-   #121212 against #121212.)
-4. `applyBrandInheritance` runs component recipes on matching nodes.
-   Semantic classifier + `inferStructuralRole` detects
-   button/card/badge/input/nav from visual properties, so FRAME nodes
-   that weren't explicitly tagged still get their recipes applied.
-
-## Variations
-
-`packages/core/src/variations/` — pure deterministic transforms:
-`spacing.ts` (scaleSpacing), `radius.ts` (sharp/soft/pill/editorial),
-`shadows.ts` (flat/subtle/normal/dramatic), `colors.ts` (rotateColors
-with invert-accent / invert-mode / [tokenA, tokenB]),
-`typography.ts` (dramatic/flat/editorial/technical/friendly presets),
-`grid.ts` (Cartesian product over { brand, density, radius, shadows,
-typography, mode, colorRotation }).
-
-Exposed as `reframe_edit` ops and via Platform UI `/api/variations`.
-No AI in this path — same inputs always produce the same output.
-
-## SVG Hybrid Rendering
-
-HTML exporter (`packages/core/src/exporters/html.ts`) now renders
-vector primitives (ELLIPSE / STAR / POLYGON / LINE / VECTOR) as inline
-`<svg>` inside their wrapper `<div>`. `shouldRenderAsSvg()` +
-`isIconLikeFrame()` in `svg-primitives.ts` decide which nodes
-qualify. Gracefully falls back to divs if anything throws. Opt-out
-via `svgDecorations: false`.
-
-## Headless API
-
-REST endpoints at `http://localhost:4100/api/`:
-```
-GET  /api/render/{sceneId}?format=html&brand=stripe&scale=2
-POST /api/render/batch   { sceneId, formats[], brands[], viewports[] }
-GET  /api/tokens/{sceneId}?format=dtcg
-POST /api/tokens/{sceneId}   (DTCG JSON body)
-GET  /api/audit/{sceneId}?aesthetic=true
-GET  /api/blocks?category=hero
-POST /api/blocks/instantiate  { name, slots }
-GET  /api/scenes
-GET  /thumbnail/{sceneId}.png?scale=1
-```
+**IMPORTANT:** Read the DESIGN.md carefully. Use those exact values. The 23-rule audit validates against it.
 
 ## Common Gotchas
 

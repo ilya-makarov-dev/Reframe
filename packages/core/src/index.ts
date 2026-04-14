@@ -408,6 +408,29 @@ export type { BlueprintNode } from './ui/blueprint';
 export { compileTemplate, autoPickLayout } from './compiler/index';
 export type { CompileOptions, CompileContent, LayoutStyle } from './compiler/types';
 
+// -- Content (Markdown Control Layer) --
+export { extractContent } from './content/index';
+export { applyContent, formatApplyResult } from './content/index';
+export { createPageFromTemplate, buildSite, formatBuildSiteResult } from './content/index';
+export { composePage, formatComposeResult } from './content/index';
+export type {
+  ContentProjection, ContentElement, ContentEdit, ContentApplyResult, BackReference,
+  PageResult, SiteBuildResult, SitePageInput,
+  ComposePageInput, ComposePageResult,
+} from './content/index';
+
+// -- Brand Fidelity --
+export { computeBrandFidelity, formatBrandFidelity } from './brand-fidelity';
+export type { BrandFidelityResult, BrandFidelityBreakdown } from './brand-fidelity';
+
+// -- Pattern Detection (Emergent Design System) --
+export { detectPatterns, detectPatternsFromGraphs, formatPatternDetection } from './pattern-detection';
+export type { PatternCandidate, PatternInstance, InferredProp, PatternDetectionResult, PatternDetectionOptions } from './pattern-detection';
+
+// -- Project Audit (Multi-Scene Intelligence) --
+export { auditProject, formatProjectAudit } from './project-audit';
+export type { ProjectAuditResult, SceneAuditSummary, CrossSceneIssue, ProjectAuditOptions } from './project-audit';
+
 // -- Config / Build System --
 export { buildAll } from './config/build';
 export { testAll } from './config/test';

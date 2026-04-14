@@ -169,9 +169,32 @@ export async function handleCompile(input: CompileInput) {
     }
   }
 
-  // ─── Resolve file → html ──
-  if (input.file && !input.html) {
-    const filePath = resolve(getWorkspaceRoot(), input.file);
+  // ─── Normalize html → file → html (always go through disk) ──
+  // When inline html is provided, persist it to .reframe/src/<name>.html FIRST,
+  // then read it back via the file path. This ensures the source is always on
+  // disk before compilation starts, and the flow is identical whether the caller
+  // passed html or file.
+  if (input.html && !input.file) {
+    try {
+      const sceneName = input.name ?? 'untitled';
+      const nameParts = sceneName.split('/');
+      const group = nameParts.length > 1 ? nameParts.slice(0, -1).join('/') : undefined;
+      const leafName = nameParts[nameParts.length - 1];
+      const srcSubDir = group ? join(getReframeDir(), 'src', group) : join(getReframeDir(), 'src');
+      if (!existsSync(srcSubDir)) mkdirSync(srcSubDir, { recursive: true });
+      const srcFileName = `${leafName}.html`;
+      const srcPath = join(srcSubDir, srcFileName);
+      writeFileSync(srcPath, input.html, 'utf-8');
+      // Now switch to file-based flow
+      input.file = srcPath;
+    } catch {
+      // If disk write fails, fall through with inline html as before
+    }
+  }
+  if (input.file) {
+    const filePath = input.file.includes(':') || input.file.startsWith('/')
+      ? input.file
+      : resolve(getWorkspaceRoot(), input.file);
     if (!existsSync(filePath)) {
       return { content: [{ type: 'text' as const, text: `File not found: ${filePath}` }] };
     }
@@ -673,25 +696,15 @@ export async function handleCompile(input: CompileInput) {
       !!input.designMd,
     );
 
-    // ── SAVE SOURCE HTML ───────────────────────────────────
-    // Persist source HTML so the agent can read/edit it later and re-compile.
-    // If name contains '/' (e.g. "site/home"), use the prefix as group and create subdirectory.
+    // ── LINK SOURCE FILE TO SCENE ──────────────────────────
+    // Source HTML was already persisted to disk before compilation (html→file normalization).
+    // Here we just record the relative path + group on the stored scene for project tracking.
     if (input.html) {
       try {
-        // Parse group from name: "site/home" → group="site", leaf="home"
         const nameParts = (input.name ?? sceneName).split('/');
         const group = nameParts.length > 1 ? nameParts.slice(0, -1).join('/') : undefined;
         const leafName = nameParts[nameParts.length - 1];
-        const srcSubDir = group ? join(getReframeDir(), 'src', group) : join(getReframeDir(), 'src');
-        if (!existsSync(srcSubDir)) mkdirSync(srcSubDir, { recursive: true });
-        const srcFileName = `${leafName}.html`;
-        const srcPath = join(srcSubDir, srcFileName);
-        writeFileSync(srcPath, input.html, 'utf-8');
-        const srcRelative = group ? `src/${group}/${srcFileName}` : `src/${srcFileName}`;
-
-        // Store source path + group on the scene, then re-save to update manifest.
-        // Group is the typed StoredScene field powering `export site` filtering
-        // and the project list view's per-group section.
+        const srcRelative = group ? `src/${group}/${leafName}.html` : `src/${leafName}.html`;
         const stored = getScene(sceneId);
         if (stored) {
           stored.sourceFile = srcRelative;
