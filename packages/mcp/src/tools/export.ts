@@ -14,7 +14,7 @@ import { exportToAnimatedHtml } from '../../../core/src/exporters/animated-html.
 import { exportToLottie } from '../../../core/src/exporters/lottie.js';
 import { buildLottiePreviewHtml } from '../../../core/src/exporters/lottie-preview.js';
 import { exportSite } from '../../../core/src/exporters/site.js';
-import { exportResizeTransition } from '../../../core/src/exporters/transition.js';
+// transition exporter removed — was niche resize-preview animation
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
 import { runWithHostAsync } from '../../../core/src/host/context.js';
@@ -32,15 +32,9 @@ import { makeToolJsonErrorResult } from '../tool-result.js';
 // ─── Schema ───────────────────────────────────────────────────
 
 export const exportInputSchema = {
-  sceneId: z.string().describe('Scene ID to export. For "transition" format, this is the SOURCE scene — pair with transitionTarget.'),
-  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'animated_html', 'lottie', 'theatre', 'site', 'transition'])
-    .describe('Output format. "site" bundles multiple scenes into a clickable multi-page HTML app with routing and transitions. "transition" exports an HTML that animates source → target geometry, pair with transitionTarget.'),
-  transitionTarget: z.string().optional()
-    .describe('Target scene ID for "transition" format. Typically a resized version of sceneId produced by reframe_resize.'),
-  transitionDuration: z.number().optional().default(1200)
-    .describe('Transition tween duration in ms (default 1200).'),
-  transitionLoop: z.boolean().optional().default(true)
-    .describe('Whether the transition loops back and forth (default true).'),
+  sceneId: z.string().describe('Scene ID to export.'),
+  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'animated_html', 'lottie', 'site'])
+    .describe('Output format. "site" bundles multiple scenes into a clickable multi-page HTML app with routing.'),
 
   // HTML options
   fullDocument: z.boolean().optional().default(true),
@@ -177,7 +171,7 @@ function buildTimeline(
 
 export async function handleExport(input: {
   sceneId: string;
-  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'animated_html' | 'lottie' | 'theatre' | 'site' | 'transition';
+  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'animated_html' | 'lottie' | 'site';
   fullDocument?: boolean;
   dataAttributes?: boolean;
   cssClasses?: boolean;
@@ -187,9 +181,6 @@ export async function handleExport(input: {
   componentName?: string;
   typescript?: boolean;
   scale?: number;
-  transitionTarget?: string;
-  transitionDuration?: number;
-  transitionLoop?: boolean;
   animate?: {
     presets?: Array<{ nodeName: string; preset: string; delay?: number; duration?: number }>;
     stagger?: { nodeNames: string[]; preset: string; staggerDelay?: number };
@@ -370,19 +361,6 @@ export async function handleExport(input: {
         break;
       }
 
-      case 'theatre': {
-        // Theatre.js project JSON — import into Theatre.js Studio for animation editing
-        const { timelineToTheatre } = await import('../../../core/src/animation/to-theatre.js');
-        const theatreTimeline = timeline ?? { animations: [], loop: false, speed: 1 };
-        const project = timelineToTheatre(theatreTimeline, getScene(sceneId)?.name);
-        if (!project) {
-          content = JSON.stringify({ error: 'No animations to export. Add animations first via reframe_export with animate parameter.' });
-        } else {
-          content = JSON.stringify(project, null, 2);
-        }
-        break;
-      }
-
       case 'site': {
         // Bundle scenes into a multi-page site. Filtering policy:
         //  1. If the requested sceneId belongs to a project group (e.g.
@@ -420,36 +398,6 @@ export async function handleExport(input: {
         break;
       }
 
-      case 'transition': {
-        // Animated source → target resize preview. Needs a second
-        // scene id in `transitionTarget` — typically the resize result
-        // produced by reframe_resize from the same source.
-        if (!input.transitionTarget) {
-          return {
-            content: [{ type: 'text' as const, text: 'Transition export requires `transitionTarget` — pass the resized target scene id alongside sceneId (the source).' }],
-          };
-        }
-        const tgt = getScene(input.transitionTarget);
-        if (!tgt) {
-          return {
-            content: [{ type: 'text' as const, text: `Transition target scene "${input.transitionTarget}" not found. List scenes with reframe_inspect.` }],
-          };
-        }
-        const srcSceneForTitle = getScene(sceneId);
-        content = exportResizeTransition(
-          graph,
-          rootId,
-          tgt.graph,
-          tgt.rootId,
-          {
-            duration: input.transitionDuration ?? 1200,
-            loop: input.transitionLoop ?? true,
-            title: `${srcSceneForTitle?.name ?? sceneId} → ${tgt.name ?? input.transitionTarget}`,
-          },
-        );
-        break;
-      }
-
       default:
         return {
           content: [{ type: 'text' as const, text: `Unknown format: ${format}` }],
@@ -467,15 +415,11 @@ export async function handleExport(input: {
   // Auto-save exported file to .reframe/exports/
   const extMap: Record<string, string> = {
     html: 'html', svg: 'svg', react: 'tsx', animated_html: 'animated.html',
-    lottie: 'lottie.json', theatre: 'theatre.json', site: 'html', png: 'png', pdf: 'pdf', transition: 'transition.html',
+    lottie: 'lottie.json', site: 'html', png: 'png', pdf: 'pdf',
   };
   const ext = extMap[format] ?? format;
   const exportDir = getExportsBaseDir();
   if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
-  // `transition` uses a distinct `.transition.html` suffix so calling
-  // it after a regular `html` export doesn't silently overwrite the
-  // static HTML file — both artefacts live side-by-side in the exports
-  // directory.
   const fileName = format === 'site' ? `site.${ext}` : `${slug}.${ext}`;
   const filePath = join(exportDir, fileName);
   try {
@@ -505,7 +449,6 @@ export async function handleExport(input: {
     svg: '.svg',
     react: '.tsx',
     site: null,           // handled below
-    transition: '',       // transition IS HTML, preview serves fresh render
     animated_html: '',    // served via HTML render (keyframes applied)
     lottie: '.lottie',
     png: null,            // no live render — link to file

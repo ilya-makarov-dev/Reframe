@@ -363,7 +363,7 @@ export {
   pulse, shake, bounce, typewriter, colorShift, blurIn,
 } from './animation';
 export { timelineToWaapi, type WaapiOutput, type WaapiNodeAnimation } from './animation/to-waapi';
-export { timelineToTheatre, type TheatreProject, type TheatreSheet } from './animation/to-theatre';
+
 export type {
   Easing, EasingPreset, CubicBezier, SpringConfig,
   AnimatableProperties, AnimatableProperty,

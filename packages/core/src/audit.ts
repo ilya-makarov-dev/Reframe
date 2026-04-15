@@ -650,7 +650,7 @@ export function containerUnderflow(): AuditRule {
     let nearest: INode | undefined;
     for (let i = ctx.ancestors.length - 1; i >= 0; i--) {
       const a = ctx.ancestors[i];
-      if ((a.width ?? 0) > 200) { ancestorW = a.width; nearest = a; break; }
+      if ((a.width ?? 0) > 200) { ancestorW = a.width ?? 0; nearest = a; break; }
     }
     if (ancestorW < w * 4) return [];
 
@@ -927,6 +927,7 @@ export function fontSizeRoleMatch(): AuditRule {
 
     // Check if this font size is approximately in the hierarchy (±25%)
     const exactMatch = hierarchy.some(r => {
+      if (r.fontSize <= 0) return false;
       const ratio = fontSize / r.fontSize;
       return ratio >= 0.75 && ratio <= 1.25;
     });
@@ -935,7 +936,7 @@ export function fontSizeRoleMatch(): AuditRule {
 
     // Also accept if within ±15% of any documented size (covers responsive
     // scaling and small per-platform tweaks).
-    if (allSizes && allSizes.some(s => Math.abs(fontSize - s) / s <= 0.15)) return [];
+    if (allSizes && allSizes.some(s => s > 0 && Math.abs(fontSize - s) / s <= 0.15)) return [];
 
     // Brand DESIGN.md files often only document UI chrome sizes (largest entry is
     // a "Section Title" at 24–48px for editorial brands like Ferrari/Tesla). Agents
@@ -1143,6 +1144,7 @@ export function visualBalance(): AuditRule {
     // Use real root dimensions (rootHeight may be Infinity for scrollable pages)
     const realW = ctx.root.width;
     const realH = ctx.root.height;
+    if (realW <= 0 || realH <= 0 || !Number.isFinite(realH)) return [];
     const frameCenterX = realW / 2;
     const frameCenterY = realH / 2;
 
@@ -1857,7 +1859,7 @@ export function semanticHeadingHierarchy(): AuditRule {
       const cur = headings[i];
       // Allow equal sizes (siblings at same level). Flag any heading larger
       // than the previous one — that's an outline jump up.
-      if (cur.fs > prev.fs * 1.05) {
+      if (prev.fs > 0 && cur.fs > prev.fs * 1.05) {
         issues.push({
           rule: 'semantic-heading-hierarchy',
           severity: 'info',

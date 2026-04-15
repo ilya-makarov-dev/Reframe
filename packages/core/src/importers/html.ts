@@ -320,8 +320,29 @@ function propagateWidthsTopDown(graph: SceneGraph, rootId: string): void {
           }
         }
       } else {
-        // Column: cross axis is width. Stretch width-FILL children to
-        // innerW. A child's width is controlled by whichever of its axes
+        // Column: primary axis = height, cross axis = width.
+        // 1. Distribute height across grow children (mirror of row width distribution).
+        // 2. Stretch width-FILL children to parent innerW.
+        const totalGrow = autoChildren.reduce(
+          (s, c) => s + ((c as any).layoutGrow ?? 0),
+          0,
+        );
+        if (totalGrow > 0 && innerH > 0) {
+          const fixedH = autoChildren
+            .filter(c => !((c as any).layoutGrow > 0))
+            .reduce((s, c) => s + (c.height || 0), 0);
+          const gapTotal = gap * Math.max(0, autoChildren.length - 1);
+          const available = Math.max(0, innerH - fixedH - gapTotal);
+          for (const c of autoChildren) {
+            const grow = (c as any).layoutGrow ?? 0;
+            if (grow > 0 && totalGrow > 0) {
+              const share = Math.floor(available * (grow / totalGrow));
+              graph.updateNode(c.id, { height: Math.max(20, share) });
+            }
+          }
+        }
+        // Cross axis (width): stretch width-FILL children to innerW.
+        // A child's width is controlled by whichever of its axes
         // maps onto the parent's cross axis: counterAxisSizing for a
         // VERTICAL child (own cross = width), primaryAxisSizing for a
         // HORIZONTAL child (own main = width). Either one being FILL
@@ -329,7 +350,8 @@ function propagateWidthsTopDown(graph: SceneGraph, rootId: string): void {
         // `align-items: stretch` default.
         for (const c of autoChildren) {
           const childIsRow = (c as any).layoutMode === 'HORIZONTAL';
-          const widthSizing = childIsRow
+          const childIsGrid = (c as any).layoutMode === 'GRID';
+          const widthSizing = childIsRow || childIsGrid
             ? (c as any).primaryAxisSizing
             : (c as any).counterAxisSizing;
           const needsStretch =
@@ -337,6 +359,11 @@ function propagateWidthsTopDown(graph: SceneGraph, rootId: string): void {
             (c.width === 100 && (c as any).layoutMode !== 'NONE');
           if (needsStretch && innerW > 0) {
             graph.updateNode(c.id, { width: innerW });
+          }
+          // Cross axis (width): stretch height for row children with
+          // FILL counterAxisSizing (same as row path's height stretch).
+          if (childIsRow && (c as any).counterAxisSizing === 'FILL' && innerW > 0) {
+            // Already handled above via width stretch
           }
         }
       }
@@ -403,8 +430,17 @@ function domNodeToHtml(node: any, idx: { i: number }): HtmlChild | null {
     }
   }
 
-  // Tag with index for style map cross-reference
-  attrs['data-reframe-idx'] = String(idx.i++);
+  // Tag with index for style map cross-reference.
+  // Prefer the index already stamped by the linkedom CSS matching pass
+  // (lines 470-505). Re-indexing here would create a separate counter
+  // whose values don't match the keys in mediaRules, breaking @media
+  // responsive rule lookup in convertElement.
+  const linkedomIdx = node.getAttribute?.('data-reframe-idx');
+  if (linkedomIdx != null) {
+    attrs['data-reframe-idx'] = linkedomIdx;
+  } else {
+    attrs['data-reframe-idx'] = String(idx.i++);
+  }
 
   // For <style> elements, capture raw CSS
   if (tag === 'style') {
@@ -808,6 +844,33 @@ function parseUnit(value: string): number {
   if (!value) return 0;
   const n = parseFloat(value);
   return isNaN(n) ? 0 : n;
+}
+
+/**
+ * Parse CSS grid-template-columns/rows into track definitions.
+ * Supports: px values, fr units, repeat(N, ...), auto.
+ * E.g. "repeat(4, 1fr)" → [{type:'FR',value:1}, ...×4]
+ *      "200px 1fr 1fr" → [{type:'FIXED',value:200}, {type:'FR',value:1}, {type:'FR',value:1}]
+ */
+function parseGridTemplate(template: string): Array<{ type: 'FIXED' | 'FR' | 'AUTO'; value: number }> {
+  const tracks: Array<{ type: 'FIXED' | 'FR' | 'AUTO'; value: number }> = [];
+  // Expand repeat(N, ...) first
+  const expanded = template.replace(/repeat\(\s*(\d+)\s*,\s*([^)]+)\)/gi, (_, count, inner) => {
+    const n = parseInt(count);
+    return Array(n).fill(inner.trim()).join(' ');
+  });
+  for (const tok of expanded.split(/\s+/).filter(Boolean)) {
+    if (tok.endsWith('fr')) {
+      tracks.push({ type: 'FR', value: parseFloat(tok) || 1 });
+    } else if (tok === 'auto' || tok === 'min-content' || tok === 'max-content') {
+      tracks.push({ type: 'AUTO', value: 0 });
+    } else {
+      const px = parseUnit(tok);
+      if (px > 0) tracks.push({ type: 'FIXED', value: px });
+      else tracks.push({ type: 'FR', value: 1 }); // fallback
+    }
+  }
+  return tracks;
 }
 
 /** Length shorthand (e.g. "0", "0 0 0 0", "none") that parses to all-zero? */
@@ -2149,8 +2212,14 @@ function cssToOverrides(
   const parentH = parentResolvedH ?? parsedParentH;
 
   // ── Dimensions (with % resolution) ──
-  if (styles.width) o.width = resolveLength(styles.width, parentW);
-  if (styles.height) o.height = resolveLength(styles.height, parentH);
+  // Skip intrinsic sizing keywords — they should be handled by HUG in post-process
+  const intrinsicKeywords = /^(fit-content|min-content|max-content|auto)$/;
+  if (styles.width && !intrinsicKeywords.test(styles.width.trim())) {
+    o.width = resolveLength(styles.width, parentW);
+  }
+  if (styles.height && !intrinsicKeywords.test(styles.height.trim())) {
+    o.height = resolveLength(styles.height, parentH);
+  }
   if (styles['min-width']) o.minWidth = resolveLength(styles['min-width'], parentW);
   if (styles['min-height']) o.minHeight = resolveLength(styles['min-height'], parentH);
   if (styles['max-width']) o.maxWidth = resolveLength(styles['max-width'], parentW);
@@ -2448,23 +2517,23 @@ function cssToOverrides(
   if (display === 'flex' || display === 'inline-flex' || display === 'grid' || display === 'inline-grid') {
     const isGrid = display === 'grid' || display === 'inline-grid';
 
-    // Grid: infer direction from template
     let dir: string;
     if (isGrid) {
+      // Use native GRID layoutMode with parsed template tracks
+      o.layoutMode = 'GRID';
       const cols = styles['grid-template-columns'] ?? '';
       const rows = styles['grid-template-rows'] ?? '';
-      const colCount = cols ? cols.split(/\s+/).filter(s => s && s !== '/').length : 0;
-      // Multi-column grid → horizontal with wrap; single column or rows → vertical
-      if (colCount > 1) {
-        dir = 'row';
-        o.layoutWrap = 'WRAP';
-      } else {
-        dir = 'column';
-      }
+      if (cols) o.gridTemplateColumns = parseGridTemplate(cols);
+      if (rows) o.gridTemplateRows = parseGridTemplate(rows);
+      if (styles['column-gap']) o.gridColumnGap = parseUnit(styles['column-gap']);
+      if (styles['row-gap']) o.gridRowGap = parseUnit(styles['row-gap']);
+      dir = 'grid'; // sentinel — not used for GRID
     } else {
       dir = styles['flex-direction'] ?? 'row';
     }
-    o.layoutMode = dir === 'column' || dir === 'column-reverse' ? 'VERTICAL' : 'HORIZONTAL';
+    if (!isGrid) {
+      o.layoutMode = dir === 'column' || dir === 'column-reverse' ? 'VERTICAL' : 'HORIZONTAL';
+    }
 
     // justify-content → primaryAxisAlign
     const jc = styles['justify-content'] ?? (isGrid ? styles['place-content']?.split(/\s+/)[1] : '') ?? '';
@@ -2481,9 +2550,16 @@ function cssToOverrides(
     else if (ai === 'baseline') o.counterAxisAlign = 'BASELINE';
 
     // gap
-    if (styles.gap) o.itemSpacing = parseUnit(styles.gap);
-    if (styles['row-gap']) o.counterAxisSpacing = parseUnit(styles['row-gap']);
-    if (styles['column-gap']) o.itemSpacing = parseUnit(styles['column-gap']);
+    if (isGrid) {
+      const gapVal = parseUnit(styles.gap ?? '0');
+      if (gapVal > 0) { o.gridColumnGap = gapVal; o.gridRowGap = gapVal; }
+      if (styles['column-gap']) o.gridColumnGap = parseUnit(styles['column-gap']);
+      if (styles['row-gap']) o.gridRowGap = parseUnit(styles['row-gap']);
+    } else {
+      if (styles.gap) o.itemSpacing = parseUnit(styles.gap);
+      if (styles['row-gap']) o.counterAxisSpacing = parseUnit(styles['row-gap']);
+      if (styles['column-gap']) o.itemSpacing = parseUnit(styles['column-gap']);
+    }
 
     // flex-wrap
     if (styles['flex-wrap'] === 'wrap') o.layoutWrap = 'WRAP';
@@ -2543,6 +2619,42 @@ function cssToOverrides(
     if (as === 'center') o.layoutAlign = 'CENTER';
     else if (as === 'flex-end' || as === 'end') o.layoutAlign = 'MAX';
     else if (as === 'stretch') o.layoutAlign = 'STRETCH';
+  }
+
+  // ── Grid child positioning (grid-column / grid-row) ──
+  if (styles['grid-column'] || styles['grid-row']) {
+    const gp: any = {};
+    if (styles['grid-column']) {
+      const gc = styles['grid-column'].trim();
+      const spanMatch = gc.match(/span\s+(\d+)/);
+      if (spanMatch) {
+        gp.columnSpan = parseInt(spanMatch[1]);
+      } else {
+        const parts = gc.split('/').map(s => parseInt(s.trim()));
+        if (parts[0] > 0) gp.column = parts[0];
+        if (parts[1] > 0 && parts[0] > 0) gp.columnSpan = parts[1] - parts[0];
+      }
+    }
+    if (styles['grid-row']) {
+      const gr = styles['grid-row'].trim();
+      const spanMatch = gr.match(/span\s+(\d+)/);
+      if (spanMatch) {
+        gp.rowSpan = parseInt(spanMatch[1]);
+      } else {
+        const parts = gr.split('/').map(s => parseInt(s.trim()));
+        if (parts[0] > 0) gp.row = parts[0];
+        if (parts[1] > 0 && parts[0] > 0) gp.rowSpan = parts[1] - parts[0];
+      }
+    }
+    if (Object.keys(gp).length > 0) {
+      // Fill defaults — gridPosition requires both column and row
+      o.gridPosition = {
+        column: gp.column ?? 0,
+        row: gp.row ?? 0,
+        columnSpan: gp.columnSpan ?? 1,
+        rowSpan: gp.rowSpan ?? 1,
+      };
+    }
   }
 
   // ── Padding ──

@@ -111,6 +111,48 @@ export async function handlePlatformRequest(
     return true;
   }
 
+  // ── Viewport canvas bootstrap (CanvasKit + @open-pencil/core) ──
+  if (pathname === '/platform/viewport.js' && req.method === 'GET') {
+    const { VIEWPORT_CANVAS_JS } = await import('./viewport-canvas.js');
+    res.writeHead(200, {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': STATIC_CACHE,
+    });
+    res.end(VIEWPORT_CANVAS_JS);
+    return true;
+  }
+
+  // ── Vendor assets: CanvasKit WASM + @open-pencil/core ──
+  if (pathname.startsWith('/platform/vendor/') && req.method === 'GET') {
+    const { readFileSync, existsSync } = await import('fs');
+    const { join } = await import('path');
+    const vendorPath = pathname.replace('/platform/vendor/', '');
+
+    // Map vendor paths to node_modules
+    let filePath: string | null = null;
+    if (vendorPath.startsWith('canvaskit/')) {
+      filePath = join(process.cwd(), 'node_modules', 'canvaskit-wasm', 'bin', vendorPath.replace('canvaskit/', ''));
+    } else if (vendorPath.startsWith('open-pencil-core/')) {
+      filePath = join(process.cwd(), 'node_modules', '@open-pencil', 'core', 'dist', vendorPath.replace('open-pencil-core/', ''));
+    }
+
+    if (filePath && existsSync(filePath)) {
+      const ext = filePath.split('.').pop() ?? '';
+      const mimeTypes: Record<string, string> = {
+        js: 'application/javascript',
+        mjs: 'application/javascript',
+        wasm: 'application/wasm',
+        json: 'application/json',
+      };
+      res.writeHead(200, {
+        'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+        'Cache-Control': STATIC_CACHE,
+      });
+      res.end(readFileSync(filePath));
+      return true;
+    }
+  }
+
   // ── API ──────────────────────────────
   if (pathname.startsWith('/platform/api/')) {
     // Direct node editing + undo + audit + brands — the design tool backbone.

@@ -1,0 +1,17 @@
+{
+  "name": "@reframe/editor",
+  "version": "0.1.0",
+  "description": "Interactive design editor — CanvasKit viewport powered by @open-pencil/core + reframe engine intelligence",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-pencil/core": "^0.11.6",
+    "@reframe/core": "*"
+  }
+}

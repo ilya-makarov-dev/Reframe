@@ -77,7 +77,7 @@ function colorToHex(c: Color): string {
 }
 
 function colorToRgba(c: Color): string {
-  return `rgba(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)},${c.a.toFixed(3)})`;
+  return `rgba(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)},${(c.a ?? 1).toFixed(3)})`;
 }
 
 // ─── SVG Builder ───────────────────────────────────────────────

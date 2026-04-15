@@ -209,6 +209,7 @@ export function renderShell(props: ShellProps): string {
     </div>
   </div>
   <script src="/platform/app.js?v=${ASSET_VERSION}"></script>
+  <script type="module" src="/platform/viewport.js?v=${ASSET_VERSION}"></script>
 </body>
 </html>`;
 }

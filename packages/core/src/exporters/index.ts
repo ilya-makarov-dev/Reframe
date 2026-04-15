@@ -19,5 +19,3 @@ export type { LottieExportOptions } from './lottie.js';
 export { exportSite } from './site.js';
 export type { SiteExportOptions, SitePage } from './site.js';
 
-export { exportResizeTransition } from './transition.js';
-export type { TransitionExportOptions } from './transition.js';

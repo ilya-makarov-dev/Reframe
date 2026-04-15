@@ -1,18 +1,22 @@
-# reframe — Universal Typed-Graph Engine
+# reframe — AI-Native Design Editor
 
 Import → Graph → Audit → Transform → Export. INode is to structured content what AST is to code.
-Design is the first domain. Knowledge is the second. The engine is content-agnostic.
+Interactive CanvasKit viewport powered by @open-pencil/core. 37-rule quality engine. 8 export formats.
 
-**For design work:** YOU are the designer. Write HTML+CSS, reframe compiles, validates, exports. Be creative.
+**Architecture:** `@open-pencil/core` (MIT, npm) = viewport + .fig + interaction. `@reframe/core` = audit + tokens + resize + export. `@reframe/editor` = bridge + panels + UI. `@reframe/mcp` = AI pipeline.
+
+**For design work:** THREE input modes — AI agent writes HTML, user picks blocks from library, or direct canvas editing (Figma-like). All converge on one CanvasKit viewport.
 **For knowledge work:** Wiki is the knowledge graph. QUERY before work, INGEST after work.
 
 ## Build & Test
 
 ```bash
-npm run build                              # build all packages
+npm run build                              # build all 4 packages (core, cli, mcp, editor)
 npm test                                   # run all tests
-npx tsc --noEmit -p packages/core/tsconfig.json   # typecheck core
-npx tsc --noEmit -p packages/mcp/tsconfig.json    # typecheck mcp
+npx tsc --noEmit -p packages/core/tsconfig.json    # typecheck core
+npx tsc --noEmit -p packages/mcp/tsconfig.json     # typecheck mcp
+npx tsc --noEmit -p packages/editor/tsconfig.json  # typecheck editor
+node packages/editor/src/bridge/bridge.integration.test.mjs  # editor integration test (35 assertions)
 ```
 
 ## Pipeline (QUERY → design → compile → inspect → edit → export → INGEST)
@@ -31,9 +35,9 @@ Wiki is part of the pipeline, not optional. Every session starts with QUERY, end
      html: "<div style='width:1440px'>..."  → first compile
      file: ".reframe/src/home.html"         → re-compile after editing source
 
-3. reframe_inspect → review 23-rule audit → reframe_edit to fix → re-inspect
+3. reframe_inspect → review 37-rule audit → reframe_edit to fix → re-inspect
 
-4. reframe_export → deliver (html/react/svg/animated_html/lottie/site)
+4. reframe_export → deliver (html/react/svg/png/pdf/lottie/animated_html/site)
 
 5. INGEST wiki    → record non-obvious learnings AFTER work is done
      Edit wiki/engine/audit.md → append entry at end
@@ -44,15 +48,24 @@ Wiki is part of the pipeline, not optional. Every session starts with QUERY, end
 
 **Step 5 is mandatory.** If you learned something non-obvious (a gotcha, a pattern, a fix), write it into the relevant wiki page. If the session was routine and nothing surprising happened, skip.
 
-## Tools (7 registered)
+## Packages (4)
 
 ```
-reframe_design     brand load/list/extract (local or npx getdesign)
-reframe_compile    HTML → INode scene + audit + auto-fix
-reframe_inspect    tree + 23-rule audit + diff + semantic skeleton
-reframe_edit       ALL mutations — structural + theming + variations
-reframe_export     html / react / svg / lottie / animated_html / site
-reframe_project    persistence — save/load/history/snapshots/components/macros/brands
+packages/core      @reframe/core    — headless engine: SceneGraph, audit (37 rules), tokens, resize, 8 exporters, HTML import, blocks, animation
+packages/mcp       @reframe/mcp     — MCP server (7 tools) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
+packages/editor    @reframe/editor  — interactive editor: GraphBridge (@open-pencil/core ↔ reframe), CanvasKit viewport, panels, sync
+packages/cli       @reframe/cli     — CLI: init/build/test
+```
+
+## MCP Tools (7 registered)
+
+```
+reframe_design     brand load/list/extract (60+ brands via getdesign npm)
+reframe_compile    HTML → INode scene + 37-rule audit + auto-fix + .fig import (via @open-pencil/core)
+reframe_inspect    tree + 37-rule audit + 8 aesthetic metrics + brand fidelity + diff + semantic skeleton
+reframe_edit       ALL mutations — structural + theming + variations + adapt + vary + components + multiColumn
+reframe_export     8 core formats: html / react / svg / png / pdf / lottie / animated_html / site (+ theatre, transition for advanced use)
+reframe_project    persistence — save/load/history/blocks/content/macros/brands/components
 reframe_collab     EXPERIMENTAL — async intent queue worker stub
 ```
 
@@ -140,7 +153,10 @@ Agent receives the **full DESIGN.md** from `reframe_design` — 300+ lines with 
 
 ## Common Gotchas
 
-- linkedom (HTML import) does not compute CSS flex constraints — avoid deeply nested flex without explicit widths
+- linkedom (HTML import) does not compute CSS flex constraints — but Yoga handles layout post-import. `flex:1` in HUG parents now works correctly (fixed: flexBasis conditional on parent sizing).
+- CSS Grid is fully supported: `display:grid`, `grid-template-columns`, `grid-column/row: span N`, gap. Imports as `layoutMode: 'GRID'`.
+- `width: fit-content` / `min-content` / `max-content` handled as HUG sizing (not parsed as 0).
+- @media responsive rules link correctly via linkedom `data-reframe-idx` (index mismatch fixed).
 - Audit overflow rules respect `clipsContent` — flex containers with explicit dimensions auto-clip
 - `reframe_compile` shows warnings inline now — fix them before export
 - Brand DESIGN.md files cached in `.reframe/brands/` — delete to re-fetch
@@ -149,3 +165,5 @@ Agent receives the **full DESIGN.md** from `reframe_design` — 300+ lines with 
 - Aesthetic scoring: 8 metrics (alignment, whitespace, balance, harmony, hierarchy, rhythm, readability, proportion)
 - PNG/PDF export: requires CanvasKit WASM (auto-initialized on first call)
 - Layout backend: default Yoga, switchable to Taffy via `setLayoutBackend('taffy')` before `initYoga()`
+- `@open-pencil/core` is an npm dependency for interactive viewport. SceneNode models are 95% compatible (forked from same origin). GraphBridge handles conversion.
+- `project init` with a different dir preserves session scenes (no longer clears them).

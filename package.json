@@ -7,7 +7,8 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build:core && npm run build:cli && npm run build:mcp",
+    "build": "npm run build:core && npm run build:cli && npm run build:mcp && npm run build:editor",
+    "build:editor": "npm run build -w packages/editor",
     "build:core": "npm run build -w packages/core",
     "build:cli": "npm run build -w packages/cli",
     "build:mcp": "npm run build -w packages/mcp",
@@ -31,6 +32,7 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "@open-pencil/core": "^0.11.6",
     "flowbite": "^4.0.1",
     "sortablejs": "^1.15.7",
     "tw-to-css": "^0.0.12"

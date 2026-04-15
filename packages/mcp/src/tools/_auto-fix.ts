@@ -156,6 +156,27 @@ export function applyFix(graph: SceneGraph, issue: AuditIssue): boolean {
     return applyContrastFix(graph, issue.nodeId, node);
   }
 
+  // ── CTA clipped outside frame — clamp position inside root bounds ──
+  if (issue.rule === 'cta-visibility' && issue.message?.includes('extends outside')) {
+    const root = graph.getNode(graph.rootId);
+    if (root) {
+      const updates: Record<string, number> = {};
+      if (node.x < 0) updates.x = 0;
+      if (node.y < 0) updates.y = 0;
+      if (node.x + node.width > root.width) {
+        updates.x = Math.max(0, root.width - node.width);
+      }
+      if (node.y + node.height > root.height) {
+        updates.y = Math.max(0, root.height - node.height);
+      }
+      if (Object.keys(updates).length > 0) {
+        graph.updateNode(issue.nodeId, updates);
+        return true;
+      }
+    }
+    return false;
+  }
+
   if (!issue.fix) return false;
 
   // Special case: combo "min-width/min-height" property emitted by

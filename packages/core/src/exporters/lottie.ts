@@ -364,7 +364,7 @@ function buildShapes(node: SceneNode): any[] {
   }
 
   // Fill
-  const solidFill = node.fills.find(f => f.visible && f.type === 'SOLID');
+  const solidFill = (node.fills ?? []).find(f => f.visible && f.type === 'SOLID');
   if (solidFill) {
     shapes.push({
       ty: 'fl',
@@ -377,7 +377,7 @@ function buildShapes(node: SceneNode): any[] {
   }
 
   // Stroke
-  const stroke = node.strokes.find(s => s.visible);
+  const stroke = (node.strokes ?? []).find(s => s.visible);
   if (stroke) {
     shapes.push({
       ty: 'st',

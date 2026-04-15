@@ -250,7 +250,10 @@ function renderViewportHero(data: SceneData): string {
     </div>
 
     <div class="viewport-frame original" data-viewport="original" data-session="${sid}" data-orig-w="${data.width}" data-orig-h="${data.height}">
-      <iframe src="/preview/${sid}" loading="lazy"></iframe>
+      <!-- CanvasKit interactive viewport (progressive enhancement) -->
+      <canvas id="reframe-viewport" style="width:100%;height:100%;display:none;" data-session="${sid}"></canvas>
+      <!-- Fallback: server-rendered HTML preview (shown until CanvasKit loads) -->
+      <iframe id="reframe-preview-fallback" src="/preview/${sid}" loading="lazy"></iframe>
       <svg class="annotations" viewBox="0 0 ${data.width} ${data.height}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
         <rect class="hover-outline hidden" x="0" y="0" width="0" height="0" rx="2" />
         <rect class="select-outline hidden" x="0" y="0" width="0" height="0" rx="2" />

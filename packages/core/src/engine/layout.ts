@@ -335,7 +335,10 @@ function configureLeaf(
     if (child.layoutGrow > 0) {
       yogaChild.setFlexGrow(child.layoutGrow);
       yogaChild.setFlexShrink(1);
-      yogaChild.setFlexBasis(0);
+      // Only flexBasis: 0 when parent has fixed main axis size (see configureNestedAutoLayout)
+      if (parent.primaryAxisSizing === 'FIXED') {
+        yogaChild.setFlexBasis(0);
+      }
     }
 
     return;
@@ -345,7 +348,10 @@ function configureLeaf(
   if (child.layoutGrow > 0) {
     yogaChild.setFlexGrow(child.layoutGrow);
     yogaChild.setFlexShrink(1);
-    yogaChild.setFlexBasis(0);
+    // Only flexBasis: 0 when parent has fixed main axis size
+    if (parent.primaryAxisSizing === 'FIXED') {
+      yogaChild.setFlexBasis(0);
+    }
     // Set non-grow dimension
     if (isRow) yogaChild.setHeight(child.height);
     else yogaChild.setWidth(child.width);
@@ -388,6 +394,10 @@ function buildYogaTree(
       configureAbsoluteChild(y, yogaChild, child, graph);
     } else if (!child.visible) {
       yogaChild.setDisplay(y.DISPLAY_NONE);
+    } else if (child.layoutMode === 'GRID') {
+      // GRID children are laid out by computeGridLayout, not Yoga.
+      // Treat them as fixed-size leaves so Yoga doesn't overwrite their dimensions.
+      configureLeaf(y, yogaChild, child, frame);
     } else if (child.layoutMode !== 'NONE') {
       // Nested auto-layout
       configureNestedAutoLayout(y, graph, yogaChild, child, frame);
@@ -429,7 +439,14 @@ function configureNestedAutoLayout(
   if (child.layoutGrow > 0) {
     yogaChild.setFlexGrow(child.layoutGrow);
     yogaChild.setFlexShrink(1);
-    yogaChild.setFlexBasis(0);
+    // Only use flexBasis: 0 when the parent has a FIXED main axis size.
+    // When the parent is HUG, there's no fixed space to distribute —
+    // flexBasis: 0 collapses grow children to zero. Let Yoga measure
+    // the child's content instead (flexBasis: auto / unset).
+    if (parent.primaryAxisSizing === 'FIXED') {
+      yogaChild.setFlexBasis(0);
+    }
+    // else: leave flexBasis unset → Yoga uses auto (content-based)
   } else if (mainSizing === 'FIXED') {
     if (isParentRow) yogaChild.setWidth(child.width);
     else yogaChild.setHeight(child.height);
@@ -462,6 +479,8 @@ function configureNestedAutoLayout(
       configureAbsoluteChild(y, yogaGrandchild, grandchild, graph);
     } else if (!grandchild.visible) {
       yogaGrandchild.setDisplay(y.DISPLAY_NONE);
+    } else if (grandchild.layoutMode === 'GRID') {
+      configureLeaf(y, yogaGrandchild, grandchild, child);
     } else if (grandchild.layoutMode !== 'NONE') {
       configureNestedAutoLayout(y, graph, yogaGrandchild, grandchild, child);
     } else {
@@ -640,18 +659,24 @@ function computeGridLayout(graph: SceneGraph, frame: SceneNode): void {
   for (const child of children) {
     let col: number, row: number, colSpan: number, rowSpan: number;
 
-    if (child.gridPosition) {
-      col = Math.max(0, child.gridPosition.column - 1);
-      row = Math.max(0, child.gridPosition.row - 1);
-      colSpan = child.gridPosition.columnSpan || 1;
-      rowSpan = child.gridPosition.rowSpan || 1;
+    // Extract span from gridPosition even for auto-placed children
+    colSpan = child.gridPosition?.columnSpan || 1;
+    rowSpan = child.gridPosition?.rowSpan || 1;
+
+    if (child.gridPosition && child.gridPosition.column > 0 && child.gridPosition.row > 0) {
+      // Explicit grid placement (1-indexed → 0-indexed)
+      col = child.gridPosition.column - 1;
+      row = child.gridPosition.row - 1;
     } else {
-      // Auto-placement
+      // Auto-placement (with span from gridPosition if set)
+      // If the span doesn't fit on the current row, wrap to next
+      if (autoCol + colSpan > numCols) {
+        autoCol = 0;
+        autoRow++;
+      }
       col = autoCol;
       row = autoRow;
-      colSpan = 1;
-      rowSpan = 1;
-      autoCol++;
+      autoCol += colSpan;
       if (autoCol >= numCols) {
         autoCol = 0;
         autoRow++;
@@ -671,6 +696,31 @@ function computeGridLayout(graph: SceneGraph, frame: SceneNode): void {
     const h = (rowOffsets[endRow] ?? 0) + (rowSizes[endRow] ?? 0) - (rowOffsets[row] ?? 0);
 
     graph.updateNode(child.id, { x, y, width: w, height: h });
+
+    // After grid placement, propagate the new cell width down to children.
+    // Grid cells may contain auto-layout children whose widths were computed
+    // before grid layout ran, using stale parent dimensions (defaultWidth or
+    // pre-grid estimates). Walk each cell's descendants and update any child
+    // whose width exceeds its now-resized parent.
+    propagateGridCellWidths(graph, child, w, h);
+  }
+}
+
+/** Propagate grid cell dimensions into cell children that overflow. */
+function propagateGridCellWidths(graph: SceneGraph, cell: SceneNode, cellW: number, cellH: number): void {
+  const padL = cell.paddingLeft ?? 0;
+  const padR = cell.paddingRight ?? 0;
+  const innerW = Math.max(0, cellW - padL - padR);
+  for (const childId of cell.childIds) {
+    const child = graph.getNode(childId);
+    if (!child || child.layoutPositioning === 'ABSOLUTE') continue;
+    if (child.width > innerW + 5) {
+      graph.updateNode(childId, { width: innerW });
+    }
+    // Recurse into nested containers
+    if (child.childIds.length > 0) {
+      propagateGridCellWidths(graph, child, child.width, child.height);
+    }
   }
 }
 
@@ -758,6 +808,18 @@ export function computeAllLayouts(graph: SceneGraph, scopeId?: string): void {
   for (const rootId of layoutRoots) {
     computeLayout(graph, rootId);
   }
+
+  // Post-Yoga pass: compute GRID layouts that Yoga treated as fixed-size leaves.
+  // GRID containers need their own layout pass to place children in grid cells.
+  function findGridFrames(nodeId: string): void {
+    const node = graph.getNode(nodeId);
+    if (!node) return;
+    if (node.layoutMode === 'GRID') {
+      computeGridLayout(graph, node);
+    }
+    for (const childId of node.childIds) findGridFrames(childId);
+  }
+  findGridFrames(startId);
 }
 
 /**

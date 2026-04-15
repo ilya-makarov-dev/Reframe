@@ -89,12 +89,19 @@ let _deferredProjectDir: string | null = null;
 export function setProjectDir(dir: string | null): void {
   const switching = _projectDir !== null && dir !== null && dir !== _projectDir;
   if (switching) {
-    // Clear session-level scene cache so the new project starts fresh.
-    // Per-scene state (tokenIndex, images via graph.images) is owned by
-    // the StoredScene entry, so clearing scenes drops all of it.
-    scenes.clear();
-    slugIndex.clear();
-    nextId = 1;
+    // Phase 5b Bug #3 fix: when project dir changes, source paths in stored
+    // scenes may point at the old directory. Instead of clearing ALL scenes
+    // (which causes silent data loss), we keep scenes in memory but mark
+    // their source paths as stale. Stale scenes can still be inspected,
+    // exported, and edited — only re-compile from source file would need
+    // the path updated. This preserves hours of agent work across project switches.
+    for (const scene of scenes.values()) {
+      const meta = (scene as any)._staleSourceDir;
+      if (!meta) {
+        (scene as any)._staleSourceDir = _projectDir;
+      }
+    }
+    // Do NOT clear scenes or reset nextId — preserve session state.
   }
   _projectDir = dir;
 }

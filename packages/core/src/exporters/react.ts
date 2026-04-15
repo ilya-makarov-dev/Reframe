@@ -721,6 +721,7 @@ function escapeJsx(text: string): string {
 function sanitizeComponentName(name: string): string {
   const cleaned = name
     .replace(/[^a-zA-Z0-9\s_-]/g, '')
+    .replace(/^[0-9]+/, '')
     .replace(/[-_\s]+(.)/g, (_, c) => c.toUpperCase())
     .replace(/^(.)/, (_, c) => c.toUpperCase());
   return cleaned || 'Design';

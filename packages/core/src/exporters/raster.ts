@@ -233,7 +233,7 @@ function renderNode(
   }
 
   // Draw fills
-  for (const fill of node.fills) {
+  for (const fill of node.fills ?? []) {
     if (!fill.visible) continue;
     drawFill(node, fill, canvas, opacity);
   }
@@ -242,7 +242,7 @@ function renderNode(
   // Note: shadows in Skia need to be drawn before or with the shape
 
   // Draw strokes
-  for (const stroke of node.strokes) {
+  for (const stroke of node.strokes ?? []) {
     if (!stroke.visible) continue;
     drawStroke(node, stroke, canvas, opacity);
   }
