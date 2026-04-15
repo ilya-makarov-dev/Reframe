@@ -76,7 +76,12 @@ export async function createReframeEditor(
   // 1. Initialize CanvasKit (Skia WASM)
   const ck = await getCanvasKit(
     options.canvasKitWasmPath
-      ? { locateFile: () => options.canvasKitWasmPath! }
+      ? { locateFile: (file: string) => {
+          // canvasKitWasmPath can be a full URL to .wasm, or a directory prefix
+          const path = options.canvasKitWasmPath!;
+          if (path.endsWith('.wasm')) return path;
+          return path.replace(/\/$/, '') + '/' + file;
+        }}
       : undefined,
   );
 
@@ -134,32 +139,21 @@ export async function createReframeEditor(
       selectionChangeCheck();
     } catch { /* non-critical — continue rendering */ }
 
-    // Build overlays from editor state
-    const overlays: RenderOverlays = {
-      hoveredNodeId: editor.state.hoveredNodeId,
-      enteredContainerId: editor.state.enteredContainerId,
-      editingTextId: editor.state.editingTextId,
-      textEditor: editor.textEditor ?? undefined,
-      marquee: editor.state.marquee,
-      snapGuides: editor.state.snapGuides,
-      rotationPreview: editor.state.rotationPreview,
-      dropTargetId: editor.state.dropTargetId,
-      layoutInsertIndicator: editor.state.layoutInsertIndicator,
-      penState: editor.state.penState as any,
-      remoteCursors: editor.state.remoteCursors as any,
-    };
-
-    // Render
     try {
-      renderer.render(
+      const vp = options.canvas.parentElement
+        ? { w: options.canvas.parentElement.clientWidth, h: options.canvas.parentElement.clientHeight }
+        : { w: options.canvas.width, h: options.canvas.height };
+      (renderer as any).renderFromEditorState(
+        editor.state,
         editor.graph,
-        editor.state.selectedIds,
-        overlays,
-        editor.state.sceneVersion,
+        editor.textEditor ?? null,
+        vp.w,
+        vp.h,
+        false, // no rulers
       );
     } catch (err) {
-      // Don't let a render error kill the loop
       console.warn('[reframe] Render error:', err);
+      running = false;
     }
 
     rafId = requestAnimationFrame(renderFrame);
@@ -177,26 +171,95 @@ export async function createReframeEditor(
         // Convert reframe graph → OP graph (extracts extensions)
         const opGraph = bridge.fromReframeGraph(rfGraph, rootId);
 
-        // Replace the editor's graph
-        editor.replaceGraph(opGraph);
-
-        // Set currentPageId so layer tree and hit-testing work
-        const pages = editor.getPages();
-        if (pages.length > 0 && editor.state.currentPageId !== pages[0].id) {
-          editor.state.currentPageId = pages[0].id;
+        // Debug: check what the OP graph has
+        const opPages = opGraph.getPages();
+        let opNodeCount = 0;
+        for (const p of opPages) {
+          const walk = (id: string) => { opNodeCount++; for (const c of opGraph.getChildren(id)) walk(c.id); };
+          walk(p.id);
         }
-
-        // Compute layout (OP's Yoga)
-        try {
-          computeAllLayouts(editor.graph);
-        } catch {
-          // Layout may fail on edge-case graphs — render anyway
+        // Copy nodes into the FIRST existing page (renderer draws it)
+        const existingPages = editor.getPages();
+        const editorPage = existingPages.length > 0
+          ? existingPages[0]
+          : editor.graph.addPage('Imported');
+        const copyToEditor = (srcNode: any, destParentId: string) => {
+          const created = editor.graph.createNode(srcNode.type, destParentId, {
+            name: srcNode.name,
+            x: srcNode.x, y: srcNode.y,
+            width: srcNode.width, height: srcNode.height,
+            fills: srcNode.fills, strokes: srcNode.strokes,
+            effects: srcNode.effects,
+            opacity: srcNode.opacity,
+            visible: srcNode.visible,
+            cornerRadius: srcNode.cornerRadius,
+            clipsContent: srcNode.clipsContent,
+            text: srcNode.text,
+            fontSize: srcNode.fontSize,
+            fontFamily: srcNode.fontFamily,
+            fontWeight: srcNode.fontWeight,
+            layoutMode: srcNode.layoutMode,
+            paddingTop: srcNode.paddingTop,
+            paddingRight: srcNode.paddingRight,
+            paddingBottom: srcNode.paddingBottom,
+            paddingLeft: srcNode.paddingLeft,
+            itemSpacing: srcNode.itemSpacing,
+            primaryAxisAlign: srcNode.primaryAxisAlign,
+            counterAxisAlign: srcNode.counterAxisAlign,
+            primaryAxisSizing: srcNode.primaryAxisSizing,
+            counterAxisSizing: srcNode.counterAxisSizing,
+            counterAxisSpacing: srcNode.counterAxisSpacing,
+            minHeight: srcNode.minHeight,
+            minWidth: srcNode.minWidth,
+            maxHeight: srcNode.maxHeight,
+            maxWidth: srcNode.maxWidth,
+            rotation: srcNode.rotation,
+            layoutGrow: srcNode.layoutGrow,
+            layoutAlignSelf: srcNode.layoutAlignSelf,
+            textAlignHorizontal: srcNode.textAlignHorizontal,
+            textAutoResize: srcNode.textAutoResize,
+            lineHeight: srcNode.lineHeight,
+            letterSpacing: srcNode.letterSpacing,
+          });
+          for (const child of opGraph.getChildren(srcNode.id)) {
+            copyToEditor(child, created.id);
+          }
+        };
+        for (const p of opPages) {
+          for (const child of opGraph.getChildren(p.id)) {
+            copyToEditor(child, editorPage.id);
+          }
         }
+        // Set currentPageId to the new page with content
+        editor.state.currentPageId = editorPage.id;
+
+        // Compute layout
+        try { computeAllLayouts(editor.graph); } catch (e) { console.warn('[reframe] Layout:', e); }
+
+        // Ensure editor state has sane defaults
+        if (!editor.state.pageColor) {
+          editor.state.pageColor = { r: 0.96, g: 0.93, b: 0.86, a: 1 } as any; // warm paper
+        }
+        if (!editor.state.zoom || editor.state.zoom <= 0) {
+          editor.state.zoom = 1;
+        }
+        if (editor.state.panX == null) editor.state.panX = 0;
+        if (editor.state.panY == null) editor.state.panY = 0;
+
+        // Bump version so renderer redraws
+        editor.state.sceneVersion = (editor.state.sceneVersion || 0) + 1000;
 
         // Zoom to fit content
-        editor.zoomToFit();
+        try {
+          editor.zoomToFit();
+        } catch (e) {
+          console.warn('[reframe] zoomToFit error:', e);
+          // Fallback: manual fit
+          editor.state.zoom = 0.5;
+          editor.state.panX = 100;
+          editor.state.panY = 100;
+        }
 
-        // Trigger render
         editor.requestRender();
       } catch (err) {
         console.error('[reframe] loadFromReframeGraph failed:', err);

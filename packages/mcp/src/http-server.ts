@@ -379,6 +379,23 @@ export function startHttpSidecar(port = 4100): void {
       if (handled) return;
     }
 
+    // ── CanvasKit WASM — serve at root for UMD compat ───────
+    // canvaskit-wasm UMD fetches canvaskit.wasm from the same origin root
+    // regardless of locateFile config. Serve it here so the fetch succeeds.
+    if (url.pathname === '/canvaskit.wasm' && req.method === 'GET') {
+      const { readFileSync, existsSync } = await import('fs');
+      const { join } = await import('path');
+      const wasmPath = join(process.cwd(), 'node_modules', 'canvaskit-wasm', 'bin', 'canvaskit.wasm');
+      if (existsSync(wasmPath)) {
+        res.writeHead(200, {
+          'Content-Type': 'application/wasm',
+          'Cache-Control': 'public, max-age=604800, immutable',
+        });
+        res.end(readFileSync(wasmPath));
+        return;
+      }
+    }
+
     // ── Phase 7.1: Platform routes ───────────────────────────
     // `/platform/*` is dispatched to the new platform router before any of
     // the legacy handlers. When the router returns false the request falls

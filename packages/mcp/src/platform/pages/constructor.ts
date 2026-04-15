@@ -32,10 +32,17 @@ interface ConstructorData {
     category: string;
     description: string;
     slotCount: number;
+    tags?: string[];
   }>;
   categories: string[];
   brands: string[];
   activeBrand?: string;
+  /** HTML sections from the sections manifest (hero-a, pricing-b, etc.) */
+  sections?: Array<{
+    name: string;
+    category: string;
+    label: string;
+  }>;
 }
 
 function escape(s: string): string {
@@ -62,13 +69,30 @@ export function renderConstructor(data: ConstructorData): string {
   const paletteSections = data.categories.map(cat => {
     const blocks = blocksByCategory.get(cat) ?? [];
     const buttons = blocks.map(b =>
-      `<button class="block-btn" data-block="${escape(b.name)}" title="${escape(b.description)}">${escape(b.name.replace(cat + '-', ''))}</button>`
+      `<button class="block-btn" data-block="${escape(b.name)}" title="${escape(b.description)}${b.tags?.length ? ' · ' + b.tags.join(', ') : ''}">${escape(b.name.replace(cat + '-', ''))}</button>`
     ).join('');
     return `<div class="palette-cat">
       <div class="palette-cat-label">${escape(cat)}</div>
       <div class="palette-cat-blocks">${buttons}</div>
     </div>`;
   }).join('');
+
+  // HTML sections from manifest (if provided)
+  const htmlSections = data.sections ?? [];
+  const sectionsByCategory = new Map<string, typeof htmlSections>();
+  for (const s of htmlSections) {
+    const list = sectionsByCategory.get(s.category) ?? [];
+    list.push(s);
+    sectionsByCategory.set(s.category, list);
+  }
+  const sectionPalette = htmlSections.length > 0
+    ? [...sectionsByCategory.entries()].map(([cat, items]) => {
+        const btns = items.map(s =>
+          `<button class="block-btn section-btn" data-section="${escape(s.name)}" title="${escape(s.label)}">${escape(s.name)}</button>`
+        ).join('');
+        return `<div class="palette-cat"><div class="palette-cat-label">${escape(cat)} (HTML)</div><div class="palette-cat-blocks">${btns}</div></div>`;
+      }).join('')
+    : '';
 
   const main = `
 <style>
@@ -132,6 +156,7 @@ export function renderConstructor(data: ConstructorData): string {
     </div>
     <div style="overflow-y:auto;max-height:40vh;padding-bottom:8px">
       ${paletteSections}
+      ${sectionPalette}
     </div>
 
     <div class="ctr-brand">
@@ -234,10 +259,12 @@ export function renderConstructor(data: ConstructorData): string {
       return;
     }
     setStatus('Composing ' + sections.length + ' sections...', true);
+    var brandSelect = document.getElementById('brand-select');
+    var selectedBrand = brandSelect ? brandSelect.value : '';
     fetch('/platform/api/constructor/compose', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blocks: sections }),
+      body: JSON.stringify({ blocks: sections, brand: selectedBrand || undefined }),
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
@@ -311,14 +338,29 @@ export function renderConstructor(data: ConstructorData): string {
     .finally(function() { refineBtn.disabled = false; refineBtn.textContent = 'Ask Agent to Refine'; });
   });
 
-  // Add block buttons
-  document.querySelectorAll('.block-btn').forEach(function(btn) {
+  // Add block buttons (both programmatic blocks and HTML sections)
+  document.querySelectorAll('.block-btn:not(.section-btn)').forEach(function(btn) {
     btn.addEventListener('click', function() {
       sections.push(btn.dataset.block);
       renderSections();
       recompose();
     });
   });
+  document.querySelectorAll('.section-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      sections.push(btn.dataset.section);
+      renderSections();
+      recompose();
+    });
+  });
+
+  // Brand change → recompose with new brand
+  var brandEl = document.getElementById('brand-select');
+  if (brandEl) {
+    brandEl.addEventListener('change', function() {
+      if (sections.length > 0) recompose();
+    });
+  }
 
   renderSections();
 })();

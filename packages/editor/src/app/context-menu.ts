@@ -54,6 +54,11 @@ export function renderContextMenu(x: number, y: number, items: ContextMenuItem[]
     font-size:12px;
   ">`;
 
+  // Use a <style> block instead of inline onmouseover (CSP-safe)
+  html += `<style>
+    #context-menu button:not([disabled]):hover { background: #2563eb !important; }
+  </style>`;
+
   for (const item of items) {
     if (item.separator) {
       html += `<div style="height:1px;background:#333;margin:4px 0;"></div>`;
@@ -65,7 +70,7 @@ export function renderContextMenu(x: number, y: number, items: ContextMenuItem[]
       cursor:${item.disabled ? 'default' : 'pointer'};text-align:left;
       font-family:inherit;font-size:12px;
       ${item.disabled ? 'pointer-events:none;' : ''}
-    " ${item.disabled ? '' : 'onmouseover="this.style.background=\'#2563eb\'" onmouseout="this.style.background=\'transparent\'"'}>
+    ">
       <span>${item.label}</span>
       ${item.shortcut ? `<span style="color:#666;font-size:11px;">${item.shortcut}</span>` : ''}
     </button>`;
@@ -78,6 +83,23 @@ export function renderContextMenu(x: number, y: number, items: ContextMenuItem[]
 /** Execute a context menu action. */
 export function executeContextAction(action: string, editor: Editor): void {
   switch (action) {
+    case 'cut':
+      editor.duplicateSelected(); // TODO: proper cut = copy + delete
+      editor.deleteSelected();
+      break;
+    case 'copy': {
+      // Copy selected nodes as JSON to clipboard
+      const nodes = editor.getSelectedNodes?.() || [];
+      if (nodes.length > 0) {
+        try { navigator.clipboard.writeText(JSON.stringify(nodes.map((n: any) => n.id))); } catch {}
+      }
+      break;
+    }
+    case 'paste':
+      // Paste is complex — needs clipboard read + node creation
+      // For now, duplicate as placeholder
+      editor.duplicateSelected();
+      break;
     case 'duplicate':
       editor.duplicateSelected();
       break;

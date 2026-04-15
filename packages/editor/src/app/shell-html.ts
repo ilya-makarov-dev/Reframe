@@ -23,8 +23,13 @@ export function renderEditorShell(options: {
   slug?: string;
   title?: string;
   editorJsPath: string;
+  /** Scene IDs to load (comma-separated for multi-scene projects). */
+  sceneIds?: string;
+  /** Google Fonts link (optional). */
+  fontsLink?: string;
 }): string {
   const title = options.title ?? 'reframe';
+  const sceneAttr = options.sceneIds ? ` data-project-scenes="${options.sceneIds}"` : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -32,6 +37,8 @@ export function renderEditorShell(options: {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${title}</title>
+  <script type="importmap">{"imports":{"canvaskit-wasm":"/platform/vendor/canvaskit-shim.js","canvaskit-wasm/full":"/platform/vendor/canvaskit-shim.js"}}</script>
+  ${options.fontsLink || ''}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
@@ -99,7 +106,7 @@ export function renderEditorShell(options: {
     #canvas-area {
       grid-area: canvas; position: relative; background: var(--bg-0); overflow: hidden;
     }
-    #viewport { display: block; width: 100%; height: 100%; cursor: default; }
+    #reframe-viewport { display: block; width: 100%; height: 100%; cursor: default; outline: none; }
     #loading {
       position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
       background: var(--bg-0); z-index: 100; transition: opacity 0.3s;
@@ -194,7 +201,7 @@ export function renderEditorShell(options: {
 
     <main id="canvas-area">
       <div id="loading"><div class="spinner"></div></div>
-      <canvas id="viewport"></canvas>
+      <canvas id="reframe-viewport" tabindex="0"${sceneAttr}></canvas>
       <div id="empty-state">
         <div class="empty-logo">reframe</div>
         <div class="empty-hint">AI-native design editor</div>

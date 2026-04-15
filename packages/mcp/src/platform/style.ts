@@ -21,6 +21,7 @@ export const PLATFORM_CSS = `
   --surface-elevated: #F8F2E0; /* cards, header, dropdowns — slightly lighter */
   --surface-sunken: #E8E1CC;   /* sidebars, wells, input fields */
   --surface-hover: #EDE6D2;    /* hover states on elevated surfaces */
+  --surface-canvas: #E0DAC8;   /* CanvasKit viewport — slightly darker so frames pop */
 
   /* Border — hairlines, ink-tinted, never gray */
   --border-subtle: rgba(44, 38, 24, 0.10);
@@ -80,6 +81,7 @@ export const PLATFORM_CSS = `
   --surface-elevated: #16141C;
   --surface-sunken:   #0A090E;
   --surface-hover:    #1A1823;
+  --surface-canvas:   #08070A;
 
   --border-subtle: rgba(240, 238, 230, 0.08);
   --border-strong: rgba(240, 238, 230, 0.14);
@@ -787,7 +789,7 @@ input, textarea, select {
 }
 .sidebar-section { margin-bottom: 28px; }
 .sidebar-title {
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-tertiary);
@@ -801,7 +803,7 @@ input, textarea, select {
 .sidebar-title .count {
   font-family: var(--mono);
   font-feature-settings: 'tnum';
-  font-size: 11px;
+  font-size: 12px;
   text-transform: none;
   letter-spacing: 0;
   color: var(--text-tertiary);
@@ -950,17 +952,17 @@ input, textarea, select {
 
 /* ── Layers tree (node hierarchy) ─── */
 .layers-tree {
-  max-height: 300px;
+  max-height: 50vh;
   overflow-y: auto;
 }
 .layer-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: 28px;
-  padding-right: 8px;
-  border-radius: 3px;
-  font-size: 12px;
+  gap: 6px;
+  height: 32px;
+  padding-right: 10px;
+  border-radius: 4px;
+  font-size: 13px;
   color: var(--text-secondary);
   cursor: pointer;
   white-space: nowrap;
@@ -973,9 +975,9 @@ input, textarea, select {
   color: var(--accent);
 }
 .layer-item .layer-toggle {
-  width: 16px;
+  width: 18px;
   text-align: center;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-tertiary);
   flex-shrink: 0;
   cursor: pointer;
@@ -983,7 +985,7 @@ input, textarea, select {
 }
 .layer-item .layer-toggle:hover { color: var(--text-primary); }
 .layer-item .layer-toggle-spacer {
-  width: 16px;
+  width: 18px;
   flex-shrink: 0;
 }
 .layer-item .layer-name {
@@ -995,10 +997,10 @@ input, textarea, select {
 }
 .layer-item .layer-text {
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: 12px;
   font-family: var(--serif);
   font-style: italic;
-  max-width: 100px;
+  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
   margin-left: 4px;
@@ -1007,11 +1009,11 @@ input, textarea, select {
 }
 .layer-item .layer-badge {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-tertiary);
-  padding: 1px 4px;
+  padding: 2px 5px;
   background: var(--surface-sunken);
-  border-radius: 2px;
+  border-radius: 3px;
   margin-left: auto;
   flex-shrink: 0;
   text-transform: lowercase;
@@ -1020,7 +1022,7 @@ input, textarea, select {
 
 .sidebar-empty {
   padding: 8px 12px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-tertiary);
   font-style: normal;
   font-family: var(--serif);
@@ -2972,7 +2974,7 @@ input, textarea, select {
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-secondary);
   text-decoration: none;
@@ -3017,7 +3019,7 @@ input, textarea, select {
   gap: 8px;
   padding: 6px 12px 6px 38px;
   margin-bottom: 4px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-tertiary);
 }
 .side-nav-sub .brand-dot {
@@ -3036,8 +3038,8 @@ input, textarea, select {
   color: var(--text-secondary);
 }
 .brand-switch-btn-inline {
-  padding: 2px 8px;
-  font-size: 10px;
+  padding: 3px 8px;
+  font-size: 11px;
   font-weight: 500;
   background: transparent;
   border: 1px solid var(--border-subtle);
@@ -4007,7 +4009,7 @@ input, textarea, select {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   letter-spacing: 0.02em;
   color: var(--text-tertiary);
@@ -4110,13 +4112,13 @@ input, textarea, select {
   border-bottom: 1px solid var(--border-subtle);
 }
 .props-identity .node-name {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
   color: var(--text-primary);
   margin-bottom: 4px;
 }
 .props-identity .node-parent {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-tertiary);
   cursor: pointer;
 }
@@ -4124,7 +4126,7 @@ input, textarea, select {
 .props-identity .node-type {
   display: inline-block;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-tertiary);
   padding: 1px 5px;
   background: var(--surface-sunken);
@@ -4142,7 +4144,7 @@ input, textarea, select {
   display: flex;
   align-items: center;
   padding: 10px 20px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -4153,7 +4155,7 @@ input, textarea, select {
 .props-section-header:hover { color: var(--text-primary); }
 .props-section-header .chevron {
   margin-left: auto;
-  font-size: 10px;
+  font-size: 11px;
   transition: transform var(--t-fast) var(--ease);
 }
 .props-section.collapsed .chevron { transform: rotate(-90deg); }
@@ -4177,7 +4179,7 @@ input, textarea, select {
   min-width: 0;
 }
 .prop-compact-label {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--text-tertiary);
   width: 18px;
@@ -4186,10 +4188,10 @@ input, textarea, select {
 }
 .prop-compact-input {
   flex: 1;
-  height: 28px;
+  height: 30px;
   padding: 0 8px;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 13px;
   font-feature-settings: 'tnum';
   color: var(--text-primary);
   background: var(--surface-sunken);
@@ -4612,7 +4614,7 @@ input, textarea, select {
   justify-content: space-between;
 }
 .stream-head .label {
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-tertiary);
@@ -4620,7 +4622,7 @@ input, textarea, select {
 }
 .stream-head .stream-clear-btn {
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-tertiary);
@@ -4682,7 +4684,7 @@ input, textarea, select {
 .stream-card .id {
   font-family: var(--mono);
   font-feature-settings: 'tnum';
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-tertiary);
   margin-left: auto;
 }
@@ -4744,76 +4746,164 @@ input, textarea, select {
 }
 
 /* ─────────────────────────────────────────────────────────
- * Cosmos welcome — single-use empty state on dark theme. Procedural
- * SVG star field (drawn inline as <circle> elements by the page
- * renderer, seeded deterministically). No gradients, no glow — just
- * ink points on indigo paper. Light theme hides this entirely and
- * shows the standard paper empty state instead.
+ * Dashboard empty state — clean entry funnel.
+ * Two primary cards (Design / Build), three secondary links,
+ * brand strip at the bottom. No decoration, no starfield.
  * ───────────────────────────────────────────────────────── */
 
-.cosmos {
-  position: relative;
+.dash-empty {
   display: flex;
-  flex-direction: column;
-  align-items: center;
   justify-content: center;
-  text-align: center;
+  padding: 80px 40px 60px;
   min-height: 80vh;
-  padding: 120px 40px;
-  overflow: hidden;
 }
-.cosmos .starfield {
-  position: absolute;
-  inset: 0;
+.dash-empty-inner {
+  max-width: 640px;
   width: 100%;
-  height: 100%;
-  z-index: 0;
-  pointer-events: none;
 }
-.cosmos .starfield circle {
-  fill: var(--text-primary);
-}
-.cosmos .content {
-  position: relative;
-  z-index: 1;
-  max-width: 540px;
-}
-.cosmos .headline {
+.dash-greeting {
   font-family: var(--serif);
-  font-size: 56px;
-  line-height: 60px;
-  letter-spacing: -0.015em;
+  font-size: 28px;
+  line-height: 34px;
+  letter-spacing: -0.01em;
   font-weight: 400;
   font-feature-settings: 'onum';
   color: var(--text-primary);
-  margin-bottom: 16px;
-}
-.cosmos .body {
-  font-size: 16px;
-  line-height: 24px;
-  color: var(--text-secondary);
-  margin-bottom: 32px;
-  max-width: 440px;
-  margin-left: auto;
-  margin-right: auto;
-}
-.cosmos .actions {
-  display: flex;
-  gap: 12px;
-  justify-content: center;
-  flex-wrap: wrap;
+  margin-bottom: 36px;
 }
 
-/* Light theme: cosmos collapses into the standard paper empty state
- * so light users never see a starfield. The .cosmos class itself still
- * applies — we just strip the space treatment. */
-[data-theme="light"] .cosmos .starfield,
-:root:not([data-theme="dark"]) .cosmos .starfield { display: none; }
-[data-theme="light"] .cosmos .headline,
-:root:not([data-theme="dark"]) .cosmos .headline {
-  font-size: 40px;
-  line-height: 44px;
+/* Primary action cards — Design from brief / Build from sections */
+.dash-primary-row {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 28px;
 }
+.dash-primary-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 24px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  cursor: pointer;
+  color: var(--text-primary);
+  text-decoration: none;
+  transition: border-color 200ms var(--ease), box-shadow 200ms var(--ease), transform 150ms var(--ease);
+}
+.dash-primary-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 8px 24px -8px rgba(var(--glass-ink), 0.12);
+  transform: translateY(-1px);
+}
+.dash-card-icon {
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: rgba(var(--glass-ink), 0.05);
+  color: var(--text-secondary);
+}
+.dash-primary-card:hover .dash-card-icon { color: var(--accent); }
+.dash-card-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.dash-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 20px;
+  color: var(--text-primary);
+}
+.dash-card-desc {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-secondary);
+}
+.dash-card-arrow {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 150ms var(--ease), transform 150ms var(--ease);
+}
+.dash-primary-card:hover .dash-card-arrow {
+  opacity: 1;
+  transform: translateX(2px);
+}
+
+/* Secondary action links — compact, understated */
+.dash-secondary-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 48px;
+}
+.dash-secondary-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: all 150ms var(--ease);
+}
+.dash-secondary-item svg { flex-shrink: 0; }
+.dash-secondary-item:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Brand strip — social proof + quick access */
+.dash-brand-strip {
+  padding-top: 32px;
+  border-top: 1px solid var(--border-subtle);
+}
+.dash-brand-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 12px;
+}
+.dash-brand-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dash-brand-chip {
+  display: inline-block;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: rgba(var(--glass-ink), 0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.dash-brand-more {
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+  border-color: transparent;
+  background: transparent;
+}
+.dash-brand-more:hover { text-decoration: underline; }
 
 /* ─────────────────────────────────────────────────────────
  * Empty states — display serif + body sentence + one button
@@ -5206,13 +5296,8 @@ input, textarea, select {
   background: var(--surface-sunken) !important;
 }
 
-/* ── Dashboard funnel cards ── */
-.cosmos .content button:hover,
-.cosmos .content a:hover {
-  border-color: var(--accent) !important;
-  background: rgba(255,255,255,0.1) !important;
-  transform: translateY(-2px);
-}
+/* ── Dashboard funnel cards — handled by .dash-primary-card:hover
+ * and .dash-secondary-item:hover above ── */
 
 /* ── Quality & Tokens tab ── */
 [data-panel="quality"] .t-caption,

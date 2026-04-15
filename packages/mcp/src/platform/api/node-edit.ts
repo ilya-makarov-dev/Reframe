@@ -398,13 +398,15 @@ export async function handleNodeEditApi(
       sendError(res, 404, `scene ${sceneId} not found`);
       return true;
     }
-    const node = scene.graph.getNode(nodeId);
+    // Resolve "root" to the actual root node ID
+    const resolvedNodeId = nodeId === 'root' ? scene.rootId : nodeId;
+    const node = scene.graph.getNode(resolvedNodeId);
     if (!node) {
       sendError(res, 404, `node ${nodeId} not found in scene ${sceneId}`);
       return true;
     }
     const props = nodeToCssProps(node);
-    sendJson(res, 200, { ok: true, nodeId, sceneId, props });
+    sendJson(res, 200, { ok: true, nodeId: resolvedNodeId, sceneId, props });
     return true;
   }
 
@@ -412,11 +414,17 @@ export async function handleNodeEditApi(
   if (pathname === '/platform/api/node/edit' && req.method === 'POST') {
     const body = await readJson(req);
     const sceneId = body.sceneId as string;
-    const nodeId = body.nodeId as string;
+    let nodeId = body.nodeId as string;
     const edits = body.props as Record<string, any>;
     if (!sceneId || !nodeId || !edits || typeof edits !== 'object') {
       sendError(res, 400, 'sceneId + nodeId + props required');
       return true;
+    }
+    // Resolve "root" to actual root node ID
+    {
+      const store2 = await getStore();
+      const scene2 = store2.getScene(sceneId);
+      if (scene2 && nodeId === 'root') nodeId = scene2.rootId;
     }
 
     const store = await getStore();

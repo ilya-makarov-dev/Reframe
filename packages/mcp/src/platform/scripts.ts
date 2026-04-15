@@ -3742,6 +3742,19 @@ export const PLATFORM_JS = `
           );
         } else if (kind === 'blocks') {
           window.location.href = '/platform/blocks';
+        } else if (kind === 'create-canvas') {
+          // Create an empty canvas (1440x900 frame) and navigate to it.
+          flash('Creating canvas\u2026', 'info');
+          api('/platform/api/import', {
+            html: '<div style="width:1440px;min-height:900px;background:#f5f5f4"></div>',
+          }).then(function(data) {
+            if (data && data.slug) {
+              // Navigate directly to project page (scene route redirects anyway)
+              location.href = '/platform/project/' + data.slug;
+            } else {
+              flash('Failed to create canvas', 'error');
+            }
+          }).catch(function(e) { flash('Failed: ' + e.message, 'error'); });
         }
       });
     });
@@ -4488,16 +4501,29 @@ export const PLATFORM_JS = `
       var store = await resp.json();
       if (!store.ok) throw new Error('no root');
       var p = store.props || {};
+      var bgColor = p.background || '#FFFFFF';
       sceneInfo =
         '<div class="props-identity">' +
-          '<div class="node-name">Scene<span class="node-type">' + escape(p.type || 'frame') + '</span></div>' +
+          '<div class="node-name">Canvas<span class="node-type">' + escape(p.type || 'frame') + '</span></div>' +
+          '<div class="node-parent">Scene root \u2014 edit dimensions, background</div>' +
         '</div>' +
         '<div class="props-section">' +
           '<div class="props-section-header">Dimensions</div>' +
           '<div class="props-section-body">' +
             '<div class="prop-pair">' +
-              '<div class="prop-compact"><span class="prop-compact-label">W</span><span class="scene-dash-val">' + (p.width || '?') + '</span></div>' +
-              '<div class="prop-compact"><span class="prop-compact-label">H</span><span class="scene-dash-val">' + (p.height || '?') + '</span></div>' +
+              '<div class="prop-compact"><span class="prop-compact-label">W</span>' +
+                '<input class="prop-compact-input" type="number" value="' + (p.width || 1440) + '" data-prop="width" data-scene="' + escape(sessionId) + '" data-node="root" step="1"></div>' +
+              '<div class="prop-compact"><span class="prop-compact-label">H</span>' +
+                '<input class="prop-compact-input" type="number" value="' + (p.height || 900) + '" data-prop="height" data-scene="' + escape(sessionId) + '" data-node="root" step="1"></div>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="props-section">' +
+          '<div class="props-section-header">Background</div>' +
+          '<div class="props-section-body">' +
+            '<div class="fill-row">' +
+              '<div class="fill-swatch" style="background:' + escape(bgColor) + '" data-prop="background" data-scene="' + escape(sessionId) + '" data-node="root"></div>' +
+              '<input class="fill-hex" type="text" value="' + escape(bgColor) + '" data-prop="background" data-scene="' + escape(sessionId) + '" data-node="root">' +
             '</div>' +
           '</div>' +
         '</div>';
@@ -4563,6 +4589,9 @@ export const PLATFORM_JS = `
       '</div>';
 
     panel.innerHTML = sceneInfo + auditHtml + exportHtml + engineHtml + hintHtml;
+
+    // Bind editable canvas settings (W/H inputs + background swatch/hex).
+    bindPropInputs();
 
     // Bind export buttons.
     panel.querySelectorAll('.scene-dash-export-btn[data-format]').forEach(function(btn) {
@@ -4794,9 +4823,14 @@ export const PLATFORM_JS = `
 
     // ── Stroke details ──
     if (props['stroke-weight'] != null || props['border-color']) {
-      html += '<div class="props-section collapsed">' +
+      var strokeColor = props['border-color'] || '#000000';
+      html += '<div class="props-section">' +
         '<div class="props-section-header" data-collapse-toggle>Stroke<span class="chevron">\u25BC</span></div>' +
         '<div class="props-section-body">' +
+          '<div class="fill-row" style="margin-bottom:8px">' +
+            '<div class="fill-swatch" style="background:' + escape(strokeColor) + '" data-prop="border-color" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '"></div>' +
+            '<input class="fill-hex" type="text" value="' + escape(strokeColor) + '" data-prop="border-color" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '">' +
+          '</div>' +
           '<div class="prop-pair">' +
             propCompact('Wt', 'stroke-weight', props['stroke-weight'] || 0, sessionId, nodeId) +
             propCompact('Align', 'stroke-align', props['stroke-align'] || 'INSIDE', sessionId, nodeId) +
@@ -5051,6 +5085,14 @@ export const PLATFORM_JS = `
         var swatch = $('.prop-swatch[data-prop="' + prop + '"]');
         if (swatch && (prop === 'background' || prop === 'color')) {
           swatch.style.background = res.props[prop] || value;
+        }
+        // If OP CanvasKit is active, notify it to re-hydrate this node
+        // so the canvas reflects the property change without full reload.
+        var ckCanvas = document.getElementById('reframe-viewport');
+        if (ckCanvas) {
+          window.dispatchEvent(new CustomEvent('reframe:prop-changed', {
+            detail: { sceneId: sceneId, nodeId: nodeId, prop: prop, value: value, props: res.props },
+          }));
         }
       }
     } catch (_) {}
@@ -6035,28 +6077,110 @@ export const PLATFORM_JS = `
     debouncedRefreshStream      = debounce(refreshStream, 800);
     debouncedRefreshAudit       = debounce(refreshAudit, 1000);
 
+    // When CanvasKit canvas is present, skip old interaction handlers
+    // that would conflict with OP editor's pointer/wheel events.
+    var hasCanvasKit = !!document.getElementById('reframe-viewport');
+
     subscribeSSE();
-    bindPreviewBridge();
-    bindGesturePointerSubstrate();
+    if (hasCanvasKit) {
+      // ── Bridge OP canvas selection → platform properties panel ──
+      // OP viewport dispatches 'reframe:canvas-select' when user clicks
+      // a node on the CanvasKit canvas. Wire it to showPropsForNode so
+      // the right-panel Design tab populates correctly.
+      window.addEventListener('reframe:canvas-select', function(evt) {
+        var detail = evt.detail || {};
+        var nodeId = detail.nodeId;
+        var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
+        var sessionId = frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
+        if (!sessionId) {
+          // Fallback: try to find session from any scene slug in the app
+          var appEl = $('.app');
+          sessionId = appEl ? appEl.getAttribute('data-scene') : null;
+        }
+        if (nodeId && sessionId) {
+          // Auto-switch to Design tab so user sees properties
+          var designTab = $('[data-tab="design"]');
+          if (designTab && !designTab.classList.contains('active')) {
+            $$('.right-tab').forEach(function(t) { t.classList.remove('active'); });
+            designTab.classList.add('active');
+            $$('[data-panel]').forEach(function(p) { p.classList.add('hidden'); });
+            var designPanel = $('[data-panel="design"]');
+            if (designPanel) designPanel.classList.remove('hidden');
+          }
+          showPropsForNode(nodeId, sessionId);
+        } else {
+          clearPropsPanel();
+        }
+      });
+      // Bridge canvas changes → persist to server + refresh properties.
+      // When user drags or resizes on OP canvas, persist the change to
+      // the reframe INode graph via POST /platform/api/node/edit so the
+      // data survives page reload and stays in sync with audit/export.
+      function getCanvasSessionId() {
+        var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
+        return frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
+      }
+
+      window.addEventListener('reframe:node-moved', function(evt) {
+        var detail = evt.detail || {};
+        var sessionId = getCanvasSessionId();
+        if (!detail.nodeId || !sessionId) return;
+        // Persist position to server (fire-and-forget)
+        api('/platform/api/node/edit', {
+          sceneId: sessionId,
+          nodeId: detail.nodeId,
+          props: { x: detail.x, y: detail.y },
+        }).catch(function() {});
+        // Refresh properties panel if this node is selected
+        if (currentPropsNodeId === detail.nodeId) {
+          showPropsForNode(detail.nodeId, sessionId);
+        }
+      });
+
+      window.addEventListener('reframe:node-resized', function(evt) {
+        var detail = evt.detail || {};
+        var sessionId = getCanvasSessionId();
+        if (!detail.nodeId || !sessionId) return;
+        // Persist size + position to server
+        var edits = { width: detail.width, height: detail.height };
+        if (detail.x != null) edits.x = detail.x;
+        if (detail.y != null) edits.y = detail.y;
+        api('/platform/api/node/edit', {
+          sceneId: sessionId,
+          nodeId: detail.nodeId,
+          props: edits,
+        }).catch(function() {});
+        if (currentPropsNodeId === detail.nodeId) {
+          showPropsForNode(detail.nodeId, sessionId);
+        }
+      });
+      // OP canvas is always in "edit mode" — set state so CSS classes work
+      state.editMode = true;
+      var appEl2 = $('.app');
+      if (appEl2) appEl2.classList.add('edit-mode');
+    } else {
+      bindPreviewBridge();
+      bindGesturePointerSubstrate();
+      bindViewportSwitcher();
+      bindCanvas();
+      bindEditToggle();
+      bindTimelineScrubber();
+    }
     bindStreamActions();
     bindStreamInput();
-    bindViewportSwitcher();
     bindEmptyLauncher();
     bindOverviewDelete();
     bindOverviewProjectDelete();
-    bindCanvas();
     bindHistoryDropdown();
     bindResizablePanels();
     bindKeyboard();
     bindThemeToggle();
-    bindEditToggle();
     bindRightTabs();
     bindRebrandPanel();
     bindVaryGridButton();
     bindStreamClearBtn();
     bindMacroApplyBtns();
     bindHeaderToolbar();
-    bindTimelineScrubber();
     bindSidebarActions();
     bindContextMenu();
     bindBatchExport();
@@ -6083,9 +6207,11 @@ export const PLATFORM_JS = `
         // Suppress the flash notification on auto-start
       }, 500);
     }
-    // Fit original viewport to available space.
-    setTimeout(fitOriginalViewport, 100);
-    window.addEventListener('resize', fitOriginalViewport);
+    // Fit original viewport to available space (skip on CanvasKit pages).
+    if (!hasCanvasKit) {
+      setTimeout(fitOriginalViewport, 100);
+      window.addEventListener('resize', fitOriginalViewport);
+    }
     setTimeout(function() { refreshAudit(); refreshTimeline(); refreshLayersTree(); }, 600);
     // Reposition chip bar + re-render marks on window resize.
     window.addEventListener('resize', function() {

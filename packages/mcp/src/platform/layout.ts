@@ -208,8 +208,9 @@ export function renderShell(props: ShellProps): string {
       ${props.rightPanel ? '<div class="panel-resize panel-resize-right" data-panel-resize="right"></div>' : ''}
     </div>
   </div>
+  <script type="importmap">{"imports":{"canvaskit-wasm":"/platform/vendor/canvaskit-shim.js","canvaskit-wasm/full":"/platform/vendor/canvaskit-shim.js"}}</script>
   <script src="/platform/app.js?v=${ASSET_VERSION}"></script>
-  <script type="module" src="/platform/viewport.js?v=${ASSET_VERSION}"></script>
+  <script type="module" src="/platform/viewport-init.js?v=${ASSET_VERSION}"></script>
 </body>
 </html>`;
 }
@@ -289,54 +290,6 @@ export function renderSidebar(opts: SidebarOpts): string {
     <span class="brand-label">${escape(brandLabel)}</span>
     <button class="brand-switch-btn-inline" data-action="switch-brand" title="Switch brand">Switch</button>
   </div>`);
-
-  // 3. Library — was "Components". A library is instantly intelligible
-  //    as "collection of reusable pieces I can drop in", which is what
-  //    this actually is. Internal types, APIs, and MCP tool names still
-  //    use "component" — only the human-facing label changed.
-  parts.push(`<a class="side-nav-item ${active === 'components' ? 'active' : ''}" href="/platform/components">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="2" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
-      <rect x="9" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
-      <rect x="2" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
-      <rect x="9" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
-    </svg>
-    <span>Library</span>
-  </a>`);
-
-  // 4. Blocks — section template library (hero, features, pricing, etc.)
-  parts.push(`<a class="side-nav-item ${active === 'blocks' ? 'active' : ''}" href="/platform/blocks">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="2" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
-      <rect x="9" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
-      <rect x="2" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
-      <rect x="9" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.4"/>
-    </svg>
-    <span>Blocks</span>
-  </a>`);
-
-  // 4b. Constructor — block-based page builder
-  parts.push(`<a class="side-nav-item ${active === 'blocks' ? '' : ''}" href="/platform/constructor">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M3 2h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.4"/>
-      <path d="M2 6h12M2 10h12" stroke="currentColor" stroke-width="1.2" opacity="0.5"/>
-    </svg>
-    <span>Constructor</span>
-  </a>`);
-
-  // 5. Recipes — was "Macros". "Macro" reads as emacs/Excel jargon and
-  //    doesn't hint at what the thing does. A recipe is a sequence of
-  //    steps you apply to remake something — that matches exactly what
-  //    these are (ordered op templates with role placeholders that
-  //    replay against any scene). Internal file names + MCP tool actions
-  //    (save_macro, apply_macro) stay unchanged.
-  parts.push(`<a class="side-nav-item ${active === 'macros' ? 'active' : ''}" href="/platform/macros">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M4 2h6l2 2v10H4V2z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
-      <path d="M6 6h4M6 9h4M6 12h3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-    </svg>
-    <span>Recipes</span>
-  </a>`);
 
   parts.push(`</nav>`);
 

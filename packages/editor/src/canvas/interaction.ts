@@ -37,10 +37,20 @@ export function setupCanvasInteraction(
 
   let drag: DragState = null;
 
+  // Convert browser clientX/Y to canvas-local coordinates.
+  // screenToCanvas expects coordinates relative to the canvas element,
+  // but clientX/Y include page offset (sidebar, header).
+  function localX(e: PointerEvent | WheelEvent): number {
+    return e.clientX - canvas.getBoundingClientRect().left;
+  }
+  function localY(e: PointerEvent | WheelEvent): number {
+    return e.clientY - canvas.getBoundingClientRect().top;
+  }
+
   function onPointerDown(e: PointerEvent) {
     let cx: number, cy: number;
     try {
-      ({ x: cx, y: cy } = editor.screenToCanvas(e.clientX, e.clientY));
+      ({ x: cx, y: cy } = editor.screenToCanvas(localX(e), localY(e)));
     } catch { return; }
     const tool = editor.state.activeTool;
 
@@ -96,10 +106,10 @@ export function setupCanvasInteraction(
 
     // Select tool
     if (tool === 'SELECT') {
-      const hit = editor.hitTestAtPoint(cx, cy);
+      // Deep hit test — select the deepest (most nested) node
+      const hit = editor.hitTestAtPoint(cx, cy, true);
 
       if (hit) {
-        // Click on a node
         if (!editor.state.selectedIds.has(hit.id)) {
           editor.select([hit.id], e.shiftKey);
           callbacks.onSelectionChanged?.();
@@ -128,7 +138,7 @@ export function setupCanvasInteraction(
   }
 
   function onPointerMove(e: PointerEvent) {
-    const { x: cx, y: cy } = editor.screenToCanvas(e.clientX, e.clientY);
+    const { x: cx, y: cy } = editor.screenToCanvas(localX(e), localY(e));
 
     if (!drag) {
       // Hover
@@ -219,7 +229,7 @@ export function setupCanvasInteraction(
 
   function onPointerUp(e: PointerEvent) {
     if (!drag) return;
-    const { x: cx, y: cy } = editor.screenToCanvas(e.clientX, e.clientY);
+    const { x: cx, y: cy } = editor.screenToCanvas(localX(e), localY(e));
 
     if (drag.kind === 'move') {
       // Commit move with undo
@@ -283,11 +293,28 @@ export function setupCanvasInteraction(
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) {
       const delta = e.deltaY > 0 ? 1.5 : -1.5;
-      editor.applyZoom(delta, e.clientX, e.clientY);
+      editor.applyZoom(delta, localX(e), localY(e));
     } else {
       editor.pan(-e.deltaX, -e.deltaY);
     }
     editor.requestRender();
+  }
+
+  // Double-click: enter frame (select children) or start text editing
+  function onDblClick(e: MouseEvent) {
+    const { x: cx, y: cy } = editor.screenToCanvas(localX(e as any), localY(e as any));
+    // Deep hit test — find the deepest node at this point
+    const hit = editor.hitTestAtPoint(cx, cy, true);
+    if (hit) {
+      if (hit.type === 'TEXT') {
+        editor.startTextEditing?.(hit.id);
+      } else {
+        // Enter the container and select the child
+        editor.select([hit.id]);
+      }
+      editor.requestRender();
+      callbacks.onSelectionChanged?.();
+    }
   }
 
   // Attach listeners
@@ -295,6 +322,7 @@ export function setupCanvasInteraction(
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('contextmenu', onContextMenu);
+  canvas.addEventListener('dblclick', onDblClick);
   canvas.addEventListener('wheel', onWheel, { passive: false });
 
   // Cleanup
@@ -303,6 +331,7 @@ export function setupCanvasInteraction(
     canvas.removeEventListener('pointermove', onPointerMove);
     canvas.removeEventListener('pointerup', onPointerUp);
     canvas.removeEventListener('contextmenu', onContextMenu);
+    canvas.removeEventListener('dblclick', onDblClick);
     canvas.removeEventListener('wheel', onWheel);
   };
 }

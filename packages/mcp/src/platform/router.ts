@@ -111,14 +111,94 @@ export async function handlePlatformRequest(
     return true;
   }
 
-  // ── Viewport canvas bootstrap (CanvasKit + @open-pencil/core) ──
+  // ── Editor bundle (CanvasKit + @open-pencil/core + reframe editor) ──
   if (pathname === '/platform/viewport.js' && req.method === 'GET') {
-    const { VIEWPORT_CANVAS_JS } = await import('./viewport-canvas.js');
+    const { readFileSync, existsSync } = await import('fs');
+    const { join } = await import('path');
+    // Find the bundle — log which path we use for debugging
+    const candidates = [
+      join(process.cwd(), 'packages', 'mcp', 'src', 'platform', 'editor-bundle.js'),
+      join(process.cwd(), 'packages', 'mcp', 'dist', 'mcp', 'src', 'platform', 'editor-bundle.js'),
+      join(__dirname, 'editor-bundle.js'),
+    ];
+    let bundleContent: string | null = null;
+    for (const p of candidates) {
+      if (existsSync(p)) { bundleContent = readFileSync(p, 'utf8'); break; }
+    }
+    if (bundleContent) {
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(bundleContent);
+    } else {
+      const { VIEWPORT_CANVAS_JS } = await import('./viewport-canvas.js');
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(VIEWPORT_CANVAS_JS);
+    }
+    return true;
+  }
+
+  // ── Clean canvas test — NO old platform UI, just CanvasKit ──
+  if (pathname === '/platform/canvas-test' && req.method === 'GET') {
+    const scenes = ctx.sessionScenes || [];
+    const sceneId = scenes.length > 0 ? scenes[0].id : '';
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CanvasKit Test</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #111; overflow: hidden; height: 100vh; }
+    #reframe-viewport { width: 100vw; height: 100vh; display: block; }
+  </style>
+  <script type="importmap">{"imports":{"canvaskit-wasm":"/platform/vendor/canvaskit-shim.js","canvaskit-wasm/full":"/platform/vendor/canvaskit-shim.js"}}</script>
+</head>
+<body>
+  <canvas id="reframe-viewport" data-project-scenes="${sceneId}"></canvas>
+  <script type="module" src="/platform/viewport-init.js"></script>
+</body>
+</html>`);
+    return true;
+  }
+
+  // ── Viewport init — external module script (CSP-safe) ──
+  if (pathname === '/platform/viewport-init.js' && req.method === 'GET') {
+    // Pass version token through to viewport.js import to bust cache
+    const v = url.searchParams.get('v') || '';
     res.writeHead(200, {
       'Content-Type': 'application/javascript; charset=utf-8',
       'Cache-Control': STATIC_CACHE,
     });
-    res.end(VIEWPORT_CANVAS_JS);
+    res.end(`import{initPlatformViewport}from'/platform/viewport.js?v=${v}';initPlatformViewport().catch(e=>console.warn('[reframe] Viewport:',e.message));`);
+    return true;
+  }
+
+  // ── CanvasKit ESM shim ──
+  if (pathname === '/platform/vendor/canvaskit-shim.js' && req.method === 'GET') {
+    // Inline the shim — it's tiny, no need for a file read
+    res.writeHead(200, {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': STATIC_CACHE,
+    });
+    res.end(`// CanvasKit ESM shim — wraps UMD, forces correct WASM path
+const s=document.createElement('script');
+s.src='/platform/vendor/canvaskit/canvaskit.js';
+const r=new Promise((ok,no)=>{s.onload=ok;s.onerror=()=>no(new Error('CanvasKit load failed'))});
+document.head.appendChild(s);
+export default async function(o){
+  await r;
+  const i=globalThis.CanvasKitInit;
+  if(!i)throw new Error('CanvasKitInit missing');
+  const opts=Object.assign({},o||{},{locateFile:function(f){return'/platform/vendor/canvaskit/'+f}});
+  return i(opts);
+};
+`);
     return true;
   }
 
@@ -320,11 +400,9 @@ export async function handlePlatformRequest(
     return true;
   }
 
-  // Project canvas — /platform/project/:slug
-  // Figma-style infinite canvas rendering all variants of a project
-  // (all scenes grouped under one common parent/prefix). Pan/zoom UX
-  // is provided by client-side scripts; server just emits absolutely-
-  // positioned iframe placeholders.
+  // Project editor — /platform/project/:slug
+  // Serves the editor shell (CanvasKit + @open-pencil/core) as a standalone SPA.
+  // The editor bundle handles scene loading, rendering, interaction.
   if (pathname.startsWith('/platform/project/')) {
     const slug = decodeURIComponent(pathname.slice('/platform/project/'.length));
     if (!slug) {
@@ -337,11 +415,13 @@ export async function handlePlatformRequest(
       send(res, 404, 'text/html', '<h1>Project not found</h1><p><a href="/platform">Back to dashboard</a></p>');
       return true;
     }
-    const html = renderProjectCanvas({
-      project,
-      allScenesCount: data.scenes.length,
-      activeBrand: data.activeBrand,
-      brands: data.brands,
+    const sceneIds = project.members.map(m => m.id).join(',');
+    const { renderEditorShell } = await import('./pages/editor-shell-page.js');
+    const html = renderEditorShell({
+      title: `reframe \u00B7 ${project.name}`,
+      sceneIds,
+      editorJsPath: '/platform/viewport-init.js',
+      fontsLink: '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">',
     });
     send(res, 200, 'text/html', html);
     return true;
@@ -519,6 +599,18 @@ export async function handlePlatformRequest(
       const blocks: any[] = blocksModule.listBlocks();
       const categories = [...new Set(blocks.map((b: any) => b.category))].sort() as string[];
 
+      // Load HTML sections from manifest (if available)
+      let htmlSections: Array<{name:string; category:string; label:string}> = [];
+      try {
+        const { loadSectionRegistry } = await import('../../../core/src/sections/manifest.js');
+        const registry = loadSectionRegistry();
+        htmlSections = registry.sections.map((s: any) => ({
+          name: s.id.replace(/^[^/]+\//, ''), // strip library prefix
+          category: s.category,
+          label: s.name,
+        }));
+      } catch (_) {}
+
       const { renderConstructor } = await import('./pages/constructor.js');
       const pageHtml = renderConstructor({
         blocks: blocks.map((b: any) => ({
@@ -531,6 +623,7 @@ export async function handlePlatformRequest(
         categories,
         brands: (ctx as any).brands ?? [],
         activeBrand: (ctx as any).activeBrand,
+        sections: htmlSections,
       });
 
       send(res, 200, 'text/html', pageHtml);
