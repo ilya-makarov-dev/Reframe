@@ -283,12 +283,12 @@ export function renderEditorShell(options: {
 
     <aside id="sidebar">
       <div class="sidebar-head">Layers</div>
-      <div id="layer-tree"></div>
+      <div id="layer-tree" data-layers-tree></div>
     </aside>
 
     <main id="canvas-area">
       <div id="loading"><div class="spinner"></div></div>
-      <canvas id="reframe-viewport" tabindex="0"${sceneAttr}></canvas>
+      <canvas id="reframe-viewport" tabindex="0"${sceneAttr} data-session="${esc(options.sceneIds?.split(',')[0] ?? '')}"></canvas>
 
       <!-- Floating toolbar: tools + undo/redo -->
       <div id="float-toolbar">
@@ -324,17 +324,25 @@ export function renderEditorShell(options: {
     </main>
 
     <aside id="panel">
-      <div class="panel-tabs" style="display:flex;align-items:center;">
-        <button class="panel-tab active" data-panel="design" style="flex:1">Design</button>
-        <button class="panel-tab" data-panel="constructor" style="flex:1">Constructor</button>
+      <div class="right-tabs" style="display:flex;align-items:center;border-bottom:1px solid var(--border);">
+        <button class="right-tab active" data-tab="design" style="flex:1">Design</button>
+        <button class="right-tab" data-tab="constructor" style="flex:1">Constructor</button>
       </div>
-      <div id="panel-content">
-        <div style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
+      <div data-panel="design" style="display:block;flex:1;overflow-y:auto;padding:0 12px;">
+        <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
           Select a node to inspect
+        </div>
+      </div>
+      <div data-panel="constructor" style="display:none;flex:1;flex-direction:column;overflow-y:auto;padding:12px;">
+        <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
+          Constructor
         </div>
       </div>
     </aside>
   </div>
+  <link rel="stylesheet" href="/platform/style.css">
+  <script src="/platform/theme-init.js"></script>
+  <script src="/platform/app.js"></script>
   <script type="module" src="${options.editorJsPath}"></script>
 </body>
 </html>`;

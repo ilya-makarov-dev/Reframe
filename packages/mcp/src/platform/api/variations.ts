@@ -143,7 +143,9 @@ async function loadBrandMd(ctx: PlatformContext, slug: string): Promise<string |
   }
 }
 
-async function applyBrandToScene(sceneId: string, brandSlug: string, ctx: PlatformContext) {
+export async function applyBrandToScene(sceneId: string, brandSlug: string, ctx: PlatformContext): Promise<{
+  brand: string; tokens: number; bindings: number; rebranded: number; inheritance: any;
+}> {
   const store = await getStore();
   const scene = store.getScene(sceneId);
   if (!scene) throw new Error(`scene "${sceneId}" not found`);

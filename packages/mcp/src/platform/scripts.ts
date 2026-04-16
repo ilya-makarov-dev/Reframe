@@ -54,6 +54,7 @@ export const PLATFORM_JS = `
     mode: null,
     sectionsLoaded: false,
     varyPanelLoaded: false,
+    constructorPanelLoaded: false,
   };
 
   const VIEWPORT_DIMS = {
@@ -3907,6 +3908,10 @@ export const PLATFORM_JS = `
         if (target === 'vary' && !state.varyPanelLoaded) {
           initVaryPanel();
         }
+        // Lazy-init constructor panel on first activation
+        if (target === 'constructor' && !state.constructorPanelLoaded) {
+          initConstructorPanel();
+        }
         // Quality tab: fetch aesthetic score
         if (target === 'quality') {
           var analyzeBtn = $('[data-quality-analyze]');
@@ -4086,6 +4091,261 @@ export const PLATFORM_JS = `
   }
 
   // ── Variations panel ───────────────────────────────────────
+  // ── Constructor Panel (lazy-init on first tab click) ──────────
+  function initConstructorPanel() {
+    state.constructorPanelLoaded = true;
+    var panel = $('[data-panel="constructor"]');
+    if (!panel) return;
+
+    panel.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px">Loading blocks...</div>';
+
+    // Fetch blocks and brands in parallel
+    var blocksData = null;
+    var brandsData = [];
+    var sectionsData = [];
+    var constructorSections = [];
+    var constructorSceneId = null;
+
+    Promise.all([
+      api('/platform/api/constructor/sections').catch(function() { return { ok: false }; }),
+      api('/platform/api/brands').catch(function() { return { ok: false, brands: [] }; }),
+    ]).then(function(results) {
+      if (results[0].ok) sectionsData = results[0].sections || [];
+      if (results[1].ok) brandsData = results[1].brands || [];
+      renderConstructorUI();
+    });
+
+    function renderConstructorUI() {
+      // Group blocks by category
+      var blockList = '';
+      try {
+        // Try to use starter blocks
+        var categories = {};
+        var BLOCKS = [
+          { name: 'nav-simple', cat: 'Nav' },
+          { name: 'hero-centered', cat: 'Hero' }, { name: 'hero-split', cat: 'Hero' }, { name: 'hero-gradient', cat: 'Hero' },
+          { name: 'features-grid-3col', cat: 'Features' }, { name: 'features-alternating', cat: 'Features' },
+          { name: 'pricing-3tier', cat: 'Pricing' },
+          { name: 'testimonials-grid', cat: 'Testimonials' },
+          { name: 'cta-centered', cat: 'CTA' }, { name: 'cta-split', cat: 'CTA' },
+          { name: 'stats-bar', cat: 'Stats' },
+          { name: 'faq-expandable', cat: 'FAQ' },
+          { name: 'contact-form', cat: 'Contact' },
+          { name: 'gallery-grid', cat: 'Gallery' },
+          { name: 'team-grid', cat: 'Team' },
+          { name: 'footer-4col', cat: 'Footer' }, { name: 'footer-simple', cat: 'Footer' },
+        ];
+        BLOCKS.forEach(function(b) {
+          if (!categories[b.cat]) categories[b.cat] = [];
+          categories[b.cat].push(b.name);
+        });
+        for (var cat in categories) {
+          blockList += '<div style="margin-bottom:8px"><div style="font-size:10px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">' + escape(cat) + '</div>';
+          blockList += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">';
+          categories[cat].forEach(function(name) {
+            blockList += '<button class="ctr-add-block" data-block="' + escape(name) + '" style="padding:5px 6px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-secondary);cursor:pointer;text-align:left;font-family:inherit">' + escape(name.replace(/-/g, ' ')) + '</button>';
+          });
+          blockList += '</div></div>';
+        }
+      } catch (_) {}
+
+      // HTML sections
+      var sectionList = '';
+      if (sectionsData.length > 0) {
+        sectionList = '<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px"><div style="font-size:10px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">HTML Sections</div>';
+        sectionList += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">';
+        sectionsData.slice(0, 20).forEach(function(s) {
+          sectionList += '<button class="ctr-add-section" data-section="' + escape(s.id || s.name) + '" style="padding:5px 6px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-secondary);cursor:pointer;text-align:left;font-family:inherit">' + escape(s.name || s.id) + '</button>';
+        });
+        sectionList += '</div></div>';
+      }
+
+      // Brand selector
+      var brandOpts = '<option value="">— No Brand —</option>';
+      brandsData.forEach(function(b) {
+        var slug = typeof b === 'string' ? b : b.slug;
+        brandOpts += '<option value="' + escape(slug) + '">' + escape(slug) + '</option>';
+      });
+
+      panel.innerHTML =
+        '<div style="padding:0 4px">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:8px 0;border-bottom:1px solid var(--border)">' +
+            '<select id="ctr-brand" style="flex:1;padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-primary);font-family:inherit">' + brandOpts + '</select>' +
+          '</div>' +
+          '<div id="ctr-section-list" style="margin-bottom:8px"></div>' +
+          blockList +
+          sectionList +
+          '<div id="ctr-refine-panel" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px">' +
+            '<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Refine section</div>' +
+            '<div id="ctr-refine-target" style="font-size:11px;font-weight:600;margin-bottom:4px"></div>' +
+            '<textarea id="ctr-refine-prompt" placeholder="Describe the refinement..." style="width:100%;min-height:50px;padding:6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-primary);resize:vertical;font-family:inherit"></textarea>' +
+            '<button id="ctr-refine-ask" style="width:100%;margin-top:4px;padding:5px;font-size:11px;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer">Ask Agent</button>' +
+            '<div id="ctr-refine-result" style="margin-top:6px;font-size:10px;color:var(--text-muted);max-height:80px;overflow-y:auto;white-space:pre-wrap"></div>' +
+            '<textarea id="ctr-refine-html" placeholder="Paste refined HTML..." style="width:100%;min-height:60px;padding:6px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-primary);resize:vertical;font-family:var(--mono, monospace);margin-top:6px"></textarea>' +
+            '<button id="ctr-refine-accept" style="width:100%;margin-top:4px;padding:5px;font-size:11px;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer">Accept Refined HTML</button>' +
+          '</div>' +
+        '</div>';
+
+      bindConstructorEvents();
+    }
+
+    function renderSectionList() {
+      var el = $('#ctr-section-list');
+      if (!el) return;
+      if (constructorSections.length === 0) {
+        el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:4px 0">Click a block to start building.</div>';
+        return;
+      }
+      el.innerHTML = constructorSections.map(function(name, i) {
+        return '<div class="ctr-section-item" data-idx="' + i + '" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:2px;border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer">' +
+          '<span style="color:var(--text-muted);font-size:10px;width:16px">' + (i + 1) + '</span>' +
+          '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escape(name.replace(/-/g, ' ')) + '</span>' +
+          '<button class="ctr-dup" data-idx="' + i + '" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:11px;padding:0 2px" title="Duplicate">&#x2398;</button>' +
+          '<button class="ctr-rm" data-idx="' + i + '" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:13px;padding:0 2px" title="Remove">&times;</button>' +
+        '</div>';
+      }).join('');
+
+      // Remove
+      el.querySelectorAll('.ctr-rm').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          constructorSections.splice(parseInt(btn.dataset.idx), 1);
+          renderSectionList();
+          constructorRecompose();
+        });
+      });
+      // Duplicate
+      el.querySelectorAll('.ctr-dup').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          var idx = parseInt(btn.dataset.idx);
+          constructorSections.splice(idx + 1, 0, constructorSections[idx]);
+          renderSectionList();
+          constructorRecompose();
+        });
+      });
+      // Click to select for refinement
+      el.querySelectorAll('.ctr-section-item').forEach(function(item) {
+        item.addEventListener('click', function(e) {
+          if (e.target.closest('.ctr-rm') || e.target.closest('.ctr-dup')) return;
+          var idx = parseInt(item.dataset.idx);
+          el.querySelectorAll('.ctr-section-item').forEach(function(el2) { el2.style.borderColor = ''; });
+          item.style.borderColor = 'var(--accent)';
+          var refinePanel = $('#ctr-refine-panel');
+          if (refinePanel) {
+            refinePanel.style.display = '';
+            refinePanel.dataset.sectionIdx = String(idx);
+            var target = $('#ctr-refine-target');
+            if (target) target.textContent = constructorSections[idx] + ' (section ' + (idx + 1) + ')';
+          }
+        });
+      });
+    }
+
+    function constructorRecompose() {
+      if (constructorSections.length === 0) {
+        constructorSceneId = null;
+        return;
+      }
+      var brandSelect = $('#ctr-brand');
+      var brand = brandSelect ? brandSelect.value : '';
+
+      api('/platform/api/constructor/compose', {
+        blocks: constructorSections,
+        brand: brand || undefined,
+      }).then(function(data) {
+        if (!data.ok) return;
+        constructorSceneId = data.sceneId;
+        // Dispatch event for CanvasKit canvas to load
+        window.dispatchEvent(new CustomEvent('reframe:constructor-composed', {
+          detail: { sceneId: data.sceneId, brandApplied: data.brandApplied },
+        }));
+      }).catch(function() {});
+    }
+
+    function bindConstructorEvents() {
+      // Add block buttons
+      panel.querySelectorAll('.ctr-add-block').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          constructorSections.push(btn.dataset.block);
+          renderSectionList();
+          constructorRecompose();
+        });
+      });
+      // Add HTML section buttons
+      panel.querySelectorAll('.ctr-add-section').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          constructorSections.push(btn.dataset.section);
+          renderSectionList();
+          constructorRecompose();
+        });
+      });
+      // Brand change
+      var brandEl = $('#ctr-brand');
+      if (brandEl) {
+        brandEl.addEventListener('change', function() {
+          if (constructorSections.length > 0) constructorRecompose();
+        });
+      }
+      // Refine: ask agent
+      var askBtn = $('#ctr-refine-ask');
+      if (askBtn) {
+        askBtn.addEventListener('click', function() {
+          var refinePanel = $('#ctr-refine-panel');
+          var idx = parseInt(refinePanel ? refinePanel.dataset.sectionIdx : '-1');
+          var prompt = ($('#ctr-refine-prompt') || {}).value || '';
+          if (idx < 0 || !constructorSceneId || !prompt.trim()) return;
+          askBtn.disabled = true;
+          askBtn.textContent = 'Asking...';
+          api('/platform/api/constructor/refine', {
+            sceneId: constructorSceneId,
+            sectionIndex: idx,
+            prompt: prompt.trim(),
+          }).then(function(data) {
+            var result = $('#ctr-refine-result');
+            if (result) result.textContent = data.ok ? data.agentPrompt.slice(0, 400) + '...' : 'Error: ' + data.error;
+          }).catch(function(e) {
+            var result = $('#ctr-refine-result');
+            if (result) result.textContent = 'Error: ' + e.message;
+          }).finally(function() { askBtn.disabled = false; askBtn.textContent = 'Ask Agent'; });
+        });
+      }
+      // Refine: accept HTML
+      var acceptBtn = $('#ctr-refine-accept');
+      if (acceptBtn) {
+        acceptBtn.addEventListener('click', function() {
+          var refinePanel = $('#ctr-refine-panel');
+          var idx = parseInt(refinePanel ? refinePanel.dataset.sectionIdx : '-1');
+          var html = ($('#ctr-refine-html') || {}).value || '';
+          if (idx < 0 || !constructorSceneId || !html.trim()) return;
+          acceptBtn.disabled = true;
+          acceptBtn.textContent = 'Applying...';
+          api('/platform/api/constructor/refine-accept', {
+            sceneId: constructorSceneId,
+            sectionIndex: idx,
+            refinedHtml: html.trim(),
+          }).then(function(data) {
+            if (data.ok) {
+              var htmlEl = $('#ctr-refine-html');
+              if (htmlEl) htmlEl.value = '';
+              var result = $('#ctr-refine-result');
+              if (result) result.textContent = 'Section refined successfully';
+              // Canvas updates automatically via SSE → StoreSync pull
+            } else {
+              var result = $('#ctr-refine-result');
+              if (result) result.textContent = 'Error: ' + data.error;
+            }
+          }).catch(function(e) {
+            var result = $('#ctr-refine-result');
+            if (result) result.textContent = 'Error: ' + e.message;
+          }).finally(function() { acceptBtn.disabled = false; acceptBtn.textContent = 'Accept Refined HTML'; });
+        });
+      }
+
+      renderSectionList();
+    }
+  }
+
   function initVaryPanel() {
     state.varyPanelLoaded = true;
     fetch('/platform/api/variations/presets')
@@ -5732,8 +5992,8 @@ export const PLATFORM_JS = `
   async function refreshLayersTree() {
     var container = $('[data-layers-tree]');
     if (!container) return;
-    var frame = $('.viewport-frame');
-    var sessionId = frame ? frame.getAttribute('data-session') : null;
+    var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
+    var sessionId = frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
     if (!sessionId) {
       container.innerHTML = '<div class="sidebar-empty">No scene</div>';
       return;
@@ -5848,6 +6108,12 @@ export const PLATFORM_JS = `
         }
         showPropsForNode(nodeId, sessionId);
         postToIframe({ type: 'reframe:highlight', inode: nodeId });
+        // If CanvasKit is active, select the node on the OP canvas too.
+        if (document.getElementById('reframe-viewport')) {
+          window.dispatchEvent(new CustomEvent('reframe:layer-select', {
+            detail: { nodeId: nodeId },
+          }));
+        }
       });
     });
   }
@@ -6154,10 +6420,57 @@ export const PLATFORM_JS = `
           showPropsForNode(detail.nodeId, sessionId);
         }
       });
+      // ── Canvas → Server: structural mutations ──
+
+      window.addEventListener('reframe:node-created', function(evt) {
+        var detail = evt.detail || {};
+        var sessionId = getCanvasSessionId();
+        if (!detail.nodeId || !sessionId) return;
+        api('/platform/api/node/add', {
+          sceneId: sessionId,
+          parentId: detail.parentId,
+          type: detail.type || 'FRAME',
+          name: detail.name || 'Frame',
+        }).catch(function() {});
+        setTimeout(function() { refreshLayersTree(); }, 100);
+      });
+
+      window.addEventListener('reframe:node-deleted', function(evt) {
+        var detail = evt.detail || {};
+        var sessionId = getCanvasSessionId();
+        if (!detail.nodeId || !sessionId) return;
+        api('/platform/api/node/delete', {
+          sceneId: sessionId,
+          nodeId: detail.nodeId,
+        }).catch(function() {});
+        setTimeout(function() { refreshLayersTree(); }, 100);
+      });
+
+      window.addEventListener('reframe:node-reparented', function(evt) {
+        var detail = evt.detail || {};
+        var sessionId = getCanvasSessionId();
+        if (!detail.nodeId || !sessionId) return;
+        api('/platform/api/node/edit', {
+          sceneId: sessionId,
+          nodeId: detail.nodeId,
+          props: { 'parent-id': detail.newParentId },
+        }).catch(function() {});
+        setTimeout(function() { refreshLayersTree(); }, 100);
+      });
+
       // OP canvas is always in "edit mode" — set state so CSS classes work
       state.editMode = true;
       var appEl2 = $('.app');
       if (appEl2) appEl2.classList.add('edit-mode');
+
+      // Initial layers tree load for CanvasKit pages.
+      // Wait a beat for scene hydration to finish before fetching tree.
+      setTimeout(function() { refreshLayersTree(); }, 800);
+
+      // Refresh layers tree on SSE scene changes.
+      window.addEventListener('reframe:graph-changed', function() {
+        setTimeout(function() { refreshLayersTree(); }, 300);
+      });
     } else {
       bindPreviewBridge();
       bindGesturePointerSubstrate();

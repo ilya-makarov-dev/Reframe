@@ -1,28 +1,32 @@
 /**
- * Platform Bootstrap — initializes the CanvasKit interactive viewport.
+ * Platform Bootstrap — CanvasKit viewport + bidirectional INode↔OP sync.
  *
- * Loaded as a <script type="module"> on platform pages.
- * Detects #reframe-viewport canvas, creates ReframeEditorShell,
- * fetches scene data from MCP, and hydrates via GraphBridge.
+ * This is the THIN CANVAS LAYER. It handles:
+ * - CanvasKit init + render loop
+ * - Pointer interaction (drag, resize, create, select)
+ * - Floating toolbar + keyboard shortcuts
+ * - Bidirectional sync via 3 channels:
+ *   A) Canvas→Server: graph emitter → CustomEvents → scripts.ts → Platform API
+ *   B) Server→Canvas: reframe:prop-changed → apply CSS→OP mapping
+ *   C) Full graph: MCPClient SSE → StoreSync pull → loadFromReframeGraph
+ *
+ * ALL UI (layers, properties, constructor) is handled by Platform scripts.ts.
  */
 
 import { createReframeEditor, type ReframeEditorShell } from '../canvas/editor-shell.js';
 import { setupCanvasInteraction } from '../canvas/interaction.js';
 import { setupFileDragDrop } from './file-handler.js';
 import { getContextMenuItems, renderContextMenu, executeContextAction } from './context-menu.js';
-import { renderPropertiesPanel } from '../panels/properties.js';
-import { renderDesignSystemPanel } from '../panels/design-system.js';
-import { renderBlocksPanel } from '../panels/blocks.js';
 import { MCPClient } from '../sync/mcp-client.js';
+import { StoreSync } from '../sync/store-sync.js';
 import { computeAllLayouts } from '@open-pencil/core';
 import { deserializeToGraph } from '@reframe/core';
 
 let shell: ReframeEditorShell | null = null;
+let storeSync: StoreSync | null = null;
 
-/**
- * Initialize the interactive viewport on the platform page.
- * Call this after the page DOM is ready.
- */
+// ─── Boot ────────────────────────────────────────────────
+
 export async function initPlatformViewport(): Promise<ReframeEditorShell | null> {
   const canvas = document.getElementById('reframe-viewport') as HTMLCanvasElement | null;
   if (!canvas) return null;
@@ -32,13 +36,11 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
   const projectScenes = canvas.dataset.projectScenes;
 
   try {
-    // 1. Set canvas buffer size BEFORE creating WebGL surface
+    // 1. Canvas sizing
     const dpr = window.devicePixelRatio || 1;
     canvas.width = container.clientWidth * dpr;
     canvas.height = container.clientHeight * dpr;
-    console.log('[reframe] Canvas sized:', canvas.width, 'x', canvas.height, 'dpr:', dpr);
 
-    // Handle resize
     new ResizeObserver(() => {
       const w = container.clientWidth * dpr;
       const h = container.clientHeight * dpr;
@@ -49,92 +51,122 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
       }
     }).observe(container);
 
-    // 2. Create editor shell (MakeWebGLCanvasSurface binds to current canvas size)
+    // 2. Create editor shell
     shell = await createReframeEditor({
       canvas,
       canvasKitWasmPath: '/platform/vendor/canvaskit/canvaskit.wasm',
       onSelectionChanged: (ids) => {
-        window.dispatchEvent(new CustomEvent('reframe:selection', {
-          detail: { selectedIds: [...ids] },
+        const firstId = [...ids][0] ?? null;
+        window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
+          detail: { nodeId: firstId, selectedIds: [...ids] },
         }));
       },
       onGraphChanged: () => {
         window.dispatchEvent(new CustomEvent('reframe:graph-changed'));
       },
     });
-    console.log('[reframe] Editor shell created');
 
-    // 2b. Load fonts for text rendering
-    try {
-      await (shell.renderer as any).loadFonts();
-      console.log('[reframe] Fonts loaded');
-    } catch (e) {
-      console.warn('[reframe] Font load failed:', e);
-    }
+    try { await (shell.renderer as any).loadFonts(); } catch {}
 
-    // 3. Wire canvas interaction
+    // 3. Canvas interaction
     setupCanvasInteraction(canvas, shell.editor, {
       onSelectionChanged: () => {
-        window.dispatchEvent(new CustomEvent('reframe:selection', {
-          detail: { selectedIds: [...shell!.editor.state.selectedIds] },
+        const ids = [...shell!.editor.state.selectedIds];
+        window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
+          detail: { nodeId: ids[0] ?? null, selectedIds: ids },
         }));
       },
       onContextMenu: (x, y, nodeId) => {
         if (!shell) return;
-        const items = getContextMenuItems(shell.editor, nodeId);
-        showContextMenu(x, y, items);
+        showContextMenu(x, y, getContextMenuItems(shell.editor, nodeId));
       },
     });
 
-    // 4. Wire file drag & drop
     setupFileDragDrop(container, shell);
-
-    // 5. Start render loop
     shell.startRenderLoop();
     canvas.style.display = 'block';
 
-    // 6. Load scene(s) from MCP — use GraphBridge for proper hydration
+    // 4. Determine scene IDs
     const sceneIds = projectScenes
       ? projectScenes.split(',').filter(Boolean)
       : sessionId ? [sessionId] : [];
 
-    console.log('[reframe] Loading scenes:', sceneIds);
+    if (sceneIds.length > 0 && !canvas.dataset.session) {
+      canvas.dataset.session = sceneIds[0];
+    }
 
+    // 5. Create MCPClient with SSE subscription
+    const mcpClient = new MCPClient({
+      onSceneChanged: (sceneId, revision) => {
+        if (storeSync) storeSync.pullFromMCP(sceneId, revision);
+      },
+      onConnectionChanged: (connected) => {
+        console.log('[reframe] SSE:', connected ? 'connected' : 'disconnected');
+      },
+    });
+    mcpClient.connect();
+
+    // 6. Create StoreSync for bidirectional sync (Channel C)
+    storeSync = new StoreSync({ shell, mcpClient, debounceMs: 600 });
+
+    // 7. Initial scene load
     if (sceneIds.length > 0) {
-      const mcpClient = new MCPClient();
-
       for (const sid of sceneIds) {
         try {
-          // Fetch serialized scene from MCP
           const resp = await fetch(`/scenes/${sid}?format=json`);
-          if (!resp.ok) { console.warn('[reframe] Scene fetch failed:', sid, resp.status); continue; }
+          if (!resp.ok) continue;
           const json = await resp.json();
-          console.log('[reframe] Scene', sid, 'fetched, format:', json.root ? 'tree' : 'flat');
-
-          // Deserialize into a reframe SceneGraph
           const rfData = deserializeToGraph(json.root || json);
-          console.log('[reframe] Deserialized:', rfData.rootId);
-
-          // Load into viewport via GraphBridge
           shell.loadFromReframeGraph(rfData.graph, rfData.rootId);
-          console.log('[reframe] Scene loaded via GraphBridge');
         } catch (e) {
           console.error('[reframe] Scene', sid, 'load error:', e);
         }
       }
+
+      // Start sync for the active scene
+      storeSync.startSync(sceneIds[0]);
     }
+
+    // 8. Wire sync channels
+    wireGraphEmitterEvents(shell, storeSync);
+    wirePropChangedHandler(shell, storeSync);
+    wireSelfCausedRevisionHandler(storeSync);
+
+    // 9. Constructor compose → load new scene into canvas
+    window.addEventListener('reframe:constructor-composed', (async (ev: Event) => {
+      const sceneId = (ev as CustomEvent).detail?.sceneId;
+      if (!sceneId || !shell) return;
+      try {
+        const resp = await fetch(`/scenes/${sceneId}?format=json`);
+        if (!resp.ok) return;
+        const json = await resp.json();
+        const rfData = deserializeToGraph(json.root || json);
+        shell.loadFromReframeGraph(rfData.graph, rfData.rootId);
+        // Update session and restart sync
+        const cvs = document.getElementById('reframe-viewport');
+        if (cvs) (cvs as HTMLElement).dataset.session = sceneId;
+        if (storeSync) {
+          storeSync.stopSync();
+          storeSync.startSync(sceneId);
+        }
+        // Refresh layers tree
+        window.dispatchEvent(new CustomEvent('reframe:graph-changed'));
+      } catch (e) {
+        console.error('[reframe] Constructor load error:', e);
+      }
+    }) as EventListener);
+
+    // 10. Wire shell UI (toolbar, keyboard, layer-select)
+    wireShellUI(shell);
 
     // Expose for debugging
     (window as any).__reframeEditor = shell.editor;
     (window as any).__reframeShell = shell;
 
-    // Hide all loading indicators
+    // Hide loading
     document.querySelector('.mode-banner')?.classList.add('hidden');
     (document.querySelector('.mode-banner') as HTMLElement | null)?.style.setProperty('display', 'none');
     document.getElementById('loading')?.classList.add('hidden');
-
-    // 8. Wire shell UI — toolbar, panels, keyboard shortcuts
-    wireShellUI(shell);
 
     console.log('[reframe] CanvasKit viewport active');
     return shell;
@@ -150,12 +182,182 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
   }
 }
 
-/** Get the editor shell (for external panel code). */
-export function getEditorShell(): ReframeEditorShell | null {
-  return shell;
+export function getEditorShell(): ReframeEditorShell | null { return shell; }
+
+// ─── Channel A: OP graph emitter → CustomEvents → scripts.ts → Platform API ──
+
+function wireGraphEmitterEvents(s: ReframeEditorShell, sync: StoreSync) {
+  const emitter = s.editor.graph.emitter;
+
+  emitter.on('node:updated', (id: string, changes: Record<string, any>) => {
+    if (sync.isPulling) return;
+    const node = s.editor.getNode(id);
+    if (!node) return;
+
+    if ('x' in changes || 'y' in changes) {
+      window.dispatchEvent(new CustomEvent('reframe:node-moved', {
+        detail: { nodeId: id, x: node.x, y: node.y },
+      }));
+    }
+    if ('width' in changes || 'height' in changes) {
+      window.dispatchEvent(new CustomEvent('reframe:node-resized', {
+        detail: { nodeId: id, width: node.width, height: node.height, x: node.x, y: node.y },
+      }));
+    }
+  });
+
+  emitter.on('node:created', (node: any) => {
+    if (sync.isPulling) return;
+    window.dispatchEvent(new CustomEvent('reframe:node-created', {
+      detail: { nodeId: node.id, type: node.type, parentId: node.parentId, name: node.name },
+    }));
+  });
+
+  emitter.on('node:deleted', (id: string) => {
+    if (sync.isPulling) return;
+    window.dispatchEvent(new CustomEvent('reframe:node-deleted', {
+      detail: { nodeId: id },
+    }));
+  });
+
+  emitter.on('node:reparented', (nodeId: string, _old: string | null, newParentId: string) => {
+    if (sync.isPulling) return;
+    window.dispatchEvent(new CustomEvent('reframe:node-reparented', {
+      detail: { nodeId, newParentId },
+    }));
+  });
 }
 
-// ── Context menu helper ──
+// ─── Channel B: reframe:prop-changed → OP node update ───
+
+function wirePropChangedHandler(s: ReframeEditorShell, sync: StoreSync) {
+  window.addEventListener('reframe:prop-changed', ((evt: CustomEvent) => {
+    if (sync.isPulling) return;
+    const d = evt.detail || {};
+    if (!d.nodeId || !s) return;
+    const nd = s.editor.getNode(d.nodeId);
+    if (!nd) return;
+
+    const p = d.props || {};
+    // Support single prop format too
+    if (d.prop && d.value !== undefined) p[d.prop] = d.value;
+
+    applyPropsToNode(nd, p);
+
+    try { computeAllLayouts(s.editor.graph); } catch {}
+    s.editor.requestRender();
+  }) as EventListener);
+}
+
+/** Map CSS-named props (from Platform API) to OP SceneNode fields. */
+function applyPropsToNode(nd: any, p: Record<string, any>): void {
+  // Geometry
+  if (p.width != null) nd.width = Number(p.width);
+  if (p.height != null) nd.height = Number(p.height);
+  if (p.x != null) nd.x = Number(p.x);
+  if (p.y != null) nd.y = Number(p.y);
+  if (p.rotation != null) nd.rotation = Number(p.rotation);
+  if (p.opacity != null) nd.opacity = Number(p.opacity);
+  if (p.visible != null) nd.visible = p.visible !== false && p.visible !== 'false';
+
+  // Corner radius
+  if (p['border-radius'] != null) nd.cornerRadius = Number(p['border-radius']);
+  if (p['radius-tl'] != null) { nd.topLeftRadius = Number(p['radius-tl']); nd.independentCorners = true; }
+  if (p['radius-tr'] != null) { nd.topRightRadius = Number(p['radius-tr']); nd.independentCorners = true; }
+  if (p['radius-br'] != null) { nd.bottomRightRadius = Number(p['radius-br']); nd.independentCorners = true; }
+  if (p['radius-bl'] != null) { nd.bottomLeftRadius = Number(p['radius-bl']); nd.independentCorners = true; }
+  if (p['corner-smoothing'] != null) nd.cornerSmoothing = Number(p['corner-smoothing']);
+
+  // Layout
+  if (p.display === 'flex-row') nd.layoutMode = 'HORIZONTAL';
+  else if (p.display === 'flex-col') nd.layoutMode = 'VERTICAL';
+  else if (p.display === 'none-layout') nd.layoutMode = 'NONE';
+  if (p.gap != null) nd.itemSpacing = Number(p.gap);
+  if (p['padding-top'] != null) nd.paddingTop = Number(p['padding-top']);
+  if (p['padding-right'] != null) nd.paddingRight = Number(p['padding-right']);
+  if (p['padding-bottom'] != null) nd.paddingBottom = Number(p['padding-bottom']);
+  if (p['padding-left'] != null) nd.paddingLeft = Number(p['padding-left']);
+  if (p['justify-content']) {
+    const m: Record<string, string> = { 'flex-start': 'MIN', center: 'CENTER', 'flex-end': 'MAX', 'space-between': 'SPACE_BETWEEN' };
+    if (m[p['justify-content']]) nd.primaryAxisAlign = m[p['justify-content']];
+  }
+  if (p['align-items']) {
+    const m: Record<string, string> = { 'flex-start': 'MIN', center: 'CENTER', 'flex-end': 'MAX', stretch: 'STRETCH' };
+    if (m[p['align-items']]) nd.counterAxisAlign = m[p['align-items']];
+  }
+  if (p['main-sizing']) nd.primaryAxisSizing = p['main-sizing'];
+  if (p['cross-sizing']) nd.counterAxisSizing = p['cross-sizing'];
+
+  // Constraints
+  if (p['min-width'] != null) nd.minWidth = Number(p['min-width']);
+  if (p['max-width'] != null) nd.maxWidth = Number(p['max-width']);
+  if (p['min-height'] != null) nd.minHeight = Number(p['min-height']);
+  if (p['max-height'] != null) nd.maxHeight = Number(p['max-height']);
+  if (p['clips-content'] != null) nd.clipsContent = !!p['clips-content'];
+
+  // Typography
+  if (p['font-size'] != null) nd.fontSize = Number(p['font-size']);
+  if (p['font-weight'] != null) nd.fontWeight = Number(p['font-weight']);
+  if (p['font-family']) nd.fontFamily = String(p['font-family']);
+  if (p['line-height'] != null) nd.lineHeight = Number(p['line-height']);
+  if (p['letter-spacing'] != null) nd.letterSpacing = Number(p['letter-spacing']);
+  if (p['text-align']) {
+    const m: Record<string, string> = { left: 'LEFT', center: 'CENTER', right: 'RIGHT', justify: 'JUSTIFIED' };
+    if (m[p['text-align']]) nd.textAlignHorizontal = m[p['text-align']];
+  }
+  if (p['text-content'] != null) nd.text = String(p['text-content']);
+
+  // Fill (background color)
+  if (p.background) {
+    const c = hexToRGBA(String(p.background));
+    if (c) nd.fills = [{ type: 'SOLID', color: c, visible: true, opacity: p['background-opacity'] != null ? Number(p['background-opacity']) : 1 }];
+  }
+  // Text color
+  if (p.color && nd.type === 'TEXT') {
+    const c = hexToRGBA(String(p.color));
+    if (c) nd.fills = [{ type: 'SOLID', color: c, visible: true, opacity: 1 }];
+  }
+
+  // Stroke
+  if (p['border-color']) {
+    const c = hexToRGBA(String(p['border-color']));
+    if (c) {
+      if (nd.strokes?.length > 0) { nd.strokes[0].color = c; }
+      else { nd.strokes = [{ type: 'SOLID', color: c, visible: true, weight: nd.strokeWeight || 1, align: 'INSIDE' }]; }
+    }
+  }
+  if (p['stroke-weight'] != null) {
+    const w = Number(p['stroke-weight']);
+    if (nd.strokes?.length > 0) nd.strokes[0].weight = w;
+  }
+
+  // Grid
+  if (p['grid-col-gap'] != null) nd.gridColumnGap = Number(p['grid-col-gap']);
+  if (p['grid-row-gap'] != null) nd.gridRowGap = Number(p['grid-row-gap']);
+}
+
+function hexToRGBA(hex: string): { r: number; g: number; b: number; a: number } | null {
+  const h = hex.replace('#', '');
+  if (h.length !== 6 && h.length !== 3) return null;
+  const full = h.length === 3 ? h[0]+h[0]+h[1]+h[1]+h[2]+h[2] : h;
+  return {
+    r: parseInt(full.slice(0,2),16)/255,
+    g: parseInt(full.slice(2,4),16)/255,
+    b: parseInt(full.slice(4,6),16)/255,
+    a: 1,
+  };
+}
+
+// ─── Echo suppression bridge ────────────────────────────
+
+function wireSelfCausedRevisionHandler(sync: StoreSync) {
+  window.addEventListener('reframe:self-caused-revision', ((evt: CustomEvent) => {
+    const rev = evt.detail?.revision;
+    if (rev != null) sync.suppressNextPull(rev);
+  }) as EventListener);
+}
+
+// ─── Context menu ────────────────────────────────────────
 
 function showContextMenu(x: number, y: number, items: ReturnType<typeof getContextMenuItems>) {
   document.getElementById('reframe-context-menu')?.remove();
@@ -167,9 +369,7 @@ function showContextMenu(x: number, y: number, items: ReturnType<typeof getConte
 
   div.querySelectorAll<HTMLElement>('[data-action]').forEach(btn => {
     btn.addEventListener('click', () => {
-      if (shell) {
-        executeContextAction(btn.dataset.action!, shell.editor);
-      }
+      if (shell) executeContextAction(btn.dataset.action!, shell.editor);
       div.remove();
     });
   });
@@ -183,7 +383,7 @@ function showContextMenu(x: number, y: number, items: ReturnType<typeof getConte
   setTimeout(() => document.addEventListener('pointerdown', dismiss), 0);
 }
 
-// ── Wire shell UI elements ──
+// ─── Shell UI (canvas-only layer) ────────────────────────
 
 function wireShellUI(s: ReframeEditorShell) {
   const editor = s.editor;
@@ -209,51 +409,22 @@ function wireShellUI(s: ReframeEditorShell) {
   // Theme toggle
   document.getElementById('theme-toggle')?.addEventListener('click', () => {
     const html = document.documentElement;
-    const current = html.getAttribute('data-theme');
-    const next = current === 'dark' ? 'light' : 'dark';
+    const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     html.setAttribute('data-theme', next);
     try { localStorage.setItem('reframe-theme', next); } catch {}
   });
 
-  // Panel tabs — Design ↔ Constructor toggle
-  let activePanel = 'design';
-  const panelTabs = document.querySelectorAll<HTMLElement>('[data-panel]');
-
-  function switchPanel(name: string) {
-    activePanel = name;
-    panelTabs.forEach(t => t.classList.toggle('active', t.dataset.panel === name));
-    refreshPanel();
-  }
-
-  panelTabs.forEach(tab => {
-    tab.addEventListener('click', () => switchPanel(tab.dataset.panel!));
-  });
-
-  // Keyboard: Tab key toggles between Design ↔ Constructor
-  // (only when canvas is focused, not in text inputs)
+  // Canvas keyboard shortcuts
   document.addEventListener('keydown', (e) => {
-    if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
-    if (e.key === ',' || e.key === '<') {
-      e.preventDefault();
-      switchPanel(activePanel === 'design' ? 'constructor' : 'design');
-    }
-    if (e.key === '.' || e.key === '>') {
-      e.preventDefault();
-      switchPanel(activePanel === 'design' ? 'constructor' : 'design');
-    }
-  });
+    const tag = (e.target as HTMLElement).tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-  // Keyboard shortcuts for tools
-  document.addEventListener('keydown', (e) => {
-    // Don't handle if typing in an input
-    if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
-
-    const map: Record<string, string> = {
-      'v': 'SELECT', 'f': 'FRAME', 'r': 'RECTANGLE',
-      'o': 'ELLIPSE', 't': 'TEXT', 'p': 'PEN', 'h': 'HAND',
+    const toolMap: Record<string, string> = {
+      v: 'SELECT', f: 'FRAME', r: 'RECTANGLE',
+      o: 'ELLIPSE', t: 'TEXT', p: 'PEN', h: 'HAND',
     };
-    const tool = map[e.key.toLowerCase()];
-    if (tool) {
+    const tool = toolMap[e.key.toLowerCase()];
+    if (tool && !e.ctrlKey && !e.metaKey) {
       (editor.state as any).activeTool = tool;
       document.querySelectorAll('[data-tool]').forEach(b => {
         b.classList.toggle('active', b.getAttribute('data-tool') === tool);
@@ -261,146 +432,23 @@ function wireShellUI(s: ReframeEditorShell) {
       return;
     }
 
-    // Undo/redo
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
       e.preventDefault();
-      if (e.shiftKey) { editor.redoAction(); } else { editor.undoAction(); }
+      if (e.shiftKey) editor.redoAction(); else editor.undoAction();
       editor.requestRender();
     }
-
-    // Delete
     if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (editor.state.selectedIds.size > 0) {
-        editor.deleteSelected();
-        editor.requestRender();
-      }
+      if (editor.state.selectedIds.size > 0) { editor.deleteSelected(); editor.requestRender(); }
     }
-
-    // Select all
-    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-      e.preventDefault();
-      editor.selectAll();
-      editor.requestRender();
-    }
-
-    // Duplicate
-    if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
-      e.preventDefault();
-      editor.duplicateSelected();
-      editor.requestRender();
-    }
-
-    // Zoom
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') { e.preventDefault(); editor.selectAll(); editor.requestRender(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'd') { e.preventDefault(); editor.duplicateSelected(); editor.requestRender(); }
     if (e.key === '0' && !e.ctrlKey) { editor.zoomToFit(); editor.requestRender(); }
     if (e.key === '1' && !e.ctrlKey) { editor.zoomTo100(); editor.requestRender(); }
   });
 
-  // Export button
-  document.getElementById('btn-export')?.addEventListener('click', () => {
-    // TODO: open export dialog
-    console.log('[reframe] Export requested');
-  });
-
-  // Audit button
-  document.getElementById('btn-audit')?.addEventListener('click', () => {
-    // TODO: run audit and show in panel
-    console.log('[reframe] Audit requested');
-  });
-
-  // ── Layers tree ──
-  function refreshLayers() {
-    const tree = document.getElementById('layer-tree');
-    if (!tree) return;
-    const pageId = editor.state.currentPageId;
-    if (!pageId) { tree.innerHTML = ''; return; }
-
-    const html: string[] = [];
-    const walk = (nodeId: string, depth: number) => {
-      const node = editor.graph.getNode(nodeId);
-      if (!node) return;
-      const isPage = depth === 0;
-      if (isPage) {
-        // Skip page node itself, render children
-        for (const child of editor.graph.getChildren(nodeId)) walk(child.id, depth + 1);
-        return;
-      }
-      const selected = editor.state.selectedIds.has(nodeId);
-      const indent = (depth - 1) * 16;
-      const hasChildren = (node.childIds || []).length > 0;
-      const icon = node.type === 'TEXT' ? 'T' : hasChildren ? '\u25BC' : '\u25A0';
-      html.push(`<div data-layer-id="${node.id}" style="
-        padding: 4px 8px 4px ${8 + indent}px;
-        font-size: 11px;
-        color: ${selected ? 'var(--accent)' : 'var(--text-secondary)'};
-        background: ${selected ? 'rgba(var(--glass-ink), 0.06)' : 'transparent'};
-        cursor: pointer;
-        border-radius: 4px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      ">
-        <span style="font-size:9px;opacity:0.5;width:12px;text-align:center">${icon}</span>
-        <span>${node.name || node.type}</span>
-      </div>`);
-      for (const child of editor.graph.getChildren(nodeId)) walk(child.id, depth + 1);
-    };
-    walk(pageId, 0);
-    tree.innerHTML = html.join('');
-
-    // Click to select
-    tree.querySelectorAll<HTMLElement>('[data-layer-id]').forEach(el => {
-      el.addEventListener('click', () => {
-        const id = el.dataset.layerId!;
-        editor.select([id]);
-        editor.requestRender();
-        refreshLayers();
-        refreshPanel();
-      });
-    });
-  }
-
-  // ── Panel content ──
-  function refreshPanel() {
-    const content = document.getElementById('panel-content');
-    if (!content) return;
-
-    if (activePanel === 'design') {
-      // Design = Figma-style property editor for selected node
-      const ids = [...editor.state.selectedIds];
-      if (ids.length === 0) {
-        content.innerHTML = `<div style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
-          Select a node to edit its properties
-        </div>`;
-        return;
-      }
-      const node = editor.graph.getNode(ids[0]);
-      if (!node) return;
-      const ext = s.bridge.extensions.get(ids[0]) || null;
-      content.innerHTML = renderPropertiesPanel({ node, extension: ext });
-    } else if (activePanel === 'constructor') {
-      // Constructor = Block library + brand/semantic tools
-      content.innerHTML = renderBlocksPanel() +
-        `<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;">` +
-        renderDesignSystemPanel({
-          activeBrand: null,
-          mode: 'light',
-          tokenCount: 0,
-          colorTokens: [],
-          typographyTokens: [],
-          availableBrands: [],
-        }) + `</div>`;
-    }
-  }
-
-  // Update on selection change
-  window.addEventListener('reframe:selection', (() => {
-    refreshLayers();
-    refreshPanel();
+  // Bridge: layers panel click → OP canvas selection
+  window.addEventListener('reframe:layer-select', ((evt: CustomEvent) => {
+    const nodeId = evt.detail?.nodeId;
+    if (nodeId) { editor.select([nodeId]); editor.requestRender(); }
   }) as EventListener);
-
-  // Initial render
-  setTimeout(() => { refreshLayers(); refreshPanel(); }, 100);
 }

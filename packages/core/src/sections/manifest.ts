@@ -182,6 +182,34 @@ export function searchSections(query: string, sectionsDir?: string): SectionEntr
 }
 
 /**
+ * Instantiate an HTML section from the manifest into a SceneGraph.
+ * Uses the same import pipeline as reframe_compile (handles Tailwind automatically).
+ */
+export async function instantiateHtmlSection(
+  nameOrId: string,
+  sectionsDir?: string,
+): Promise<{ graph: import('../engine/scene-graph').SceneGraph; rootId: string } | null> {
+  // Try exact ID first, then bare-name lookup
+  let html = getSectionHtml(nameOrId, sectionsDir);
+  if (!html) {
+    const registry = loadSectionRegistry(sectionsDir);
+    const entry = registry.sections.find(s =>
+      s.id.endsWith('/' + nameOrId) || s.variant === nameOrId
+    );
+    if (entry) html = getSectionHtml(entry.id, sectionsDir);
+  }
+  if (!html) return null;
+
+  const { importFromHtml } = await import('../importers/html.js');
+  const { ensureSceneLayout } = await import('../engine/layout.js');
+
+  const result = await importFromHtml(html, { name: nameOrId });
+  ensureSceneLayout(result.graph, result.rootId);
+
+  return { graph: result.graph, rootId: result.rootId };
+}
+
+/**
  * Reset registry (for testing or after adding new sections).
  */
 export function resetSectionRegistry(): void {

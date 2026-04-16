@@ -175,6 +175,11 @@ export function renderConstructor(data: ConstructorData): string {
       <textarea id="refine-prompt" placeholder="e.g. Make it more technical, add social proof, darker tone..." style="width:100%;min-height:60px;padding:8px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text);resize:vertical;font-family:inherit"></textarea>
       <button id="refine-btn" class="block-btn" style="width:100%;margin-top:6px;padding:6px;font-weight:600;background:var(--accent);color:#fff;border-color:var(--accent)">Ask Agent to Refine</button>
       <div id="refine-result" style="margin-top:8px;font-size:11px;color:var(--text-muted);max-height:120px;overflow-y:auto;white-space:pre-wrap"></div>
+      <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+        <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Paste refined HTML</div>
+        <textarea id="refine-html" placeholder="Paste the agent's refined HTML here..." style="width:100%;min-height:80px;padding:8px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text);resize:vertical;font-family:var(--mono, monospace)"></textarea>
+        <button id="refine-accept-btn" class="block-btn" style="width:100%;margin-top:6px;padding:6px;font-weight:600;background:var(--accent);color:#fff;border-color:var(--accent)">Accept Refined HTML</button>
+      </div>
     </div>
   </div>
 </div>
@@ -336,6 +341,41 @@ export function renderConstructor(data: ConstructorData): string {
     })
     .catch(function(e) { refineResult.textContent = 'Error: ' + e.message; })
     .finally(function() { refineBtn.disabled = false; refineBtn.textContent = 'Ask Agent to Refine'; });
+  });
+
+  // Refine acceptance — paste HTML and apply
+  var refineHtmlEl = document.getElementById('refine-html');
+  var refineAcceptBtn = document.getElementById('refine-accept-btn');
+  refineAcceptBtn.addEventListener('click', function() {
+    var html = refineHtmlEl.value.trim();
+    if (!html || !sceneId || selectedSection < 0) return;
+    refineAcceptBtn.disabled = true;
+    refineAcceptBtn.textContent = 'Applying...';
+
+    fetch('/platform/api/constructor/refine-accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sceneId: sceneId,
+        sectionIndex: selectedSection,
+        refinedHtml: html,
+      }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.ok) {
+        setStatus('Section ' + (selectedSection + 1) + ' refined');
+        // Reload preview iframe
+        var iframe = preview.querySelector('iframe');
+        if (iframe) iframe.src = '/preview/' + sceneId + '?t=' + Date.now();
+        refineHtmlEl.value = '';
+        refineResult.textContent = '';
+      } else {
+        refineResult.textContent = 'Error: ' + data.error;
+      }
+    })
+    .catch(function(e) { refineResult.textContent = 'Error: ' + e.message; })
+    .finally(function() { refineAcceptBtn.disabled = false; refineAcceptBtn.textContent = 'Accept Refined HTML'; });
   });
 
   // Add block buttons (both programmatic blocks and HTML sections)

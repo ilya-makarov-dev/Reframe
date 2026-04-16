@@ -1,20 +1,21 @@
 /**
  * Store Sync — bidirectional sync between editor viewport and MCP server.
  *
- * Direction 1 (AI → Editor):
- *   MCP SSE event → fetchScene() → GraphBridge.fromReframeGraph() → editor.replaceGraph()
+ * Channel C: Full graph sync (fallback for whole-graph replacements).
  *
- * Direction 2 (Editor → MCP):
- *   User edits on canvas → graph.emitter 'node:updated' → debounced pushScene()
+ * Pull (Server → Editor):
+ *   MCP SSE event → pullFromMCP() → fetchScene() → loadFromReframeGraph()
  *
- * Conflict resolution: sessionRevision counter. Editor attaches its known
- * revision on PUT. If server revision is ahead, editor fetches latest first.
+ * Push (Editor → Server):
+ *   graph.emitter events → debounced serializeGraph() → PUT /scenes/:id
+ *
+ * Echo suppression: selfCausedRevisions set prevents re-pulling changes
+ * that we just pushed or that scripts.ts panel edits caused.
  */
 
-import type { SceneGraph as OPSceneGraph } from '@open-pencil/core';
 import { MCPClient } from './mcp-client.js';
-import { GraphBridge } from '../bridge/graph-bridge.js';
 import type { ReframeEditorShell } from '../canvas/editor-shell.js';
+import { serializeGraph } from '@reframe/core';
 
 export interface StoreSyncOptions {
   /** The editor shell to sync. */
@@ -23,8 +24,6 @@ export interface StoreSyncOptions {
   mcpClient: MCPClient;
   /** Debounce interval for pushing changes to MCP (ms). Default: 500. */
   debounceMs?: number;
-  /** Called when sync produces a conflict (server ahead of editor). */
-  onConflict?: (serverRevision: number, editorRevision: number) => void;
 }
 
 export class StoreSync {
@@ -35,7 +34,11 @@ export class StoreSync {
   private currentSceneId: string | null = null;
   private knownRevision = 0;
   private pushing = false;
-  private unsubscribeGraph: (() => void) | null = null;
+  private pulling = false;
+  private unsubscribers: Array<() => void> = [];
+
+  /** Revisions we caused (push or panel edit) — skip pull for these. */
+  private selfCausedRevisions = new Set<number>();
 
   constructor(options: StoreSyncOptions) {
     this.shell = options.shell;
@@ -43,37 +46,32 @@ export class StoreSync {
     this.debounceMs = options.debounceMs ?? 500;
   }
 
-  /** Start syncing a specific scene. */
+  /** Whether we're currently pulling (loading from server). */
+  get isPulling(): boolean {
+    return this.pulling;
+  }
+
+  /** Start syncing a specific scene. Listens to all graph emitter events. */
   startSync(sceneId: string): void {
+    this.stopSync();
     this.currentSceneId = sceneId;
 
-    // Listen for graph mutations from user edits
-    this.unsubscribeGraph = this.shell.editor.graph.emitter.on('node:updated', () => {
-      this.schedulePush();
-    });
+    const emitter = this.shell.editor.graph.emitter;
+    const push = () => this.schedulePush();
 
-    // Also listen for structural changes
-    const unsub2 = this.shell.editor.graph.emitter.on('node:created', () => {
-      this.schedulePush();
-    });
-    const unsub3 = this.shell.editor.graph.emitter.on('node:deleted', () => {
-      this.schedulePush();
-    });
-
-    const origUnsub = this.unsubscribeGraph;
-    this.unsubscribeGraph = () => {
-      origUnsub();
-      unsub2();
-      unsub3();
-    };
+    this.unsubscribers.push(
+      emitter.on('node:updated', push),
+      emitter.on('node:created', push),
+      emitter.on('node:deleted', push),
+      emitter.on('node:reparented', push),
+      emitter.on('node:reordered', push),
+    );
   }
 
   /** Stop syncing. */
   stopSync(): void {
-    if (this.unsubscribeGraph) {
-      this.unsubscribeGraph();
-      this.unsubscribeGraph = null;
-    }
+    for (const unsub of this.unsubscribers) unsub();
+    this.unsubscribers = [];
     if (this.pushTimer) {
       clearTimeout(this.pushTimer);
       this.pushTimer = null;
@@ -82,34 +80,52 @@ export class StoreSync {
   }
 
   /**
-   * Pull latest scene from MCP and load into editor.
-   * Called when SSE reports scene:session-changed.
+   * Mark a revision as self-caused (skip pull for it).
+   * Called by platform-bootstrap.ts when scripts.ts panel edits cause a revision bump.
    */
-  async pullFromMCP(sceneId: string): Promise<void> {
-    if (this.pushing) return; // Don't pull while we're pushing
+  suppressNextPull(revision: number): void {
+    this.selfCausedRevisions.add(revision);
+    // Auto-clean after 10s to prevent memory leak from missed SSE events
+    setTimeout(() => this.selfCausedRevisions.delete(revision), 10_000);
+  }
 
+  /**
+   * Pull latest scene from MCP and load into editor.
+   * Called when SSE reports scene:session-changed from an external source.
+   */
+  async pullFromMCP(sceneId: string, revision?: number): Promise<void> {
+    // Skip if we caused this revision (echo suppression)
+    if (revision != null && this.selfCausedRevisions.has(revision)) {
+      this.selfCausedRevisions.delete(revision);
+      return;
+    }
+
+    // Don't pull while we're pushing
+    if (this.pushing) return;
+
+    this.pulling = true;
     try {
       const data = await this.mcpClient.fetchScene(sceneId);
       if (!data) return;
 
-      // Update known revision
       if (data.revision != null) {
         this.knownRevision = data.revision;
       }
 
-      // Convert server data → OP graph via bridge
-      // The server returns a serialized SceneGraph; we need to hydrate it
-      // into an OP SceneGraph and load into editor
       this.shell.loadFromReframeGraph(data.graph, data.rootId);
       this.currentSceneId = sceneId;
     } catch (err) {
       console.error('[StoreSync] Pull failed:', err);
+    } finally {
+      this.pulling = false;
     }
   }
 
   // ─── Internal ──────────────────────────────────────────────
 
   private schedulePush(): void {
+    // Don't push back changes we just pulled
+    if (this.pulling) return;
     if (this.pushTimer) clearTimeout(this.pushTimer);
     this.pushTimer = setTimeout(() => this.doPush(), this.debounceMs);
   }
@@ -119,22 +135,22 @@ export class StoreSync {
     this.pushing = true;
 
     try {
-      // Convert current editor graph → serializable format
       const { graph, rootId } = this.shell.toReframeGraph();
 
-      // Serialize graph for transport
-      const nodesObj: Record<string, any> = {};
-      for (const node of graph.getAllNodes()) {
-        nodesObj[node.id] = node;
-      }
+      // Serialize to the SceneJSON format the server expects
+      const envelope = serializeGraph(graph, rootId);
 
-      await this.mcpClient.pushScene(this.currentSceneId, {
-        graph: { nodes: nodesObj },
-        rootId,
-        revision: this.knownRevision,
+      const result = await this.mcpClient.pushScene(this.currentSceneId, {
+        root: envelope.root,
+        version: envelope.version,
       });
 
-      this.knownRevision++;
+      if (result.ok && result.revision != null) {
+        this.knownRevision = result.revision;
+        // Mark our own revision so we skip the SSE echo
+        this.selfCausedRevisions.add(result.revision);
+        setTimeout(() => this.selfCausedRevisions.delete(result.revision!), 10_000);
+      }
     } catch (err) {
       console.error('[StoreSync] Push failed:', err);
     } finally {
