@@ -81,7 +81,7 @@ export function renderEditorShell(options: {
     #app {
       display: grid;
       grid-template-rows: 48px 1fr;
-      grid-template-columns: 220px 1fr 260px;
+      grid-template-columns: 220px 1fr 320px;
       grid-template-areas: "header header header" "sidebar canvas panel";
       height: 100vh;
     }
@@ -314,6 +314,10 @@ export function renderEditorShell(options: {
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2v8M5 5v5a3 3 0 006 0V5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         </button>
         <div class="tb-sep"></div>
+        <button class="tb" id="btn-block-palette" title="Insert section (\u2318P)">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <div class="tb-sep"></div>
         <button class="tb" id="btn-undo" title="Undo (Ctrl+Z)">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5 6L2 8.5 5 11M2.5 8.5H11a3 3 0 010 6H9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -324,39 +328,15 @@ export function renderEditorShell(options: {
     </main>
 
     <aside id="panel">
-      <div class="right-tabs" style="display:flex;align-items:center;border-bottom:1px solid var(--border);">
-        <button class="right-tab active" data-tab="design" style="flex:1">Design</button>
-        <button class="right-tab" data-tab="constructor" style="flex:1">Constructor</button>
-        <button class="right-tab" data-tab="agent" style="flex:1;display:flex;align-items:center;justify-content:center;gap:5px">
-          <span data-agent-status-dot style="width:6px;height:6px;border-radius:50%;background:#888"></span>
-          Agent
-        </button>
-      </div>
-      <div data-panel="design" style="display:block;flex:1;overflow-y:auto;padding:0 12px;">
+      <!-- Single always-visible Properties pane. Right-panel tabs are gone:
+           Agent moved to a floating prompt (right-click on canvas / Cmd+K),
+           Constructor will return as a floating block library later. The
+           panel content is updated by scripts.ts on canvas-select events
+           (showPropsForNode). data-panel="design" + class .properties is
+           kept so existing scripts.ts selectors still resolve. -->
+      <div data-panel="design" class="properties" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:0 12px;min-width:0;">
         <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
           Select a node to inspect
-        </div>
-      </div>
-      <div data-panel="constructor" style="display:none;flex:1;flex-direction:column;overflow-y:auto;padding:12px;">
-        <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
-          Constructor
-        </div>
-      </div>
-      <div data-panel="agent" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
-        <div data-agent-banner style="display:none;padding:8px 12px;font-size:11px;background:var(--surface-elevated);color:var(--text-muted);border-bottom:1px solid var(--border)"></div>
-        <div data-agent-log style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;font-size:12px;line-height:1.45">
-          <div class="agent-empty" style="color:var(--text-muted);text-align:center;padding:40px 10px;">
-            Ask the agent to design, refine, or audit anything.<br><br>
-            Try: <em>"make a hero section in the loaded brand"</em>
-          </div>
-        </div>
-        <div style="padding:8px;border-top:1px solid var(--border);background:var(--surface-elevated)">
-          <textarea data-agent-input placeholder="Describe what you want..." rows="2" style="width:100%;padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text-primary);resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>
-          <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
-            <button data-agent-send style="flex:1;padding:6px;font-size:12px;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer">Send</button>
-            <button data-agent-cancel style="display:none;padding:6px 10px;font-size:12px;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;cursor:pointer">Stop</button>
-            <button data-agent-clear title="Clear conversation" style="padding:6px 8px;font-size:11px;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;cursor:pointer">Clear</button>
-          </div>
         </div>
       </div>
     </aside>

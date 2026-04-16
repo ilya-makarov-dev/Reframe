@@ -283,6 +283,16 @@ function cssPropsToNodePartial(edits: Record<string, any>): Record<string, any> 
       case 'height':        partial.height = Number(value); break;
       case 'x':             partial.x = Number(value); partial.layoutPositioning = 'ABSOLUTE'; break;
       case 'y':             partial.y = Number(value); partial.layoutPositioning = 'ABSOLUTE'; break;
+      // Layout primitives used by the "Detach" button. Without these
+      // cases the server silently dropped these edits, so the browser's
+      // OP graph kept the old AUTO layoutMode even after detach →
+      // Yoga kept overriding x/y and drag felt dead.
+      case 'layoutPositioning': partial.layoutPositioning = String(value); break;
+      case 'primaryAxisSizing': partial.primaryAxisSizing = String(value); break;
+      case 'counterAxisSizing': partial.counterAxisSizing = String(value); break;
+      case 'layoutAlignSelf':   partial.layoutAlignSelf = String(value); break;
+      case 'layoutGrow':        partial.layoutGrow = Number(value); break;
+      case 'layoutMode':        partial.layoutMode = String(value); break;
       case 'gap':           partial.itemSpacing = Number(value); break;
       case 'padding-top':   partial.paddingTop = Number(value); break;
       case 'padding-right': partial.paddingRight = Number(value); break;

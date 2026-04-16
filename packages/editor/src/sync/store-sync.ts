@@ -15,7 +15,7 @@
 
 import { MCPClient } from './mcp-client.js';
 import type { ReframeEditorShell } from '../canvas/editor-shell.js';
-import { serializeGraph } from '@reframe/core';
+import { serializeGraph, deserializeToGraph } from '@reframe/core';
 
 export interface StoreSyncOptions {
   /** The editor shell to sync. */
@@ -104,6 +104,15 @@ export class StoreSync {
     if (this.pushing) return;
 
     this.pulling = true;
+    // Set a window-global suppression flag so scripts.ts canvas listeners
+    // (reframe:node-created / -moved / -resized / -deleted / -reparented)
+    // skip their POST /api/node/add|edit|delete persistence calls during
+    // pull. Without this, every pull → loadFromReframeGraph rebuilds the
+    // OP graph which fires "created" events for each newly-instantiated
+    // node — those events POST `add` to a server that already has the
+    // nodes, returning 404 and producing log spam (and worse: real edits
+    // racing the rebuild get clobbered).
+    (window as any).__reframeSyncing = true;
     try {
       const data = await this.mcpClient.fetchScene(sceneId);
       if (!data) return;
@@ -112,12 +121,24 @@ export class StoreSync {
         this.knownRevision = data.revision;
       }
 
-      this.shell.loadFromReframeGraph(data.graph, data.rootId);
+      // /scenes/:id?format=json returns a SERIALIZED tree (plain JSON),
+      // not a SceneGraph instance. We MUST deserialize before passing
+      // to loadFromReframeGraph — otherwise GraphBridge.fromReframeGraph
+      // calls .getNode on undefined and the whole pull-on-SSE flow
+      // throws on every scene mutation.
+      const rfData = deserializeToGraph(data.root || data);
+      if (!rfData || !rfData.graph) return;
+
+      this.shell.loadFromReframeGraph(rfData.graph, rfData.rootId);
       this.currentSceneId = sceneId;
     } catch (err) {
       console.error('[StoreSync] Pull failed:', err);
     } finally {
       this.pulling = false;
+      // Wider window: late OP layout/text-shaping events can fire 1-2s
+      // after rebuild. First real user pointer event will clear earlier
+      // (see canvas pointerdown listener in platform-bootstrap).
+      setTimeout(() => { (window as any).__reframeSyncing = false; }, 2000);
     }
   }
 

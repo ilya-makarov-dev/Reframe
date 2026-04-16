@@ -31,6 +31,11 @@ export function setupCanvasInteraction(
   type DragState =
     | null
     | { kind: 'move'; startX: number; startY: number; originals: Map<string, { x: number; y: number }> }
+    // Drag-to-reorder inside auto-layout parent. Figma-style: children
+    // of a flex container can't be free-moved (Yoga overrides x/y on
+    // every layout pass) — instead, drag computes a new insertion
+    // index among siblings and commits via reorderInAutoLayout on up.
+    | { kind: 'reorder'; startX: number; startY: number; draggedId: string; parentId: string; direction: 'row' | 'col'; originalIndex: number; currentIndex: number }
     | { kind: 'marquee'; startX: number; startY: number }
     | { kind: 'create'; tool: string; startX: number; startY: number }
     | { kind: 'pan'; startX: number; startY: number; startPanX: number; startPanY: number };
@@ -115,14 +120,49 @@ export function setupCanvasInteraction(
           callbacks.onSelectionChanged?.();
         }
 
-        // Start drag-to-move
-        const originals = new Map<string, { x: number; y: number }>();
-        for (const id of editor.state.selectedIds) {
-          const node = editor.getNode(id);
-          if (node) originals.set(id, { x: node.x, y: node.y });
+        // Detect the dragged node's parent layout mode. If the parent is
+        // a flex container (layoutMode HORIZONTAL or VERTICAL), a free
+        // x/y drag does nothing visible (Yoga overrides positions on
+        // every layout pass). Switch into REORDER mode: during pointermove
+        // we compute a new insertion index among siblings and commit on
+        // pointerup via editor.reorderInAutoLayout. Same UX as Figma.
+        const hitNode = editor.getNode(hit.id);
+        const parent = hitNode?.parentId ? editor.getNode(hitNode.parentId) : null;
+        const parentLayoutMode = (parent as any)?.layoutMode;
+        // Only enter reorder mode when there are OTHER siblings to
+        // reorder against AND the user is holding Alt. Otherwise fall
+        // through to free move. Reason: when a frame has no siblings
+        // (Hero alone inside Page), reorder is a no-op and the user
+        // expects "drag" to actually move the frame. Free move in flex
+        // parents commits a detach-from-layout on pointerup (Figma:
+        // Alt+drag does this explicitly; plain drag in a 1-child parent
+        // is essentially "I want to move this thing").
+        const isFlex = parentLayoutMode === 'HORIZONTAL' || parentLayoutMode === 'VERTICAL';
+        const siblingCount = parent ? parent.childIds.length : 0;
+        const canReorder = isFlex && siblingCount > 1 && e.altKey;
+        if (canReorder && parent && hitNode) {
+          const originalIndex = parent.childIds.indexOf(hit.id);
+          drag = {
+            kind: 'reorder',
+            startX: cx,
+            startY: cy,
+            draggedId: hit.id,
+            parentId: parent.id,
+            direction: parentLayoutMode === 'HORIZONTAL' ? 'row' : 'col',
+            originalIndex,
+            currentIndex: originalIndex,
+          };
+          canvas.setPointerCapture(e.pointerId);
+        } else {
+          // Free-move drag — parent has no auto-layout constraint.
+          const originals = new Map<string, { x: number; y: number }>();
+          for (const id of editor.state.selectedIds) {
+            const node = editor.getNode(id);
+            if (node) originals.set(id, { x: node.x, y: node.y });
+          }
+          drag = { kind: 'move', startX: cx, startY: cy, originals };
+          canvas.setPointerCapture(e.pointerId);
         }
-        drag = { kind: 'move', startX: cx, startY: cy, originals };
-        canvas.setPointerCapture(e.pointerId);
       } else {
         // Click on empty space → start marquee
         if (!e.shiftKey) {
@@ -159,11 +199,51 @@ export function setupCanvasInteraction(
       return;
     }
 
+    if (drag.kind === 'reorder') {
+      // Compute a new insertion index by walking siblings and finding
+      // the first one whose midpoint is past the pointer along the
+      // flex axis. This is cheap — O(siblings) per pointermove.
+      const parent = editor.getNode(drag.parentId);
+      if (!parent) return;
+      const siblings = parent.childIds
+        .filter((id) => id !== drag.draggedId)
+        .map((id) => editor.getNode(id))
+        .filter((n): n is NonNullable<typeof n> => !!n);
+      let newIndex = siblings.length; // default: append to end
+      const p = drag.direction === 'row' ? cx : cy;
+      for (let i = 0; i < siblings.length; i++) {
+        const n = siblings[i];
+        const mid = drag.direction === 'row'
+          ? n.x + n.width / 2
+          : n.y + n.height / 2;
+        if (p < mid) { newIndex = i; break; }
+      }
+      // Apply reorder live if index changed so user sees siblings shift.
+      if (newIndex !== drag.currentIndex) {
+        drag.currentIndex = newIndex;
+        try {
+          (editor as any).reorderInAutoLayout?.(drag.draggedId, drag.parentId, newIndex);
+          editor.requestRender();
+        } catch { /* reorder-mid-drag failure is non-fatal */ }
+      }
+      return;
+    }
+
     if (drag.kind === 'move') {
       const dx = cx - drag.startX;
       const dy = cy - drag.startY;
 
-      // Move all selected nodes
+      // Move all selected nodes by delta. For nodes in flex parents
+      // Yoga will revert x/y on next layout pass — that's correct
+      // Figma-like behavior (flex children are NOT free-movable).
+      // To free-move, user either:
+      //   (a) changes parent's layoutMode to NONE via Layout panel, OR
+      //   (b) holds ALT while dragging → reorder mode (handled in
+      //       onPointerDown, kind='reorder').
+      // Auto-detaching (setting layoutPositioning=ABSOLUTE) broke
+      // children's layout chain when applied to nested text/buttons,
+      // so we don't do it. Drag always just writes x/y; Yoga honors
+      // when parent allows, reverts when it doesn't.
       for (const [id, orig] of drag.originals) {
         editor.updateNode(id, { x: orig.x + dx, y: orig.y + dy });
       }
@@ -236,6 +316,16 @@ export function setupCanvasInteraction(
       editor.commitMove(drag.originals);
       editor.setSnapGuides([]);
       callbacks.onGraphChanged?.();
+    }
+
+    if (drag.kind === 'reorder') {
+      // If index actually changed, the intermediate reorderInAutoLayout
+      // calls during pointermove already mutated the graph. We just
+      // need to fire onGraphChanged so downstream persistence (StoreSync
+      // debounced PUT /scenes/:id) picks up the new childIds order.
+      if (drag.currentIndex !== drag.originalIndex) {
+        callbacks.onGraphChanged?.();
+      }
     }
 
     if (drag.kind === 'marquee') {

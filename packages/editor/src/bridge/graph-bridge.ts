@@ -34,6 +34,26 @@ export class GraphBridge {
   readonly extensions = new Map<string, ReframeExtension>();
 
   /**
+   * Translation table OP-node-id → reframe-node-id. Needed because OP's
+   * `createNode` ignores `overrides.id` and assigns its own internal id
+   * (createDefaultNode → generateId). The bridge writes both the OP id
+   * (returned from createNode) and the original reframe id into this
+   * map, so the platform layer can translate canvas-selection events
+   * (which carry OP ids) into the reframe ids the server stores under.
+   *
+   * Without this, every Properties-panel fetch (`/api/node/get?nodeId=X`)
+   * returns 404 because the OP id `0:309` doesn't exist on the server.
+   */
+  readonly opToReframeId = new Map<string, string>();
+  readonly reframeToOpId = new Map<string, string>();
+
+  /** Translate an OP-internal id to its reframe SceneGraph counterpart. */
+  toReframeId(opId: string | null | undefined): string | null {
+    if (!opId) return null;
+    return this.opToReframeId.get(opId) ?? opId;
+  }
+
+  /**
    * Convert an OpenPencil SceneGraph + extensions → reframe SceneGraph.
    * Used when running reframe engine operations (audit, export, resize).
    */
@@ -194,8 +214,19 @@ export class GraphBridge {
     const opGraph = new OPSceneGraph();
     const page = opGraph.addPage('Page 1');
 
-    // Clear old extensions for this conversion
+    // Clear old translation tables for this conversion. Selection events
+    // dispatched in OP-id space rely on these to route back to reframe.
     this.extensions.clear();
+    this.opToReframeId.clear();
+    this.reframeToOpId.clear();
+
+    // Map the OP page wrapper to the reframe root (typically CANVAS).
+    // Without this, clicks landing on the page-background or empty
+    // scenes (where OP has only the auto-page wrapper) dispatch an
+    // OP-only id that has no server counterpart → 404 on every
+    // /api/node/get call.
+    this.opToReframeId.set(page.id, rfRootId);
+    this.reframeToOpId.set(rfRootId, page.id);
 
     const visited = new Set<string>();
     const copyNode = (rfNode: RFSceneNode, opParentId: string) => {
@@ -305,9 +336,19 @@ export class GraphBridge {
         strokesIncludedInLayout: rfNode.strokesIncludedInLayout,
       };
 
-      opGraph.createNode(rfNode.type as any, opParentId, overrides);
+      // OP's createDefaultNode spreads ...overrides last, so overrides.id
+      // DOES win — opNode.id === rfNode.id in normal flow. We still
+      // record both directions in case OP ever changes that contract OR
+      // for nodes OP creates internally without bridge involvement
+      // (e.g. the auto-added page wrapper).
+      const opNode = opGraph.createNode(rfNode.type as any, opParentId, overrides);
+      if (opNode) {
+        this.opToReframeId.set(opNode.id, rfNode.id);
+        this.reframeToOpId.set(rfNode.id, opNode.id);
+      }
 
-      // Recurse children
+      // Recurse children — original used rfNode.id which only worked
+      // because overrides.id wins. Keep that behavior.
       const rfChildren = rfGraph.getChildren(rfNode.id);
       for (const child of rfChildren) {
         copyNode(child, rfNode.id);

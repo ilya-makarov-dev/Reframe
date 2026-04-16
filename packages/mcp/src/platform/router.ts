@@ -248,7 +248,13 @@ export default async function(o){
         pathname === '/platform/api/scene/tree' ||
         pathname === '/platform/api/project/health' ||
         pathname === '/platform/api/publish-shell' ||
-        pathname === '/platform/api/import') {
+        pathname === '/platform/api/import' ||
+        // Tokens endpoint (used by Properties color popover for brand-aware
+        // chips). Defined in api/node-edit.ts but was missing from the
+        // router whitelist → fell through to "unknown api route".
+        pathname.startsWith('/platform/api/tokens/') ||
+        pathname === '/platform/api/aesthetic' ||
+        pathname.startsWith('/platform/api/aesthetic/')) {
       return handleNodeEditApi(req, res, ctx);
     }
     // Gesture + annotations endpoints handled by the gesture module.

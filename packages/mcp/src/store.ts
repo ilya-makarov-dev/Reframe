@@ -518,3 +518,97 @@ export function loadProjectScenes(projectDir: string): number {
     return 0;
   }
 }
+
+/**
+ * Re-sync scenes from disk into the session store.
+ *
+ * Used after the agent subprocess finishes — the spawned claude's MCP
+ * runs in its own process with its own in-memory store, but persists
+ * scene mutations to .reframe/scenes/*.scene.json via autoSaveToProject.
+ * This sidecar's in-memory copy is stale until we re-read the disk
+ * version. Calling this after a spawn-end reads each scene file, swaps
+ * the graph in place for matching slugs (so session ids stay stable
+ * and the UI's open canvas keeps working), and emits a
+ * scene:session-changed event so the editor pulls the new state.
+ *
+ * Returns the list of session ids whose graphs changed.
+ */
+export function refreshScenesFromDisk(projectDir: string): string[] {
+  const changed: string[] = [];
+  try {
+    const loaded = coreProjectIo().loadAllScenes(projectDir) as Array<{
+      graph: SceneGraph;
+      rootId: string;
+      timeline?: ITimeline;
+      entry: {
+        slug?: string;
+        id: string;
+        name: string;
+        group?: string;
+        source?: string;
+        brand?: string;
+        brandHash?: string;
+      };
+    }>;
+
+    for (const { graph, rootId, timeline, entry } of loaded) {
+      const slug = entry.slug ?? entry.id;
+      const root = graph.getNode(rootId);
+      if (!root) continue;
+      const nodeCount = countNodes(graph, rootId);
+
+      const existingId = slugIndex.get(slug);
+      if (existingId) {
+        // Update in place — keep session id stable for any open viewports.
+        const existing = scenes.get(existingId);
+        if (!existing) continue;
+        existing.graph = graph;
+        existing.rootId = rootId;
+        existing.name = entry.name;
+        existing.width = Math.round(root.width);
+        existing.height = Math.round(root.height);
+        existing.nodeCount = nodeCount;
+        existing.timeline = timeline;
+        existing.sessionRevision = (existing.sessionRevision ?? 0) + 1;
+        if (entry.brand !== undefined) existing.brand = entry.brand;
+        if (entry.brandHash !== undefined) existing.brandHash = entry.brandHash;
+
+        emitProjectEvent({
+          type: 'scene:session-changed',
+          sceneId: existingId,
+          revision: existing.sessionRevision,
+        });
+        changed.push(existingId);
+      } else {
+        // New scene that the agent created in its subprocess — adopt it.
+        const sessionId = `s${nextId++}`;
+        const stored: StoredScene = {
+          graph, rootId,
+          name: entry.name,
+          slug,
+          width: Math.round(root.width),
+          height: Math.round(root.height),
+          nodeCount,
+          createdAt: Date.now(),
+          timeline,
+          sessionRevision: 1,
+          group: entry.group,
+          sourceFile: entry.source,
+          brand: entry.brand,
+          brandHash: entry.brandHash,
+        };
+        scenes.set(sessionId, stored);
+        slugIndex.set(slug, sessionId);
+        emitProjectEvent({
+          type: 'scene:saved',
+          sceneId: sessionId,
+          entry: { slug, id: sessionId, name: entry.name } as any,
+        });
+        changed.push(sessionId);
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+  return changed;
+}
