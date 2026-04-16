@@ -23,6 +23,9 @@ import { join } from 'path';
 export interface ContextOptions {
   /** Currently selected scene in the UI (session id like "s2" or slug). */
   activeSceneId?: string;
+  /** Optional selected node id — when present we inline its props so the
+   * agent can edit directly without calling reframe_inspect. */
+  activeNodeId?: string | null;
   /** When true, include a short pipeline reminder. Default true. */
   includePipelineHint?: boolean;
 }
@@ -38,14 +41,29 @@ export function buildAgentPreamble(opts: ContextOptions = {}): string {
   lines.push('');
 
   // ── Active scene ──
+  let activeScene: ReturnType<typeof getScene> = undefined;
   if (opts.activeSceneId) {
-    const scene = getScene(opts.activeSceneId);
-    if (scene) {
+    activeScene = getScene(opts.activeSceneId);
+    if (activeScene) {
       lines.push(
-        `Active scene: id=${getSceneId(scene)} slug="${scene.slug}" name="${scene.name}" ` +
-        `size=${scene.width}×${scene.height} nodes=${scene.nodeCount}` +
-        (scene.brand ? ` brand=${scene.brand}` : ''),
+        `Active scene: id=${getSceneId(activeScene)} slug="${activeScene.slug}" name="${activeScene.name}" ` +
+        `size=${activeScene.width}×${activeScene.height} nodes=${activeScene.nodeCount}` +
+        (activeScene.brand ? ` brand=${activeScene.brand}` : ''),
       );
+    }
+  }
+
+  // ── Selected node snapshot ──
+  // The single biggest latency win: if the user right-clicked a node,
+  // give the agent that node's properties directly so it can call
+  // reframe_edit immediately, skipping the expensive reframe_inspect
+  // round-trip that otherwise wastes 2-5 seconds on cold MCP boot.
+  if (opts.activeNodeId && activeScene?.graph) {
+    const snapshot = describeNode(activeScene.graph, opts.activeNodeId);
+    if (snapshot) {
+      lines.push('');
+      lines.push('Selected node (apply edits HERE — no need to inspect):');
+      lines.push(snapshot);
     }
   }
 
@@ -61,25 +79,34 @@ export function buildAgentPreamble(opts: ContextOptions = {}): string {
     }
   }
 
-  // ── Active brand from project manifest ──
-  const activeBrand = readActiveBrand();
-  if (activeBrand) {
-    lines.push(`Active brand: ${activeBrand} (use it via reframe_design extract → reframe_compile)`);
+  // ── Active brand: include name + first-page summary of DESIGN.md ──
+  // The agent doesn't need to call reframe_design just to know what
+  // brand is active. Pull the first ~600 chars of DESIGN.md (usually
+  // covers Visual Atmosphere + start of Color Palette) inline.
+  const brand = readActiveBrand();
+  if (brand) {
+    lines.push('');
+    lines.push(`Active brand: ${brand}`);
+    const brandSummary = readBrandSummary(brand);
+    if (brandSummary) {
+      lines.push('Brand summary (top of DESIGN.md, use these values):');
+      lines.push('  ' + brandSummary.split('\n').join('\n  '));
+    }
   }
 
   // ── Pipeline reminder ──
   if (opts.includePipelineHint !== false) {
     lines.push('');
-    lines.push('Pipeline (use the reframe MCP tools available to you):');
-    lines.push('  - reframe_inspect → review the active scene tree + audit issues');
-    lines.push('  - reframe_compile → write fresh HTML for a NEW design');
-    lines.push('  - reframe_edit    → tweak nodes on existing scene (single ops or full HTML rewrite via edit op "update")');
-    lines.push('  - reframe_export  → produce html/react/svg/png/pdf');
+    lines.push('SPEED RULES — you are inside an interactive UI, the user is waiting:');
+    lines.push('  1. DO NOT call reframe_inspect first. Scene context is already above.');
+    lines.push('  2. For visual tweaks (color/spacing/text/style) — go DIRECTLY to reframe_edit with op "update".');
+    lines.push('  3. For new sections/layouts — go DIRECTLY to reframe_compile with fresh HTML.');
+    lines.push('  4. ONE tool call when possible. Two only if absolutely required.');
+    lines.push('  5. NO long explanations. One short sentence of confirmation max.');
+    lines.push('  6. NO TodoWrite for trivial single-change tasks.');
     lines.push('');
-    lines.push('When the user asks for a small visual change, prefer reframe_edit on the active scene.');
-    lines.push('When they describe a new layout or section, write fresh HTML and reframe_compile.');
-    lines.push('Always inspect first if you do not already know the structure.');
-    lines.push('Be concise in your text replies — the user sees your tool calls live.');
+    lines.push('Tools (you have these via MCP):');
+    lines.push('  reframe_compile · reframe_edit · reframe_inspect · reframe_export');
   }
 
   lines.push('');
@@ -103,6 +130,64 @@ function getSceneId(stored: { graph: any; rootId: string }): string {
   return '?';
 }
 
+/**
+ * Build a compact one-block snapshot of a node so the agent can edit
+ * it directly. Includes type, name, dimensions, fills (top-level),
+ * text content (truncated), and direct children count. Skips heavy
+ * fields (full strokes, effects, full subtree) — those are inferable
+ * if the agent actually needs them via reframe_inspect, but for 90%
+ * of edits this snapshot is enough to skip inspect entirely.
+ */
+function describeNode(graph: any, nodeId: string): string | null {
+  try {
+    const n = graph.getNode?.(nodeId);
+    if (!n) return null;
+    const lines: string[] = [];
+    lines.push(`  id: ${nodeId}`);
+    lines.push(`  type: ${n.type}${n.semanticRole ? ` (role: ${n.semanticRole})` : ''}`);
+    if (n.name) lines.push(`  name: "${String(n.name).slice(0, 64)}"`);
+    if (typeof n.width === 'number' && typeof n.height === 'number') {
+      lines.push(`  size: ${Math.round(n.width)}×${Math.round(n.height)}`);
+    }
+    if (Array.isArray(n.fills) && n.fills.length > 0) {
+      const summary = n.fills
+        .slice(0, 2)
+        .map((f: any) => describePaint(f))
+        .filter(Boolean)
+        .join(', ');
+      if (summary) lines.push(`  fills: [${summary}]`);
+    }
+    if (typeof n.cornerRadius === 'number' && n.cornerRadius > 0) {
+      lines.push(`  cornerRadius: ${n.cornerRadius}`);
+    }
+    if (n.type === 'TEXT' && typeof n.characters === 'string') {
+      const text = n.characters.slice(0, 80);
+      lines.push(`  text: "${text}${n.characters.length > 80 ? '\u2026' : ''}"`);
+      if (n.fontSize) lines.push(`  fontSize: ${n.fontSize}${n.fontWeight ? ` weight=${n.fontWeight}` : ''}`);
+    }
+    if (Array.isArray(n.childIds) && n.childIds.length > 0) {
+      lines.push(`  children: ${n.childIds.length}`);
+    }
+    return lines.join('\n');
+  } catch {
+    return null;
+  }
+}
+
+function describePaint(p: any): string | null {
+  if (!p) return null;
+  if (p.type === 'SOLID' && p.color) {
+    const { r, g, b, a } = p.color;
+    if ([r, g, b].every((v) => typeof v === 'number')) {
+      const hex = '#' + [r, g, b].map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+      return a !== undefined && a < 1 ? `${hex} α=${a.toFixed(2)}` : hex;
+    }
+  }
+  if (p.type === 'GRADIENT_LINEAR' || p.type === 'GRADIENT_RADIAL') return p.type.toLowerCase();
+  if (p.type === 'IMAGE') return 'image';
+  return p.type ?? null;
+}
+
 function readActiveBrand(): string | null {
   try {
     const manifestPath = join(getWorkspaceRoot(), '.reframe', 'project.json');
@@ -112,4 +197,31 @@ function readActiveBrand(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Pull the first ~600 chars of the active brand's DESIGN.md so the
+ * agent has top-of-file context (atmosphere + color palette start)
+ * without having to call reframe_design itself. We strip headings
+ * lines to save tokens and keep just the substantive bullets.
+ *
+ * Returns null if the brand file isn't cached locally yet.
+ */
+function readBrandSummary(brandSlug: string): string | null {
+  try {
+    const candidates = [
+      join(getWorkspaceRoot(), '.reframe', 'brands', `${brandSlug}.md`),
+      join(getWorkspaceRoot(), '.reframe', 'brands', brandSlug, 'DESIGN.md'),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        const raw = readFileSync(p, 'utf8');
+        // Trim to ~600 chars and break at next sensible boundary.
+        const slice = raw.slice(0, 600);
+        const lastBreak = Math.max(slice.lastIndexOf('\n\n'), slice.lastIndexOf('\n## '));
+        return (lastBreak > 200 ? slice.slice(0, lastBreak) : slice).trim();
+      }
+    }
+  } catch { /* best-effort */ }
+  return null;
 }

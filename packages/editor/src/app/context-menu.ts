@@ -22,6 +22,12 @@ export function getContextMenuItems(editor: Editor, nodeId: string | null): Cont
   if (nodeId) {
     const node = editor.getNode(nodeId);
 
+    // ── AI-native: surface "Ask agent" at the very top of the menu so
+    // the canvas itself becomes the conversational entry point. The
+    // selected node is automatically attached as context when the
+    // floating prompt fires (see canvas/interaction.ts).
+    items.push({ label: '\u2728 Ask agent\u2026', shortcut: '\u2318K', action: 'ask-agent', separator: true });
+
     items.push({ label: 'Cut', shortcut: '\u2318X', action: 'cut', disabled: !hasSelection });
     items.push({ label: 'Copy', shortcut: '\u2318C', action: 'copy', disabled: !hasSelection });
     items.push({ label: 'Paste', shortcut: '\u2318V', action: 'paste' });
@@ -81,8 +87,21 @@ export function renderContextMenu(x: number, y: number, items: ContextMenuItem[]
 }
 
 /** Execute a context menu action. */
-export function executeContextAction(action: string, editor: Editor): void {
+export function executeContextAction(action: string, editor: Editor, ctx?: { x: number; y: number; nodeId: string | null }): void {
   switch (action) {
+    case 'ask-agent': {
+      // Fire a custom event that the platform shell listens for to
+      // open the floating agent prompt anchored at the click. We pass
+      // node id + click coords so the prompt pops up next to the
+      // selection and the prompt body knows what to scope to.
+      const detail = {
+        nodeId: ctx?.nodeId ?? null,
+        x: ctx?.x ?? window.innerWidth / 2,
+        y: ctx?.y ?? window.innerHeight / 2,
+      };
+      window.dispatchEvent(new CustomEvent('reframe:ask-agent', { detail }));
+      break;
+    }
     case 'cut':
       editor.duplicateSelected(); // TODO: proper cut = copy + delete
       editor.deleteSelected();

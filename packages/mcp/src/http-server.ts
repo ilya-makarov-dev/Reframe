@@ -842,8 +842,15 @@ export function startHttpSidecar(port = 4100): void {
         const projectFile = path.join(workspace, '.reframe', 'project.json');
         if (fs.existsSync(projectFile)) {
           // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const { setProjectDir, loadProjectScenes } = require('./store.js');
-          setProjectDir(workspace);
+          const { loadProjectScenes } = require('./store.js');
+          // Use tools/project's setProjectDir which keeps BOTH the
+          // store and the reframe_project tool's internal _projectDir
+          // in sync. PlatformContext.projectDir reads from this; the
+          // tokens/audit/gesture/intent endpoints check it. Without
+          // this call those endpoints all 400 with "No project open".
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { setProjectDir: setToolsProjectDir } = require('./tools/project.js');
+          setToolsProjectDir(workspace);
           const n = loadProjectScenes(workspace);
           process.stderr.write(`reframe HTTP: auto-loaded ${n} scenes from .reframe/\n`);
         }

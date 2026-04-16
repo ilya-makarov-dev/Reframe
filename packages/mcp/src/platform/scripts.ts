@@ -5012,11 +5012,42 @@ export const PLATFORM_JS = `
       clearPropsPanel();
       return;
     }
+    // During StoreSync rebuild the OP graph fires synthetic events with
+    // ids that may not exist server-side yet (the rebuild is mid-flight).
+    // Skip the fetch — the next user-initiated selection will refresh.
+    if (window.__reframeSyncing) return;
+    // Bridge translation: OP id → reframe id when bridge knows the
+    // mapping. If the id has NO bridge entry at all (neither direction),
+    // it's an OP-internal helper (selection handle, layout child, etc).
+    // Skip the fetch entirely — without this guard we 404 hundreds of
+    // times during a single drag (OP fires updateNode for many helper
+    // nodes per pointermove).
+    var bridge = window.__reframeBridge;
+    if (bridge) {
+      var fwd = bridge.opToReframeId && bridge.opToReframeId.get && bridge.opToReframeId.get(inode);
+      if (fwd) {
+        inode = fwd;
+      } else if (bridge.reframeToOpId && bridge.reframeToOpId.has && !bridge.reframeToOpId.has(inode)) {
+        // Not in bridge in either direction — OP-only helper. Silent.
+        clearPropsPanel();
+        return;
+      }
+    }
     currentPropsNodeId = inode;
-    // Properties inspector populates in background; user stays on Activity tab.
-    // To see properties, click the "Design" tab manually — supervision first.
+    // Direct fetch (instead of api() helper) so we can handle 404
+    // SILENTLY — happens when the selected OP node has no server-side
+    // counterpart yet (synthetic clicks, OP-internal nodes). Showing
+    // empty state is the right UX; logging the 404 is just noise.
     try {
-      var res = await api('/platform/api/node/get?sceneId=' + encodeURIComponent(sessionId) + '&nodeId=' + encodeURIComponent(inode));
+      var url = '/platform/api/node/get?sceneId=' + encodeURIComponent(sessionId) +
+                '&nodeId=' + encodeURIComponent(inode);
+      var resp = await fetch(url);
+      if (resp.status === 404) {
+        clearPropsPanel();
+        return;
+      }
+      if (!resp.ok) return;
+      var res = await resp.json();
       if (!res.ok || !res.props) return;
       renderPropsPanel(res.props, sessionId, inode);
     } catch (_) {}
@@ -5026,16 +5057,20 @@ export const PLATFORM_JS = `
     currentPropsNodeId = null;
     var panel = $('[data-panel="design"]');
     if (!panel) return;
-    // Show scene-level dashboard instead of empty state.
-    var frame = $('.viewport-frame');
-    var sessionId = frame ? frame.getAttribute('data-session') : null;
+    // Look up the active scene id (new editor uses #reframe-viewport;
+    // legacy iframe pages use .viewport-frame).
+    var frame = document.getElementById('reframe-viewport') || $('.viewport-frame');
+    var sessionId = frame ? (frame.getAttribute('data-session') || frame.dataset && frame.dataset.session) : null;
     if (sessionId) {
+      // Show scene-level controls (Canvas / Dimensions / Background) —
+      // those are useful even with nothing selected. Export + Engine
+      // buttons are stripped as noisy duplicates of the header / "+".
       renderSceneDashboard(panel, sessionId);
     } else {
       panel.innerHTML =
-        '<div class="props-empty">' +
-          '<div class="headline">No scene loaded.</div>' +
-          '<div class="body">Open a scene from the sidebar.</div>' +
+        '<div class="props-empty" style="color:var(--text-muted,#888);font-size:12px;text-align:center;padding:60px 16px;line-height:1.6">' +
+          '<div style="font-size:13px;color:var(--text-primary,#e5e5e5);margin-bottom:6px">No scene open</div>' +
+          'Pick a project from the sidebar.' +
         '</div>';
     }
   }
@@ -5108,37 +5143,13 @@ export const PLATFORM_JS = `
         '</div>';
     }
 
-    // Export quick buttons.
-    var exportHtml =
-      '<div class="props-section">' +
-        '<div class="props-section-header">Export</div>' +
-        '<div class="props-section-body">' +
-          '<div class="scene-dash-exports">' +
-            '<button class="scene-dash-export-btn" data-format="html">HTML</button>' +
-            '<button class="scene-dash-export-btn" data-format="react">React</button>' +
-            '<button class="scene-dash-export-btn" data-format="svg">SVG</button>' +
-          '</div>' +
-        '</div>' +
-      '</div>';
-
-    // Engine actions — one-click access to powerful engine ops.
-    var engineHtml =
-      '<div class="props-section">' +
-        '<div class="props-section-header">Engine</div>' +
-        '<div class="props-section-body">' +
-          '<div class="scene-dash-exports">' +
-            '<button class="scene-dash-export-btn" data-engine="auto-fix" title="Run audit \u2192 auto-fix \u2192 re-audit">Auto-fix</button>' +
-            '<button class="scene-dash-export-btn" data-engine="define-tokens" title="Bind all colors/fonts to brand tokens">Tokens</button>' +
-            '<button class="scene-dash-export-btn" data-engine="show-source" title="View source HTML">Source</button>' +
-          '</div>' +
-        '</div>' +
-      '</div>';
-
-    // Hint.
-    var hintHtml =
-      '<div class="scene-dash-hint">' +
-        'Click a node to edit \u00B7 E for edit mode \u00B7 Right-click for AI' +
-      '</div>';
+    // Export + Engine + hint blocks removed — Export lives in the
+    // header button, engine ops are one AI prompt away, and the hint
+    // was covering actually-useful sections. Keep only Scene info +
+    // Audit summary when no node is selected.
+    var exportHtml = '';
+    var engineHtml = '';
+    var hintHtml = '';
 
     panel.innerHTML = sceneInfo + auditHtml + exportHtml + engineHtml + hintHtml;
 
@@ -5203,6 +5214,19 @@ export const PLATFORM_JS = `
 
     var html = '';
 
+    // ── Sticky AI bar (top, always visible) ──
+    // Quick path: input + preset chips + variants + Ask. All actions
+    // scoped to the currently selected node — no need to re-state context.
+    // Manual props remain below as before — AI augments, doesn't replace.
+    html += renderAiBar(sessionId, nodeId);
+
+    // ── Smart Suggestions container — populated async from audit ──
+    // Empty placeholder rendered eagerly so the layout is stable; the
+    // actual banners are injected by fetchAndRenderSuggestions() after
+    // panel.innerHTML is committed. This avoids a layout shift when
+    // the audit fetch resolves.
+    html += '<div data-smart-suggestions style="display:none;margin:0 -12px 10px;padding:8px 12px;border-bottom:1px solid var(--border,#333);background:var(--surface,#0e0e0e)"></div>';
+
     // ── Identity ──
     html += '<div class="props-identity">' +
       '<div class="node-name">' + escape(displayName) +
@@ -5226,55 +5250,46 @@ export const PLATFORM_JS = `
       '</div>' +
     '</div>';
 
-    // ── Layout (direction toggle + gap + padding box) ──
-    var isFlexRow = props.display === 'flex-row';
-    var isFlexCol = props.display === 'flex-col';
-    var directionToggle = (isFlexRow || isFlexCol)
-      ? '<div class="layout-direction">' +
-          '<button class="dir-btn' + (isFlexRow ? ' active' : '') + '" data-prop="display" data-val="flex-row" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Row">\u2550</button>' +
-          '<button class="dir-btn' + (isFlexCol ? ' active' : '') + '" data-prop="display" data-val="flex-col" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Column">\u2551</button>' +
-          (props.gap != null ? propCompact('Gap', 'gap', props.gap, sessionId, nodeId) : '') +
-        '</div>'
-      : '';
-
-    var pt = props['padding-top'] || 0;
-    var pr = props['padding-right'] || 0;
-    var pb = props['padding-bottom'] || 0;
-    var pl = props['padding-left'] || 0;
+    // ── Layout (direction icons + alignment grid + gap + padding quad) ──
     html += '<div class="props-section">' +
       '<div class="props-section-header" data-collapse-toggle>Layout<span class="chevron">\u25BC</span></div>' +
       '<div class="props-section-body">' +
-        directionToggle +
-        '<div class="spacing-box">' +
-          '<div></div>' +
-          '<input class="spacing-val" value="' + pt + '" data-prop="padding-top" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Padding top">' +
-          '<div></div>' +
-          '<input class="spacing-val" value="' + pl + '" data-prop="padding-left" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Padding left">' +
-          '<div class="spacing-center">' + escape(props.width + '\u00D7' + props.height) + '</div>' +
-          '<input class="spacing-val" value="' + pr + '" data-prop="padding-right" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Padding right">' +
-          '<div></div>' +
-          '<input class="spacing-val" value="' + pb + '" data-prop="padding-bottom" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Padding bottom">' +
-          '<div></div>' +
-        '</div>' +
+        renderLayoutControls(props, sessionId, nodeId) +
       '</div>' +
     '</div>';
 
-    // ── Fill (big swatch + hex + opacity + token) ──
+    // ── Fill (big swatch + hex + opacity + token badge) ──
+    // When fill is bound to a brand token the row collapses the hex
+    // input into a chip showing token name + resolved color preview +
+    // unbind X. Click chip to navigate / change. Click X to unbind.
     var bgHex = props.background || '#FFFFFF';
     var bgOpacity = props['background-opacity'] != null ? Math.round(props['background-opacity'] * 100) : 100;
-    var tokenBind = props['token-bindings']?.fill;
-    var tokenEl = tokenBind
-      ? '<span class="prop-token">\u25C6 ' + escape(tokenBind) + '</span>'
-      : '<span class="prop-token prop-token-unbound">\u25C7</span>';
-    html += '<div class="props-section">' +
-      '<div class="props-section-header" data-collapse-toggle>Fill<span class="chevron">\u25BC</span></div>' +
-      '<div class="props-section-body">' +
+    var tokenBind = props['token-bindings'] && props['token-bindings'].fill;
+    var fillRowHtml;
+    if (tokenBind) {
+      fillRowHtml =
+        '<div class="fill-row">' +
+          '<div class="fill-swatch" style="background:' + escape(bgHex) + '" data-prop="background" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '"></div>' +
+          '<div class="prop-token-badge" style="flex:1;display:inline-flex;align-items:center;gap:6px;padding:4px 8px;' +
+            'background:var(--surface,#0e0e0e);border:1px solid var(--accent,#f15a29);border-radius:4px;font-size:11px;color:var(--text-primary,#e5e5e5)">' +
+            '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + escape(bgHex) + ';flex:none"></span>' +
+            '<span style="flex:1;font-family:var(--mono,monospace);font-size:10px">' + escape(tokenBind) + '</span>' +
+            '<button class="prop-token-unbind" data-prop="background" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" ' +
+              'title="Unbind from token" style="background:transparent;border:none;color:var(--text-muted,#888);cursor:pointer;font-size:11px;padding:0 2px">\u2715</button>' +
+          '</div>' +
+        '</div>';
+    } else {
+      fillRowHtml =
         '<div class="fill-row">' +
           '<div class="fill-swatch" style="background:' + escape(bgHex) + '" data-prop="background" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '"></div>' +
           '<input class="fill-hex" type="text" value="' + escape(bgHex) + '" data-prop="background" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '">' +
           '<span class="fill-opacity">' + bgOpacity + '%</span>' +
-          tokenEl +
-        '</div>' +
+        '</div>';
+    }
+    html += '<div class="props-section">' +
+      '<div class="props-section-header" data-collapse-toggle>Fill<span class="chevron">\u25BC</span></div>' +
+      '<div class="props-section-body">' +
+        fillRowHtml +
       '</div>' +
     '</div>';
 
@@ -5316,6 +5331,7 @@ export const PLATFORM_JS = `
           '<input class="effect-slider" type="range" min="0" max="1" step="0.01" value="' + opacity + '" data-prop="opacity" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '">' +
           '<span class="effect-value" data-for="opacity">' + Math.round(opacity * 100) + '%</span>' +
         '</div>' +
+        renderShadowSwatches(props, sessionId, nodeId) +
       '</div>' +
     '</div>';
 
@@ -5326,12 +5342,19 @@ export const PLATFORM_JS = `
       var has = !!existingStates[sn];
       var stateOverrides = has ? existingStates[sn] : null;
       var overrideCount = stateOverrides ? Object.keys(stateOverrides).length : 0;
+      // "Clone from base" = pre-fills the new state with a sensible
+      // delta (e.g. hover → 90% opacity + slight color shift) so the
+      // user gets something useful instead of an empty override map.
+      var addBtn = has
+        ? '<span class="state-badge on">' + overrideCount + ' override' + (overrideCount !== 1 ? 's' : '') + '</span>' +
+          '<button class="state-edit-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '">Edit</button>'
+        : '<button class="state-add-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Empty state \u2014 add overrides yourself">+ Add</button>' +
+          '<button class="state-clone-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Clone with sensible defaults" ' +
+            'style="margin-left:4px;font-size:10px;padding:3px 6px;background:transparent;border:1px solid var(--border,#333);' +
+            'color:var(--text-muted,#888);border-radius:3px;cursor:pointer">\u29C9 Clone base</button>';
       return '<div class="state-item">' +
         '<span class="state-name">' + escape(sn) + '</span>' +
-        (has
-          ? '<span class="state-badge on">' + overrideCount + ' override' + (overrideCount !== 1 ? 's' : '') + '</span>' +
-            '<button class="state-edit-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '">Edit</button>'
-          : '<button class="state-add-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '">+ Add</button>') +
+        addBtn +
       '</div>';
     }).join('');
     html += '<div class="props-section">' +
@@ -5442,6 +5465,71 @@ export const PLATFORM_JS = `
     panel.innerHTML = html;
     bindPropInputs();
     bindStatesAndAnimation(sessionId, nodeId);
+    bindAiBar(sessionId, nodeId);
+    // Async: fetch audit + brand fidelity → populate banners. Doesn't
+    // block the rest of the panel; if it fails we just show nothing.
+    fetchAndRenderSuggestions(sessionId, nodeId);
+  }
+
+  // ── AI bar inside Properties (sticky top, scoped to selected node) ─────
+  // ONE input + Ask. No preset chips. AI handles whatever the user types
+  // — including stylistic shifts the engine could do directly. The
+  // server-side fast path (/api/agent/preset/apply) stays as an AI tool
+  // claude can pick when it fits, but we don't surface chips that
+  // duplicate textual intent.
+  function renderAiBar(_sessionId, _nodeId) {
+    return '' +
+      '<div class="props-ai-bar" style="position:sticky;top:0;z-index:5;' +
+        'background:var(--surface-elevated,#1a1a1a);' +
+        'border-bottom:1px solid var(--border,#333);' +
+        'margin:0 -12px 10px;padding:10px 12px;display:flex;' +
+        'flex-direction:column;gap:6px">' +
+        '<div style="display:flex;align-items:center;gap:6px">' +
+          '<span style="font-size:13px">\u2728</span>' +
+          '<input data-ai-input type="text" ' +
+            'placeholder="Ask about this node\u2026" ' +
+            'style="flex:1;min-width:0;padding:5px 8px;font-size:11px;' +
+            'background:var(--surface,#0e0e0e);color:var(--text-primary,#e5e5e5);' +
+            'border:1px solid var(--border,#333);border-radius:5px;outline:none;font-family:inherit">' +
+          '<button data-ai-ask type="button" ' +
+            'style="padding:5px 10px;font-size:11px;font-weight:600;' +
+            'background:var(--accent,#f15a29);color:#fff;border:none;border-radius:5px;cursor:pointer">' +
+            'Ask</button>' +
+        '</div>' +
+        '<div data-ai-status style="display:none;font-size:10px;color:var(--text-muted,#888);min-height:12px"></div>' +
+      '</div>';
+  }
+
+  function bindAiBar(sessionId, nodeId) {
+    var panel = $('[data-panel="design"]');
+    if (!panel) return;
+    var bar = panel.querySelector('.props-ai-bar');
+    if (!bar) return;
+
+    var input = bar.querySelector('[data-ai-input]');
+    var askBtn = bar.querySelector('[data-ai-ask]');
+
+    // Open the floating prompt scoped to this node, pre-filled with
+    // whatever the user typed in the bar. Reuses the same event the
+    // canvas right-click + Cmd+K use, so all AI flows stay in one path.
+    function fireAsk() {
+      var text = (input && input.value || '').trim();
+      var detail = {
+        nodeId: nodeId || null,
+        x: window.innerWidth / 2 - 220,
+        y: 100,
+        prefill: text,
+      };
+      window.dispatchEvent(new CustomEvent('reframe:ask-agent', { detail: detail }));
+      if (input) input.value = '';
+    }
+    if (askBtn) askBtn.addEventListener('click', fireAsk);
+    if (input) input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); fireAsk(); }
+    });
+    // sessionId is used implicitly by the floating prompt via the
+    // canvas data-session attribute, so we don't need to pass it.
+    void sessionId;
   }
 
   function bindStatesAndAnimation(sessionId, nodeId) {
@@ -5534,12 +5622,315 @@ export const PLATFORM_JS = `
     });
   }
 
+  // ── Smart Suggestions: audit-driven actionable banners ──────────
+  // Pulls /platform/api/audit?sceneId=X, filters issues to the current
+  // node, renders each as a click-to-fix banner. Non-fixable issues
+  // open the floating Ask Agent prefilled with the issue context.
+  // Brand-fidelity score → small chip near top showing alignment.
+  var _auditCache = {}; // { sceneId: { ts, payload } }
+  function fetchSceneAudit(sceneId) {
+    if (!sceneId) return Promise.resolve(null);
+    var cached = _auditCache[sceneId];
+    if (cached && (Date.now() - cached.ts) < 10000) return Promise.resolve(cached.payload);
+    return fetch('/platform/api/audit?sceneId=' + encodeURIComponent(sceneId))
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(j) {
+        if (j) _auditCache[sceneId] = { ts: Date.now(), payload: j };
+        return j;
+      })
+      .catch(function() { return null; });
+  }
+
+  function fetchAndRenderSuggestions(sceneId, nodeId) {
+    var container = $('[data-smart-suggestions]');
+    if (!container || !sceneId) return;
+    fetchSceneAudit(sceneId).then(function(audit) {
+      if (!audit || !Array.isArray(audit.findings)) return;
+      // Filter to issues affecting this node. Matching is by nodeId
+      // (some rules report a structural node, others an offending leaf)
+      // — accept either an exact nodeId match OR a parent-path match.
+      var related = audit.findings.filter(function(f) {
+        if (!f.nodeId) return false;
+        return f.nodeId === nodeId;
+      });
+
+      // Severity icons.
+      function icon(sev) {
+        if (sev === 'error') return '\u26A0';
+        if (sev === 'warning') return '\u26A1';
+        return '\u24D8';
+      }
+      function color(sev) {
+        if (sev === 'error') return '#e85a5a';
+        if (sev === 'warning') return '#f0b132';
+        return 'var(--text-muted,#888)';
+      }
+
+      var bannerHtml = '';
+      // Brand alignment chip first (whole-scene, but useful here).
+      if (audit.brandFidelity && typeof audit.brandFidelity.score === 'number') {
+        var score = audit.brandFidelity.score;
+        var aligned = score >= 80;
+        bannerHtml += '<div style="display:flex;align-items:center;gap:6px;font-size:10px;margin-bottom:6px">' +
+          '<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:' +
+            (aligned ? 'rgba(54,199,119,.18)' : 'rgba(232,90,90,.18)') + ';color:' +
+            (aligned ? '#36c777' : '#e85a5a') + '">' +
+            (aligned ? '\u2713 brand-aligned' : '\u26A0 brand drift') + ' ' + Math.round(score) + '%</span>' +
+          (audit.brandFidelity.activeBrand ? '<span style="color:var(--text-muted,#888)">vs ' + escape(audit.brandFidelity.activeBrand) + '</span>' : '') +
+        '</div>';
+      }
+
+      if (related.length === 0) {
+        if (!bannerHtml) {
+          // Nothing to show — keep container hidden.
+          return;
+        }
+        // Show only brand chip even if no per-node issues.
+        container.style.display = '';
+        container.innerHTML = bannerHtml;
+        return;
+      }
+
+      // Render up to 4 most severe issues.
+      var sorted = related.sort(function(a, b) {
+        var order = { error: 0, warning: 1, info: 2 };
+        return (order[a.severity] || 9) - (order[b.severity] || 9);
+      }).slice(0, 4);
+
+      bannerHtml += sorted.map(function(f, i) {
+        var fixable = f.fix && f.fix.suggested != null;
+        return '<div data-suggestion-idx="' + i + '" style="display:flex;align-items:flex-start;gap:6px;padding:5px 0;font-size:11px;line-height:1.35;' +
+          (i > 0 ? 'border-top:1px solid var(--border,#333);' : '') + '">' +
+          '<span style="color:' + color(f.severity) + ';font-size:11px;flex:none;line-height:1.4">' + icon(f.severity) + '</span>' +
+          '<div style="flex:1">' +
+            '<div style="color:var(--text-primary,#e5e5e5)">' + escape(f.message) + '</div>' +
+            '<div style="font-size:9px;color:var(--text-muted,#888);font-family:var(--mono,monospace);margin-top:1px">' + escape(f.rule) + '</div>' +
+          '</div>' +
+          (fixable
+            ? '<button data-fix-idx="' + i + '" type="button" style="padding:3px 8px;font-size:10px;background:var(--accent,#f15a29);color:#fff;border:none;border-radius:3px;cursor:pointer;flex:none">Fix</button>'
+            : '<button data-ask-idx="' + i + '" type="button" style="padding:3px 8px;font-size:10px;background:transparent;color:var(--accent,#f15a29);border:1px solid var(--accent,#f15a29);border-radius:3px;cursor:pointer;flex:none">\u2728 Ask</button>') +
+        '</div>';
+      }).join('');
+
+      container.style.display = '';
+      container.innerHTML = bannerHtml;
+
+      // Wire fix buttons → apply suggested value via editNodeProp.
+      container.querySelectorAll('[data-fix-idx]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var idx = Number(btn.getAttribute('data-fix-idx'));
+          var f = sorted[idx];
+          if (!f || !f.fix) return;
+          editNodeProp(sceneId, nodeId, f.fix.property, f.fix.suggested);
+          btn.disabled = true;
+          btn.textContent = '\u2713';
+          // Invalidate audit cache so next render picks up the fix.
+          delete _auditCache[sceneId];
+        });
+      });
+      // Wire ask buttons → open Ask Agent prefilled with issue context.
+      container.querySelectorAll('[data-ask-idx]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var idx = Number(btn.getAttribute('data-ask-idx'));
+          var f = sorted[idx];
+          if (!f) return;
+          window.dispatchEvent(new CustomEvent('reframe:ask-agent', {
+            detail: {
+              nodeId: nodeId || null,
+              x: window.innerWidth / 2 - 220,
+              y: 100,
+              prefill: 'Fix this audit issue: ' + f.message + ' (rule: ' + f.rule + ')',
+            },
+          }));
+        });
+      });
+    });
+  }
+
+  // ── Brand token discovery (cached per scene) ─────────────────────
+  // Fetches /platform/api/tokens/<sceneId> once per scene-revision and
+  // caches the result. Used by the color popover to render real brand
+  // chips (color.primary, color.accent, etc) with resolved values.
+  var _tokenCache = {}; // { sceneId: { ts, tokens } }
+  function fetchSceneTokens(sceneId) {
+    if (!sceneId) return Promise.resolve([]);
+    var cached = _tokenCache[sceneId];
+    // 30s TTL — tokens don't change between scene-rev bumps; we just want
+    // a coarse safety net so brand-switch invalidates eventually.
+    if (cached && (Date.now() - cached.ts) < 30000) return Promise.resolve(cached.tokens);
+    return fetch('/platform/api/tokens/' + encodeURIComponent(sceneId))
+      .then(function(r) { return r.ok ? r.json() : { tokens: [] }; })
+      .then(function(j) {
+        var tokens = (j && j.tokens) || [];
+        _tokenCache[sceneId] = { ts: Date.now(), tokens: tokens };
+        return tokens;
+      })
+      .catch(function() { return []; });
+  }
+
+  // ── Layout controls: direction icons + 9-cell alignment + gap + padding quad ──
+  // Replaces the old ASCII direction toggle with proper SVG icons. Uses
+  // OpenPencil's createAlignmentActions semantics — primary/counter axis
+  // alignment maps to MIN/CENTER/MAX. The 9-cell grid is the most
+  // discoverable alignment UI in the industry (Figma, Sketch, OP all use it).
+  function renderLayoutControls(props, sessionId, nodeId) {
+    var isFlexRow = props.display === 'flex-row';
+    var isFlexCol = props.display === 'flex-col';
+    var isNone = !isFlexRow && !isFlexCol;
+    var de = function(s) { return escape(s); };
+    var attrs = 'data-scene="' + de(sessionId) + '" data-node="' + de(nodeId) + '"';
+
+    // 3 direction icons — horizontal / vertical / none (free positioning).
+    var iconRow = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M9 4l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    var iconCol = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M4 9l3 3 3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    var iconNone = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="2" y="2" width="10" height="10" rx="1" stroke="currentColor" stroke-width="1.4"/></svg>';
+
+    // Break-out button — always visible. Detaches from parent
+    // auto-layout (no-op if parent already has layoutMode=NONE).
+    // Explicit Figma-style action: user clicks to free this frame
+    // from its flex constraints so drag works.
+    var breakOutHtml =
+      '<button data-break-out="1" ' + attrs + ' title="Detach from parent auto-layout — position becomes absolute, preserves current size. Lets you free-drag the frame." ' +
+        'style="margin-left:auto;padding:3px 8px;font-size:10px;background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#333);border-radius:4px;cursor:pointer;font-family:inherit">' +
+        '\u2702 Detach' +
+      '</button>';
+
+    var dirHtml =
+      '<div class="layout-direction-row" style="display:flex;gap:4px;align-items:center;margin-bottom:8px">' +
+        '<button class="dir-btn' + (isFlexRow ? ' active' : '') + '" data-prop="display" data-val="flex-row" ' + attrs + ' title="Horizontal">' + iconRow + '</button>' +
+        '<button class="dir-btn' + (isFlexCol ? ' active' : '') + '" data-prop="display" data-val="flex-col" ' + attrs + ' title="Vertical">' + iconCol + '</button>' +
+        '<button class="dir-btn' + (isNone ? ' active' : '') + '" data-prop="display" data-val="block" ' + attrs + ' title="None">' + iconNone + '</button>' +
+        (props.gap != null && !isNone ? '<div style="margin-left:8px">' + propCompact('Gap', 'gap', props.gap, sessionId, nodeId) + '</div>' : '') +
+        breakOutHtml +
+      '</div>';
+
+    // 9-cell alignment grid — only meaningful when the container is flex.
+    // Each cell sets primary + counter axis alignment in one click.
+    // primary = main flex axis, counter = cross axis. For row layout:
+    //   primary=MIN/CENTER/MAX → justify-content: flex-start/center/flex-end
+    //   counter=MIN/CENTER/MAX → align-items: flex-start/center/flex-end
+    var alignHtml = '';
+    if (isFlexRow || isFlexCol) {
+      var pAlign = (props['primary-axis-align'] || 'MIN').toUpperCase();
+      var cAlign = (props['counter-axis-align'] || 'MIN').toUpperCase();
+      // Mapping from cell index to (primary, counter) axis pair.
+      // For ROW: primary = horizontal, counter = vertical
+      // For COL: primary = vertical,   counter = horizontal
+      var cells = [
+        ['MIN','MIN'], ['CENTER','MIN'], ['MAX','MIN'],
+        ['MIN','CENTER'], ['CENTER','CENTER'], ['MAX','CENTER'],
+        ['MIN','MAX'], ['CENTER','MAX'], ['MAX','MAX'],
+      ];
+      // For COL we need to swap: clicking top-center should set
+      // primary=MIN (top) counter=CENTER. The cells array above is for
+      // ROW; for COL we transpose the meaning.
+      var cellsHtml = cells.map(function(cell, idx) {
+        var horizontal = cell[0]; // primary in ROW, counter in COL
+        var vertical = cell[1];   // counter in ROW, primary in COL
+        var primary = isFlexRow ? horizontal : vertical;
+        var counter = isFlexRow ? vertical : horizontal;
+        var isActive = pAlign === primary && cAlign === counter;
+        return '<button class="align-cell' + (isActive ? ' active' : '') +
+          '" data-primary="' + primary + '" data-counter="' + counter +
+          '" ' + attrs + ' style="' +
+          'width:14px;height:14px;border:1px solid ' + (isActive ? 'var(--accent,#f15a29)' : 'var(--border,#333)') +
+          ';background:' + (isActive ? 'var(--accent,#f15a29)' : 'transparent') +
+          ';border-radius:2px;cursor:pointer;padding:0' +
+          '" title="' + primary + ' / ' + counter + '"></button>';
+      }).join('');
+      alignHtml =
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
+          '<span style="font-size:10px;color:var(--text-muted,#888);min-width:32px">Align</span>' +
+          '<div style="display:grid;grid-template-columns:repeat(3, 14px);gap:2px">' + cellsHtml + '</div>' +
+          '<span style="font-size:10px;color:var(--text-muted,#888);margin-left:auto">' + escape(pAlign.toLowerCase()) + ' / ' + escape(cAlign.toLowerCase()) + '</span>' +
+        '</div>';
+    }
+
+    // Padding quad — same shape as old spacing-box but with link toggle
+    // in the center cell (was a static W×H label).
+    var pt = props['padding-top'] || 0;
+    var pr = props['padding-right'] || 0;
+    var pb = props['padding-bottom'] || 0;
+    var pl = props['padding-left'] || 0;
+    var allEqual = pt === pr && pr === pb && pb === pl;
+    var paddingQuad =
+      '<div class="spacing-box">' +
+        '<div></div>' +
+        '<input class="spacing-val" value="' + pt + '" data-prop="padding-top" ' + attrs + ' title="Padding top">' +
+        '<div></div>' +
+        '<input class="spacing-val" value="' + pl + '" data-prop="padding-left" ' + attrs + ' title="Padding left">' +
+        '<div class="spacing-center">' +
+          '<button class="padding-link-toggle" data-linked="' + (allEqual ? '1' : '0') + '" title="' + (allEqual ? 'Unlink padding' : 'Link all sides') + '" ' +
+            'style="background:transparent;border:none;color:var(--text-muted,#888);cursor:pointer;font-size:11px">' +
+            (allEqual ? '\uD83D\uDD17' : '\uD83D\uDD13') +
+          '</button>' +
+        '</div>' +
+        '<input class="spacing-val" value="' + pr + '" data-prop="padding-right" ' + attrs + ' title="Padding right">' +
+        '<div></div>' +
+        '<input class="spacing-val" value="' + pb + '" data-prop="padding-bottom" ' + attrs + ' title="Padding bottom">' +
+        '<div></div>' +
+      '</div>';
+
+    return dirHtml + alignHtml + paddingQuad;
+  }
+
+  // ── Shadow preview swatches (Phase 2) ────────────────────────────
+  // Each shadow effect rendered as a small 24x24 box showing its actual
+  // visual contribution — black box with the shadow applied. Click to
+  // edit (future), drag to reorder (future). For MVP: visual list only.
+  function renderShadowSwatches(props, sessionId, nodeId) {
+    var shadows = (props.effects || []).filter(function(e) {
+      return e && (e.type === 'DROP_SHADOW' || e.type === 'INNER_SHADOW');
+    });
+    if (shadows.length === 0) {
+      return '<div style="margin-top:8px;font-size:10px;color:var(--text-muted,#888);' +
+        'padding:6px;border:1px dashed var(--border,#333);border-radius:4px;text-align:center">' +
+        'No shadows. Try \u2728 <a href="javascript:void(0)" data-ai-shadow data-scene="' + escape(sessionId) +
+        '" data-node="' + escape(nodeId) + '" style="color:var(--accent,#f15a29);text-decoration:none">Suggest depth</a>' +
+        '</div>';
+    }
+    var swatches = shadows.map(function(s, i) {
+      var off = (s.offset && (s.offset.x + 'px ' + s.offset.y + 'px')) || '0 0';
+      var blur = (s.radius || 0) + 'px';
+      var color = colorToCss(s.color) || 'rgba(0,0,0,0.25)';
+      var shadowCss = (s.type === 'INNER_SHADOW' ? 'inset ' : '') + off + ' ' + blur + ' ' + color;
+      return '<div class="shadow-swatch" title="Shadow ' + (i + 1) + '" ' +
+        'style="width:30px;height:30px;background:#fff;border-radius:4px;box-shadow:' + shadowCss + ';flex:none"></div>';
+    }).join('');
+    return '<div style="margin-top:8px">' +
+      '<div style="font-size:10px;color:var(--text-muted,#888);margin-bottom:4px">Shadows (' + shadows.length + ')</div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' + swatches + '</div>' +
+    '</div>';
+  }
+
+  function colorToCss(c) {
+    if (!c) return null;
+    if (typeof c === 'string') return c;
+    if (typeof c.r === 'number') {
+      var r = Math.round(c.r * 255), g = Math.round(c.g * 255), b = Math.round(c.b * 255);
+      var a = c.a != null ? c.a : 1;
+      return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+    }
+    return null;
+  }
+
   // ── Compact input for 2-column pairs (W+H, Size+Weight, etc) ──
   function propCompact(label, name, value, sessionId, nodeId) {
+    // Auto-detect input type — enum strings ("INSIDE", "MITER", "NONE")
+    // can't be type="number" without browser spamming "cannot be parsed"
+    // errors. Numeric values use number; everything else uses text.
+    var stringVal = String(value);
+    var isNumeric = stringVal !== '' && !isNaN(Number(stringVal));
+    var inputType = isNumeric ? 'number' : 'text';
+    var stepAttr = isNumeric ? ' step="1"' : '';
+    // name + autocomplete=off silences the "form field should have an
+    // id or name" accessibility warning — we had 800+ of those per
+    // scene because every propCompact rendered a nameless input.
     return '<div class="prop-compact">' +
       '<span class="prop-compact-label">' + escape(label) + '</span>' +
-      '<input class="prop-compact-input" type="number" value="' + escape(String(value)) + '" ' +
-        'data-prop="' + escape(name) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" step="1">' +
+      '<input class="prop-compact-input" type="' + inputType + '" value="' + escape(stringVal) + '" ' +
+        'name="' + escape(name) + '" autocomplete="off" ' +
+        'data-prop="' + escape(name) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '"' + stepAttr + '>' +
     '</div>';
   }
 
@@ -5621,17 +6012,631 @@ export const PLATFORM_JS = `
         picker.click();
       });
     });
+
+    // ── Figma-grade enhancements (Phase 1 polish) ─────────────────
+    // All of these run AFTER the basic wiring above, transforming the
+    // panel from "Excel of properties" into a proper Figma-style UI:
+    //   1. Drag-to-change on label hover (Shift = ×10, Alt = /10)
+    //   2. Color swatch → popover picker (HSL + hex + brand tokens)
+    //   3. W/H lock-aspect chain icon between width/height inputs
+    //   4. Section collapse persistence in localStorage
+    //   5. Inline AI augments next to relevant fields
+    enhanceDragToChange();
+    enhanceColorPopover();
+    enhanceAspectLock();
+    enhanceCollapsePersist();
+    enhanceAlignmentCells();
+    enhancePaddingLink();
+    enhanceStateClone();
+    enhanceTokenUnbind();
+    enhanceAnimationPreview();
+    enhanceInlineAiHooks();
+    // Break-out button — explicit Figma-style "detach from auto-layout".
+    // Applies:
+    //  1. Reparent to CANVAS root so x/y is in scene space (otherwise
+    //     dragging beyond parent bounds just hides the node behind
+    //     parent's clip — user reported this)
+    //  2. layoutPositioning=ABSOLUTE + FIXED sizing + pinned width/height
+    //     so Yoga doesn't collapse or snap it back
+    //  3. Translate current absolute position to new parent space
+    $$('[data-break-out]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var sceneId = btn.getAttribute('data-scene');
+        var nodeId = btn.getAttribute('data-node');
+        if (!sceneId || !nodeId) return;
+        var ed = window.__reframeEditor;
+        if (!ed || !ed.getNode) return;
+        var node = ed.getNode(nodeId);
+        if (!node) return;
+
+        // Compute current absolute position (relative to page root),
+        // THEN reparent to canvas page so the position stays correct.
+        var absPos = (ed.graph && ed.graph.getAbsolutePosition)
+          ? ed.graph.getAbsolutePosition(nodeId)
+          : { x: node.x || 0, y: node.y || 0 };
+
+        // Reparent client-side via OP editor (instant visual effect).
+        try {
+          var pages = ed.graph && ed.graph.getPages && ed.graph.getPages();
+          var pageId = (pages && pages[0] && pages[0].id) || null;
+          if (pageId && node.parentId !== pageId && ed.reparentNodes) {
+            ed.reparentNodes([nodeId], pageId);
+          }
+        } catch (_) {}
+
+        // Commit the detach state to server. These edits map to INode
+        // fields via cssPropsToNodePartial (all added server-side).
+        editNodeProp(sceneId, nodeId, 'layoutPositioning', 'ABSOLUTE');
+        editNodeProp(sceneId, nodeId, 'primaryAxisSizing', 'FIXED');
+        editNodeProp(sceneId, nodeId, 'counterAxisSizing', 'FIXED');
+        editNodeProp(sceneId, nodeId, 'layoutAlignSelf', 'AUTO');
+        editNodeProp(sceneId, nodeId, 'layoutGrow', 0);
+        editNodeProp(sceneId, nodeId, 'width', node.width);
+        editNodeProp(sceneId, nodeId, 'height', node.height);
+        // x/y in new parent space = old absolute position.
+        editNodeProp(sceneId, nodeId, 'x', Math.round(absPos.x));
+        editNodeProp(sceneId, nodeId, 'y', Math.round(absPos.y));
+        flash('Detached — drag anywhere on canvas', 'success');
+      });
+    });
+    // Silence a11y warnings: every <input> without name/id triggers
+    // a browser issue. Our dynamically-rendered panel creates dozens
+    // per scene → 800+ warnings. Backfill them after render.
+    var panelEl = $('[data-panel="design"]');
+    if (panelEl) {
+      panelEl.querySelectorAll('input').forEach(function(inp) {
+        if (!inp.getAttribute('name') && !inp.getAttribute('id')) {
+          var n = inp.getAttribute('data-prop') || 'prop-' + Math.random().toString(36).slice(2, 7);
+          inp.setAttribute('name', n);
+        }
+        if (!inp.getAttribute('autocomplete')) {
+          inp.setAttribute('autocomplete', 'off');
+        }
+      });
+    }
+  }
+
+  // ── Token unbind: click ✕ on a bound fill chip ─────────────────
+  function enhanceTokenUnbind() {
+    $$('.prop-token-unbind').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var prop = btn.getAttribute('data-prop');
+        var sceneId = btn.getAttribute('data-scene');
+        var nodeId = btn.getAttribute('data-node');
+        if (!prop || !sceneId || !nodeId) return;
+        // Server convention: <prop>__token = null clears the binding.
+        editNodeProp(sceneId, nodeId, prop + '__token', null);
+      });
+    });
+  }
+
+  // ── Phase 2.4: Animation preset hover preview ─────────────────────
+  // Each .anim-preset-btn gets a data-anim attribute (the preset name)
+  // we already have. On hover, we toggle a CSS class that plays the
+  // matching keyframe animation on the button itself, so the user sees
+  // what each preset does before clicking.
+  function enhanceAnimationPreview() {
+    if (!document.getElementById('reframe-anim-preview-css')) {
+      var style = document.createElement('style');
+      style.id = 'reframe-anim-preview-css';
+      // Each animation maps to a tasteful 600ms keyframe so the user
+      // gets a sense of motion. Names mirror the engine's 8 presets.
+      style.textContent = [
+        '.anim-preview { animation-duration: 600ms; animation-iteration-count: 1; animation-fill-mode: both; }',
+        '.anim-preview-fadeIn { animation-name: rfFade; }',
+        '.anim-preview-slideInUp { animation-name: rfSlideUp; }',
+        '.anim-preview-slideInLeft { animation-name: rfSlideLeft; }',
+        '.anim-preview-popIn { animation-name: rfPop; }',
+        '.anim-preview-bounce { animation-name: rfBounce; }',
+        '.anim-preview-shimmer { animation-name: rfShimmer; }',
+        '.anim-preview-scaleIn { animation-name: rfScale; }',
+        '.anim-preview-typewriter { animation-name: rfTypewriter; }',
+        '@keyframes rfFade { from{opacity:0} to{opacity:1} }',
+        '@keyframes rfSlideUp { from{transform:translateY(10px);opacity:0} to{transform:translateY(0);opacity:1} }',
+        '@keyframes rfSlideLeft { from{transform:translateX(-10px);opacity:0} to{transform:translateX(0);opacity:1} }',
+        '@keyframes rfPop { 0%{transform:scale(.85);opacity:0} 60%{transform:scale(1.05)} 100%{transform:scale(1);opacity:1} }',
+        '@keyframes rfBounce { 0%{transform:translateY(0)} 30%{transform:translateY(-6px)} 60%{transform:translateY(0)} 80%{transform:translateY(-3px)} 100%{transform:translateY(0)} }',
+        '@keyframes rfShimmer { from{background-position:-30px 0} to{background-position:30px 0} }',
+        '@keyframes rfScale { from{transform:scale(.6);opacity:0} to{transform:scale(1);opacity:1} }',
+        '@keyframes rfTypewriter { from{width:0;overflow:hidden} to{width:100%;overflow:hidden} }',
+      ].join('\\n');
+      document.head.appendChild(style);
+    }
+    $$('.anim-preset-btn[data-preset]').forEach(function(btn) {
+      var preset = btn.getAttribute('data-preset');
+      if (!preset) return;
+      btn.addEventListener('mouseenter', function() {
+        btn.classList.add('anim-preview', 'anim-preview-' + preset);
+        // Auto-remove after the animation ends so re-hover replays.
+        setTimeout(function() {
+          btn.classList.remove('anim-preview', 'anim-preview-' + preset);
+        }, 700);
+      });
+    });
+  }
+
+  // ── 9-cell alignment grid wiring ─────────────────────────────────
+  // Each cell sets primary + counter axis alignment in one click.
+  function enhanceAlignmentCells() {
+    $$('.align-cell').forEach(function(cell) {
+      cell.addEventListener('click', function() {
+        var primary = cell.getAttribute('data-primary');
+        var counter = cell.getAttribute('data-counter');
+        var sceneId = cell.getAttribute('data-scene');
+        var nodeId = cell.getAttribute('data-node');
+        if (!primary || !counter || !sceneId || !nodeId) return;
+        // Both fire as separate edits — server handles each as a prop update.
+        editNodeProp(sceneId, nodeId, 'primary-axis-align', primary);
+        editNodeProp(sceneId, nodeId, 'counter-axis-align', counter);
+        // Visually mark active immediately for snappy feedback.
+        $$('.align-cell').forEach(function(c) {
+          c.classList.remove('active');
+          c.style.background = 'transparent';
+          c.style.borderColor = 'var(--border,#333)';
+        });
+        cell.classList.add('active');
+        cell.style.background = 'var(--accent,#f15a29)';
+        cell.style.borderColor = 'var(--accent,#f15a29)';
+      });
+    });
+  }
+
+  // ── Padding link toggle ──────────────────────────────────────────
+  // When linked: editing any padding side updates ALL four. When not:
+  // each side stays independent. State is per-render (no localStorage —
+  // it's contextual to the node).
+  function enhancePaddingLink() {
+    var toggle = $('.padding-link-toggle');
+    if (!toggle) return;
+    toggle.addEventListener('click', function() {
+      var linked = toggle.getAttribute('data-linked') === '1';
+      linked = !linked;
+      toggle.setAttribute('data-linked', linked ? '1' : '0');
+      toggle.textContent = linked ? '\uD83D\uDD17' : '\uD83D\uDD13';
+      toggle.title = linked ? 'Unlink padding' : 'Link all sides';
+    });
+    // Wire ALL spacing-val inputs so when one changes and link is on,
+    // all 4 update + persist.
+    $$('.spacing-val').forEach(function(input) {
+      input.addEventListener('change', function() {
+        var linked = toggle.getAttribute('data-linked') === '1';
+        if (!linked) return;
+        var val = input.value;
+        var sceneId = input.getAttribute('data-scene');
+        var nodeId = input.getAttribute('data-node');
+        if (!sceneId || !nodeId) return;
+        // Update all 4 sides — input's own change handler fires for the
+        // typed one; we explicitly persist the other 3.
+        var sides = ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'];
+        sides.forEach(function(side) {
+          if (side === input.getAttribute('data-prop')) return; // skip self
+          var other = $('.spacing-val[data-prop="' + side + '"]');
+          if (other) {
+            other.value = val;
+            editNodeProp(sceneId, nodeId, side, Number(val));
+          }
+        });
+      });
+    });
+  }
+
+  // ── State clone-from-base wiring ─────────────────────────────────
+  // Click "⧉ Clone base" → server adds a state with sensible defaults
+  // baked in (hover = 90% opacity + slight color shift, etc). For MVP
+  // we just call editNodeProp with a state-add op; server resolves the
+  // sensible defaults based on state name.
+  function enhanceStateClone() {
+    $$('.state-clone-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var state = btn.getAttribute('data-state');
+        var sceneId = btn.getAttribute('data-scene');
+        var nodeId = btn.getAttribute('data-node');
+        if (!state || !sceneId || !nodeId) return;
+        // Sensible defaults per state — matches what a designer would
+        // expect when adding interaction states from scratch.
+        var defaults;
+        if (state === 'hover')    defaults = { opacity: 0.9 };
+        else if (state === 'active')   defaults = { opacity: 0.85 };
+        else if (state === 'focus')    defaults = { 'border-radius': 6 };
+        else if (state === 'disabled') defaults = { opacity: 0.5 };
+        else defaults = {};
+        // Server stores under states.<name>; we send via a dedicated prop key.
+        editNodeProp(sceneId, nodeId, 'state.' + state, defaults);
+        btn.disabled = true;
+        btn.textContent = '\u2713 cloned';
+      });
+    });
+  }
+
+  // ── Phase 1.1: Drag-to-change on numeric input labels ────────────
+  // Hover the label (W/H/X/Y/Wt/Size/Gap/etc) → cursor becomes ew-resize.
+  // Mousedown + drag horizontally → value changes by 1 per pixel.
+  // Shift modifier → ×10, Alt → /10. Releases on mouseup. Triggers a
+  // 'change' event so existing input listeners (editNodeProp) fire.
+  function enhanceDragToChange() {
+    $$('.prop-compact-label, .spacing-label').forEach(function(label) {
+      // Only labels that sit next to a number input are draggable.
+      var pair = label.parentElement;
+      if (!pair) return;
+      var input = pair.querySelector('input[type="number"]');
+      if (!input) return;
+      label.style.cursor = 'ew-resize';
+      label.style.userSelect = 'none';
+
+      label.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        var startX = e.clientX;
+        var startVal = Number(input.value) || 0;
+        document.body.style.cursor = 'ew-resize';
+
+        function onMove(ev) {
+          var dx = ev.clientX - startX;
+          var step = ev.shiftKey ? 10 : (ev.altKey ? 0.1 : 1);
+          var newVal = startVal + dx * step;
+          // Round to 2 decimals max to avoid float ugliness.
+          input.value = String(Math.round(newVal * 100) / 100);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        function onUp() {
+          document.body.style.cursor = '';
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          // Commit by firing change — existing handlers persist to server.
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    });
+  }
+
+  // ── Phase 1.5: Color swatch → popover picker ─────────────────────
+  // Replaces the native <input type=color> dialog with an inline popover
+  // that has HSL slider + hex input + brand-token chips. Better UX than
+  // the OS-level color picker (which is laggy and brand-blind).
+  function enhanceColorPopover() {
+    // We REPLACE the existing native-picker swatch handlers — find each
+    // swatch, clone it (drops listeners), then attach our popover handler.
+    $$('.fill-swatch[data-prop]').forEach(function(swatch) {
+      var clone = swatch.cloneNode(true);
+      swatch.parentNode.replaceChild(clone, swatch);
+    });
+    $$('.fill-swatch[data-prop]').forEach(function(swatch) {
+      swatch.style.cursor = 'pointer';
+      swatch.addEventListener('click', function(e) {
+        e.stopPropagation();
+        openColorPopover(swatch);
+      });
+    });
+  }
+
+  function openColorPopover(swatch) {
+    // Close any existing popover.
+    var existing = document.getElementById('reframe-color-popover');
+    if (existing) existing.remove();
+
+    var prop = swatch.getAttribute('data-prop');
+    var sceneId = swatch.getAttribute('data-scene');
+    var nodeId = swatch.getAttribute('data-node');
+    var hexInput = swatch.parentElement && swatch.parentElement.querySelector('.fill-hex');
+    var current = (hexInput && hexInput.value) || '#000000';
+
+    var rect = swatch.getBoundingClientRect();
+    var pop = document.createElement('div');
+    pop.id = 'reframe-color-popover';
+    pop.style.cssText =
+      'position:fixed;left:' + Math.max(8, rect.left - 4) + 'px;' +
+      'top:' + (rect.bottom + 6) + 'px;z-index:11000;' +
+      'background:var(--surface-elevated,#1a1a1a);' +
+      'border:1px solid var(--border,#333);border-radius:8px;' +
+      'box-shadow:0 12px 40px rgba(0,0,0,.5);padding:10px;width:240px;' +
+      'font-family:inherit;font-size:11px;color:var(--text-primary,#e5e5e5)';
+
+    pop.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+        '<div data-pop-swatch style="width:32px;height:32px;border-radius:6px;border:1px solid var(--border,#333);background:' + escape(current) + '"></div>' +
+        '<input data-pop-hex type="text" value="' + escape(current) + '" ' +
+          'style="flex:1;padding:4px 6px;font-size:11px;background:var(--surface,#0e0e0e);color:inherit;' +
+          'border:1px solid var(--border,#333);border-radius:4px;outline:none;font-family:var(--mono,monospace)">' +
+      '</div>' +
+      '<input data-pop-native type="color" value="' + escape(current) + '" ' +
+        'style="width:100%;height:32px;border:1px solid var(--border,#333);border-radius:4px;background:none;padding:2px;cursor:pointer">' +
+      '<div data-pop-tokens style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px"></div>';
+
+    document.body.appendChild(pop);
+
+    var popSwatch = pop.querySelector('[data-pop-swatch]');
+    var popHex = pop.querySelector('[data-pop-hex]');
+    var popNative = pop.querySelector('[data-pop-native]');
+    var popTokens = pop.querySelector('[data-pop-tokens]');
+
+    // Brand tokens — fetched from /platform/api/tokens/<sceneId>. Each
+    // token chip shows a small swatch with the resolved color plus the
+    // token name. Click to bind. Loading state shown while fetching.
+    popTokens.innerHTML = '<div style="width:100%;font-size:10px;color:var(--text-muted,#888)">Loading brand tokens\u2026</div>';
+    fetchSceneTokens(sceneId).then(function(tokens) {
+      var colorTokens = tokens.filter(function(t) { return t.type === 'COLOR'; });
+      if (colorTokens.length === 0) {
+        popTokens.innerHTML =
+          '<div style="width:100%;font-size:10px;color:var(--text-muted,#888)">' +
+          'No brand tokens. Apply a brand via reframe_design first.' +
+          '</div>';
+        return;
+      }
+      popTokens.innerHTML =
+        '<div style="width:100%;font-size:10px;color:var(--text-muted,#888);margin-bottom:4px">Brand tokens</div>' +
+        colorTokens.slice(0, 16).map(function(t) {
+          return '<button data-pop-token="' + escape(t.name) + '" type="button" title="' + escape(t.name) + '" ' +
+            'style="padding:2px 6px 2px 4px;font-size:10px;background:var(--surface,#0e0e0e);' +
+            'color:var(--text-muted,#888);border:1px solid var(--border,#333);border-radius:4px;cursor:pointer;' +
+            'font-family:inherit;display:inline-flex;align-items:center;gap:4px">' +
+            '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + escape(String(t.value)) + ';flex:none"></span>' +
+            escape(t.name.replace(/^color\./, '')) +
+            '</button>';
+        }).join('');
+
+      // Wire token-pick clicks here (rendered async after fetch).
+      popTokens.querySelectorAll('[data-pop-token]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var token = btn.getAttribute('data-pop-token');
+          editNodeProp(sceneId, nodeId, prop + '__token', token);
+          pop.remove();
+        });
+      });
+    });
+
+    function applyHex(hex) {
+      popSwatch.style.background = hex;
+      popNative.value = hex;
+      popHex.value = hex;
+      swatch.style.background = hex;
+      if (hexInput) hexInput.value = hex;
+    }
+
+    popHex.addEventListener('input', function() {
+      var v = popHex.value.trim();
+      if (/^#[0-9a-fA-F]{6}$/.test(v)) applyHex(v);
+    });
+    popNative.addEventListener('input', function() {
+      applyHex(popNative.value);
+    });
+    popNative.addEventListener('change', function() {
+      editNodeProp(sceneId, nodeId, prop, popNative.value);
+    });
+    popHex.addEventListener('change', function() {
+      var v = popHex.value.trim();
+      if (/^#[0-9a-fA-F]{6}$/.test(v)) editNodeProp(sceneId, nodeId, prop, v);
+    });
+    // (Token chips are wired async inside fetchSceneTokens.then above.)
+
+    // Dismiss on outside click
+    setTimeout(function() {
+      function dismiss(e) {
+        if (!pop.contains(e.target) && e.target !== swatch) {
+          pop.remove();
+          document.removeEventListener('mousedown', dismiss);
+        }
+      }
+      document.addEventListener('mousedown', dismiss);
+    }, 0);
+  }
+
+  // ── Phase 1.6: W/H aspect-lock chain ─────────────────────────────
+  // Inserts a chain icon between width and height inputs. When locked,
+  // editing one proportionally updates the other. State persists per
+  // session in localStorage so it survives node-switching.
+  function enhanceAspectLock() {
+    var wInput = $('.prop-compact-input[data-prop="width"]');
+    var hInput = $('.prop-compact-input[data-prop="height"]');
+    if (!wInput || !hInput) return;
+    // Only one chain per render — guard against duplicates.
+    if (document.getElementById('reframe-aspect-chain')) return;
+
+    var pair = wInput.closest('.prop-pair');
+    if (!pair) return;
+
+    var locked = (function() {
+      try { return localStorage.getItem('reframe.aspectLock') === '1'; } catch (_) { return false; }
+    })();
+
+    var chain = document.createElement('button');
+    chain.id = 'reframe-aspect-chain';
+    chain.type = 'button';
+    chain.title = locked ? 'Aspect locked' : 'Aspect free';
+    chain.style.cssText =
+      'background:transparent;border:none;cursor:pointer;color:var(--text-muted,#888);' +
+      'padding:0 4px;font-size:11px;align-self:center';
+    chain.textContent = locked ? '\uD83D\uDD17' : '\uD83D\uDD13';
+    // Insert between width and height controls (after the W .prop-compact, before H).
+    var compacts = pair.querySelectorAll('.prop-compact');
+    if (compacts.length < 2) return;
+    pair.insertBefore(chain, compacts[1]);
+
+    chain.addEventListener('click', function() {
+      locked = !locked;
+      try { localStorage.setItem('reframe.aspectLock', locked ? '1' : '0'); } catch (_) {}
+      chain.textContent = locked ? '\uD83D\uDD17' : '\uD83D\uDD13';
+      chain.title = locked ? 'Aspect locked' : 'Aspect free';
+    });
+
+    // When locked + one changes → update the other proportionally.
+    var ratio = (Number(wInput.value) || 1) / (Number(hInput.value) || 1);
+    function onChange(src, dst, isWidth) {
+      src.addEventListener('input', function() {
+        if (!locked) return;
+        var v = Number(src.value);
+        if (!v || !isFinite(v)) return;
+        var newOther = isWidth ? v / ratio : v * ratio;
+        dst.value = String(Math.round(newOther * 100) / 100);
+        dst.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      src.addEventListener('change', function() {
+        // Update ratio when user explicitly commits a non-locked change.
+        if (!locked) {
+          ratio = (Number(wInput.value) || 1) / (Number(hInput.value) || 1);
+        } else {
+          // Persist BOTH — the input's own change handler covers src,
+          // we need to fire change on dst too.
+          dst.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+    }
+    onChange(wInput, hInput, true);
+    onChange(hInput, wInput, false);
+  }
+
+  // ── Phase 1.7: Section collapse persistence ──────────────────────
+  // Each section header has [data-collapse-toggle]. When clicked, the
+  // parent gets .collapsed. We persist that to localStorage keyed by
+  // the section's text label so the user's preference survives node
+  // switches and reloads.
+  function enhanceCollapsePersist() {
+    var KEY = 'reframe.props.collapsed';
+    var collapsed = (function() {
+      try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (_) { return {}; }
+    })();
+
+    $$('[data-collapse-toggle]').forEach(function(header) {
+      var label = (header.textContent || '').trim().replace(/\u25BC|\u25B6/g, '').trim();
+      if (!label) return;
+      // Restore prior state.
+      if (collapsed[label]) {
+        header.parentElement && header.parentElement.classList.add('collapsed');
+      }
+      // Save on toggle. The default click handler from bindPropInputs
+      // already toggles the class — we just observe AFTER it ran.
+      header.addEventListener('click', function() {
+        // setTimeout 0 lets the existing handler complete first.
+        setTimeout(function() {
+          collapsed[label] = header.parentElement.classList.contains('collapsed');
+          try { localStorage.setItem(KEY, JSON.stringify(collapsed)); } catch (_) {}
+        }, 0);
+      });
+    });
+  }
+
+  // ── Phase 3: Inline AI augments (sparingly placed) ───────────────
+  // Small text links that expand specific aspects of the node into AI
+  // calls. We only add them where AI provides clear value over manual:
+  //   - Fill   → "Match brand"   (rebrand-color this node's fill)
+  //   - States → "Generate hover" (AI creates a sensible hover variant)
+  //   - Animation → "Suggest"    (AI picks a fitting preset)
+  // Style: tiny ✨-prefixed link, NOT a chip. Discoverable but not noisy.
+  function enhanceInlineAiHooks() {
+    var nodeId = (function() {
+      var firstSwatch = $('.fill-swatch[data-node]');
+      return firstSwatch ? firstSwatch.getAttribute('data-node') : null;
+    })();
+    var sceneId = (function() {
+      var firstSwatch = $('.fill-swatch[data-scene]');
+      return firstSwatch ? firstSwatch.getAttribute('data-scene') : null;
+    })();
+    if (!sceneId) return;
+
+    function aiLink(label, prompt) {
+      return '<a data-ai-augment href="javascript:void(0)" data-prompt="' + escape(prompt) + '" ' +
+        'style="font-size:10px;color:var(--accent,#f15a29);margin-left:6px;text-decoration:none">' +
+        '\u2728 ' + escape(label) + '</a>';
+    }
+
+    // Fill: append "Match brand"
+    var fillSection = (function() {
+      var headers = $$('.props-section-header');
+      for (var i = 0; i < headers.length; i++) {
+        if ((headers[i].textContent || '').trim().indexOf('Fill') === 0) return headers[i];
+      }
+      return null;
+    })();
+    if (fillSection && !fillSection.querySelector('[data-ai-augment]')) {
+      fillSection.insertAdjacentHTML('beforeend', aiLink('Match brand', 'Bind this fill to the closest brand color token.'));
+    }
+
+    // States: append "Generate states"
+    var stateHeaders = $$('.props-section-header');
+    for (var i = 0; i < stateHeaders.length; i++) {
+      if ((stateHeaders[i].textContent || '').trim().indexOf('States') === 0 &&
+          !stateHeaders[i].querySelector('[data-ai-augment]')) {
+        stateHeaders[i].insertAdjacentHTML('beforeend', aiLink('Generate hover', 'Create a tasteful hover state for this node.'));
+        break;
+      }
+    }
+    // Animation: append "Suggest"
+    for (var j = 0; j < stateHeaders.length; j++) {
+      if ((stateHeaders[j].textContent || '').trim().indexOf('Animation') === 0 &&
+          !stateHeaders[j].querySelector('[data-ai-augment]')) {
+        stateHeaders[j].insertAdjacentHTML('beforeend', aiLink('Suggest', 'Pick the best entrance animation for this node based on its role.'));
+        break;
+      }
+    }
+    // Type: append "Match brand typography"
+    for (var k = 0; k < stateHeaders.length; k++) {
+      if ((stateHeaders[k].textContent || '').trim().indexOf('Type') === 0 &&
+          !stateHeaders[k].querySelector('[data-ai-augment]')) {
+        stateHeaders[k].insertAdjacentHTML('beforeend', aiLink('Match brand', 'Apply the active brand typography (font family, size, weight, letter-spacing) to this text node.'));
+        break;
+      }
+    }
+    // Layout: append "Auto-arrange"
+    for (var m = 0; m < stateHeaders.length; m++) {
+      if ((stateHeaders[m].textContent || '').trim().indexOf('Layout') === 0 &&
+          !stateHeaders[m].querySelector('[data-ai-augment]')) {
+        stateHeaders[m].insertAdjacentHTML('beforeend', aiLink('Auto-arrange', 'Pick a sensible alignment + gap + padding for this container based on its children.'));
+        break;
+      }
+    }
+    // Identity: small "rename clearly" hint right next to node name.
+    var nodeNameEl = $('.node-name');
+    if (nodeNameEl && !nodeNameEl.querySelector('[data-ai-augment]')) {
+      nodeNameEl.insertAdjacentHTML('beforeend', aiLink('Rename', 'Suggest a clearer semantic name for this node based on its content and role.'));
+    }
+
+    // Wire all augment links to fire the floating Ask Agent with prefilled prompt.
+    $$('[data-ai-augment]').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var prompt = link.getAttribute('data-prompt') || '';
+        window.dispatchEvent(new CustomEvent('reframe:ask-agent', {
+          detail: {
+            nodeId: nodeId || null,
+            x: window.innerWidth / 2 - 220,
+            y: 100,
+            prefill: prompt,
+          },
+        }));
+      });
+    });
   }
 
   async function editNodeProp(sceneId, nodeId, prop, value) {
+    // Translate raw OP id → reframe id if bridge has the mapping. Skip
+    // entirely when nodeId has no server counterpart (OP-only chrome,
+    // synthetic events). Without this we 404 + show a toast on every
+    // canvas event from a non-mapped node.
+    var bridge = window.__reframeBridge;
+    if (bridge && bridge.opToReframeId && bridge.opToReframeId.get) {
+      var mapped = bridge.opToReframeId.get(nodeId);
+      if (mapped) nodeId = mapped;
+      else if (bridge.reframeToOpId && bridge.reframeToOpId.has && !bridge.reframeToOpId.has(nodeId)) {
+        // Not in either direction — OP-only id. Skip silently.
+        return;
+      }
+    }
     var edits = {};
     edits[prop] = value;
+    // Direct fetch instead of api() — we want SILENT failure on 404
+    // (stale id), not a "API error" toast in the user's face. api()
+    // throws + flashes for any !ok response.
     try {
-      var res = await api('/platform/api/node/edit', {
-        sceneId: sceneId,
-        nodeId: nodeId,
-        props: edits,
+      var resp = await fetch('/platform/api/node/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sceneId: sceneId, nodeId: nodeId, props: edits }),
       });
+      if (resp.status === 404) return; // node gone (sync race) — silent
+      if (!resp.ok) return;
+      var res = await resp.json();
+      if (!res.ok) return;
       if (res.ok && res.props) {
         // Update swatch if color changed.
         var swatch = $('.prop-swatch[data-prop="' + prop + '"]');
@@ -6679,75 +7684,89 @@ export const PLATFORM_JS = `
         return frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
       }
 
+      // Helper — true while StoreSync is rebuilding OP graph from a pull.
+      // Canvas → server persist must be SKIPPED in that window.
+      function isSyncing() {
+        return !!(window).__reframeSyncing;
+      }
+
+      // Track whether the user has actually interacted with the canvas.
+      // Until they have, ALL canvas-emitted events are part of the
+      // initial layout/load and must NOT be persisted (the server
+      // already has that state, persisting it back creates 404 floods
+      // when ids don't line up). First real pointerdown flips this.
+      var canvasUserInteracted = false;
+      var cvsEl = document.getElementById('reframe-viewport');
+      if (cvsEl) {
+        cvsEl.addEventListener('pointerdown', function() {
+          canvasUserInteracted = true;
+        }, { passive: true, capture: true });
+      }
+      function shouldPersistCanvasChange() {
+        // Suppress during sync OR before first real interaction.
+        // Both flags are belt-and-suspenders — sync covers SSE pulls,
+        // user-interaction covers initial load + Playwright synthetic
+        // events that happen without a real pointerdown.
+        return !isSyncing() && canvasUserInteracted;
+      }
+
+      // Translate OP node id → reframe id via the bridge. Returns null
+      // if the OP node has no reframe counterpart (e.g. internal page
+      // wrapper, OP layout helpers). Handlers MUST skip POST in that
+      // case — otherwise we send unknown ids to the server, creating
+      // 404 cascades + ERR_INSUFFICIENT_RESOURCES from request floods.
+      function toRfId(opId) {
+        if (!opId) return null;
+        var bridge = (window).__reframeBridge;
+        if (!bridge) return opId; // bridge missing → fall back to raw
+        var mapped = bridge.opToReframeId && bridge.opToReframeId.get && bridge.opToReframeId.get(opId);
+        if (mapped) return mapped;
+        if (bridge.reframeToOpId && bridge.reframeToOpId.has && bridge.reframeToOpId.has(opId)) return opId;
+        return null;
+      }
+
+      // ── REMOVED: per-event canvas → server POST handlers ──
+      // StoreSync.doPush handles persistence via PUT /scenes/:id on a
+      // 600ms debounce. Per-event POSTs were duplicate work that 404'd
+      // on OP-only ids.
+      //
+      // Refresh the layer tree AFTER the store-sync push cycle has had
+      // time to complete (600ms debounce + ~300ms network + SSE pull).
+      // Shorter delays miss the updated tree from the server. The SSE
+      // scene:session-changed handler already triggers its own refresh
+      // on server mutation, so this is belt-and-suspenders.
+      window.addEventListener('reframe:node-created', function() {
+        setTimeout(function() { refreshLayersTree(); }, 1200);
+      });
+      window.addEventListener('reframe:node-deleted', function() {
+        setTimeout(function() { refreshLayersTree(); }, 1200);
+      });
+      window.addEventListener('reframe:node-reparented', function() {
+        setTimeout(function() { refreshLayersTree(); }, 1200);
+      });
+      // Properties panel refresh on node-moved/resized — THROTTLED.
+      // Every pointermove during drag fires multiple events. If we
+      // refresh the panel (GET /api/node/get) on each one, the browser
+      // queue fills with fetches and drag feels sluggish / blocked.
+      // Debounce to 120ms — fast enough that values feel live, slow
+      // enough that no single pointermove spawns a fetch.
+      var propsRefreshTimer = null;
+      function queuePropsRefresh() {
+        if (propsRefreshTimer) return;
+        propsRefreshTimer = setTimeout(function() {
+          propsRefreshTimer = null;
+          if (currentPropsNodeId) {
+            showPropsForNode(currentPropsNodeId, getCanvasSessionId());
+          }
+        }, 120);
+      }
       window.addEventListener('reframe:node-moved', function(evt) {
         var detail = evt.detail || {};
-        var sessionId = getCanvasSessionId();
-        if (!detail.nodeId || !sessionId) return;
-        // Persist position to server (fire-and-forget)
-        api('/platform/api/node/edit', {
-          sceneId: sessionId,
-          nodeId: detail.nodeId,
-          props: { x: detail.x, y: detail.y },
-        }).catch(function() {});
-        // Refresh properties panel if this node is selected
-        if (currentPropsNodeId === detail.nodeId) {
-          showPropsForNode(detail.nodeId, sessionId);
-        }
+        if (currentPropsNodeId === toRfId(detail.nodeId)) queuePropsRefresh();
       });
-
       window.addEventListener('reframe:node-resized', function(evt) {
         var detail = evt.detail || {};
-        var sessionId = getCanvasSessionId();
-        if (!detail.nodeId || !sessionId) return;
-        // Persist size + position to server
-        var edits = { width: detail.width, height: detail.height };
-        if (detail.x != null) edits.x = detail.x;
-        if (detail.y != null) edits.y = detail.y;
-        api('/platform/api/node/edit', {
-          sceneId: sessionId,
-          nodeId: detail.nodeId,
-          props: edits,
-        }).catch(function() {});
-        if (currentPropsNodeId === detail.nodeId) {
-          showPropsForNode(detail.nodeId, sessionId);
-        }
-      });
-      // ── Canvas → Server: structural mutations ──
-
-      window.addEventListener('reframe:node-created', function(evt) {
-        var detail = evt.detail || {};
-        var sessionId = getCanvasSessionId();
-        if (!detail.nodeId || !sessionId) return;
-        api('/platform/api/node/add', {
-          sceneId: sessionId,
-          parentId: detail.parentId,
-          type: detail.type || 'FRAME',
-          name: detail.name || 'Frame',
-        }).catch(function() {});
-        setTimeout(function() { refreshLayersTree(); }, 100);
-      });
-
-      window.addEventListener('reframe:node-deleted', function(evt) {
-        var detail = evt.detail || {};
-        var sessionId = getCanvasSessionId();
-        if (!detail.nodeId || !sessionId) return;
-        api('/platform/api/node/delete', {
-          sceneId: sessionId,
-          nodeId: detail.nodeId,
-        }).catch(function() {});
-        setTimeout(function() { refreshLayersTree(); }, 100);
-      });
-
-      window.addEventListener('reframe:node-reparented', function(evt) {
-        var detail = evt.detail || {};
-        var sessionId = getCanvasSessionId();
-        if (!detail.nodeId || !sessionId) return;
-        api('/platform/api/node/edit', {
-          sceneId: sessionId,
-          nodeId: detail.nodeId,
-          props: { 'parent-id': detail.newParentId },
-        }).catch(function() {});
-        setTimeout(function() { refreshLayersTree(); }, 100);
+        if (currentPropsNodeId === toRfId(detail.nodeId)) queuePropsRefresh();
       });
 
       // OP canvas is always in "edit mode" — set state so CSS classes work

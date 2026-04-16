@@ -17,6 +17,8 @@ import { createReframeEditor, type ReframeEditorShell } from '../canvas/editor-s
 import { setupCanvasInteraction } from '../canvas/interaction.js';
 import { setupFileDragDrop } from './file-handler.js';
 import { getContextMenuItems, renderContextMenu, executeContextAction } from './context-menu.js';
+import { initAgentPrompt } from './agent-prompt.js';
+import { initBlockPalette } from './block-palette.js';
 import { MCPClient } from '../sync/mcp-client.js';
 import { StoreSync } from '../sync/store-sync.js';
 import { computeAllLayouts } from '@open-pencil/core';
@@ -24,6 +26,69 @@ import { deserializeToGraph } from '@reframe/core';
 
 let shell: ReframeEditorShell | null = null;
 let storeSync: StoreSync | null = null;
+
+// ─── Selection translation helpers ──────────────────────
+//
+// Canvas interaction surfaces (createReframeEditor's onSelectionChanged
+// callback AND setupCanvasInteraction's onSelectionChanged) ALL must
+// translate OP-internal node ids to reframe SceneGraph ids before they
+// reach scripts.ts / the Properties panel / the server. Without this,
+// the panel fetches /api/node/get with an OP-only id and gets 404.
+//
+// Both dispatchers route through dispatchSelection so the translation
+// rule lives in one place.
+
+function translateOpToReframe(opId: string | null | undefined): string | null {
+  if (!opId) return null;
+  const bridge = (shell as any)?.bridge;
+  if (!bridge) return opId;
+  const mapped = bridge.opToReframeId?.get?.(opId);
+  if (mapped) return mapped;
+  // Already a reframe id (because OP overrides.id was preserved via
+  // spread in createDefaultNode) — pass through.
+  if (bridge.reframeToOpId?.has?.(opId)) return opId;
+  // OP-only node (e.g. Page wrapper with no map yet) — return null so
+  // the panel shows empty state instead of 404'ing.
+  return null;
+}
+
+function dispatchSelection(ids: Set<string> | ReadonlySet<string>): void {
+  const arr = [...ids];
+  const firstId = arr[0] ?? null;
+  const translated = firstId ? translateOpToReframe(firstId) : null;
+  const translatedAll = arr
+    .map((id) => translateOpToReframe(id))
+    .filter((x): x is string => !!x);
+  window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
+    detail: { nodeId: translated, selectedIds: translatedAll },
+  }));
+}
+
+/**
+ * Suppression-aware wrapper around shell.loadFromReframeGraph. Sets a
+ * window flag during the rebuild so scripts.ts canvas event handlers
+ * skip POSTing every "created" event back to the server (the server
+ * already has those nodes; without suppression every load → 404 spam).
+ *
+ * Used by the initial scene-load + the constructor-composed +
+ * variant-open + open-scene flows. StoreSync.pullFromMCP also sets the
+ * same flag for SSE-triggered rebuilds.
+ */
+function loadGraphSuppressed(s: ReframeEditorShell, graph: any, rootId: string): void {
+  (window as any).__reframeSyncing = true;
+  try {
+    s.loadFromReframeGraph(graph, rootId);
+  } finally {
+    // Hold the flag for 200ms — covers async event bursts that fire
+    // on OP's layout pass after createNode completes (size/position
+    // events frequently arrive a frame or two later).
+    // Wider window: OP layout/text-shaping/font-load deltas can fire
+    // 1-2 seconds after the initial createNode pass on an empty scene.
+    // First real user pointer event will clear the flag earlier (see
+    // pointerdown listener below).
+    setTimeout(() => { (window as any).__reframeSyncing = false; }, 2000);
+  }
+}
 
 // ─── Boot ────────────────────────────────────────────────
 
@@ -51,15 +116,21 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
       }
     }).observe(container);
 
+    // Wire the AI-native floating prompt: right-click "Ask agent" on a
+    // node OR Cmd+K anywhere on the canvas → contextual prompt at the
+    // cursor. Selection is automatically scoped, scene id pulled from
+    // the canvas data attribute. Idempotent — safe to call once at boot.
+    initAgentPrompt();
+    // Wire the floating block palette: + button in toolbar, Cmd+P
+    // hotkey, or empty-scene wizard auto-opens it in compose mode.
+    initBlockPalette();
+
     // 2. Create editor shell
     shell = await createReframeEditor({
       canvas,
       canvasKitWasmPath: '/platform/vendor/canvaskit/canvaskit.wasm',
       onSelectionChanged: (ids) => {
-        const firstId = [...ids][0] ?? null;
-        window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
-          detail: { nodeId: firstId, selectedIds: [...ids] },
-        }));
+        dispatchSelection(ids);
       },
       onGraphChanged: () => {
         window.dispatchEvent(new CustomEvent('reframe:graph-changed'));
@@ -68,17 +139,46 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
 
     try { await (shell.renderer as any).loadFonts(); } catch {}
 
-    // 3. Canvas interaction
+    // Expose editor for the floating agent prompt — it needs to look
+    // up node names to render a friendly scope label. Keeps the prompt
+    // module dependency-free of editor internals.
+    (window as any).__reframeEditor = shell.editor;
+    // Expose bridge so scripts.ts canvas handlers can translate OP ids
+    // to reframe ids before POSTing /api/node/edit etc. Without this,
+    // every OP-internal node (e.g. wrappers, layout helpers) that emits
+    // a "moved" / "resized" event POSTs back to a server that doesn't
+    // know it → cascading 404s + ERR_INSUFFICIENT_RESOURCES.
+    (window as any).__reframeBridge = shell.bridge;
+
+    // First real user pointer event clears the rebuild-suppression flag.
+    // Lets us confidently persist user edits without waiting the full
+    // 2s rebuild window. Only trust pointerdown bubbling from the canvas
+    // (avoids picking up modal/popover clicks).
+    const clearSuppressOnInteract = () => {
+      if ((window as any).__reframeSyncing) {
+        (window as any).__reframeSyncing = false;
+      }
+    };
+    canvas.addEventListener('pointerdown', clearSuppressOnInteract, { passive: true });
+
+    // 3. Canvas interaction. Selection events go through the same
+    // dispatchSelection helper as createReframeEditor's onSelectionChanged
+    // so OP→reframe id translation is applied consistently. Context-menu
+    // hits also get translated so "Ask agent" carries a reframe id.
     setupCanvasInteraction(canvas, shell.editor, {
       onSelectionChanged: () => {
         const ids = [...shell!.editor.state.selectedIds];
-        window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
-          detail: { nodeId: ids[0] ?? null, selectedIds: ids },
-        }));
+        dispatchSelection(new Set(ids));
       },
       onContextMenu: (x, y, nodeId) => {
         if (!shell) return;
-        showContextMenu(x, y, getContextMenuItems(shell.editor, nodeId));
+        // getContextMenuItems queries OP editor state — needs OP id.
+        // showContextMenu/executeContextAction context fires events that
+        // need REFRAME id (Ask agent dispatches reframe:ask-agent which
+        // server-side handlers consume). We pass the translated id to
+        // the action context only.
+        const translatedId = translateOpToReframe(nodeId);
+        showContextMenu(x, y, getContextMenuItems(shell.editor, nodeId), translatedId);
       },
     });
 
@@ -117,7 +217,7 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
           if (!resp.ok) continue;
           const json = await resp.json();
           const rfData = deserializeToGraph(json.root || json);
-          shell.loadFromReframeGraph(rfData.graph, rfData.rootId);
+          loadGraphSuppressed(shell, rfData.graph, rfData.rootId);
         } catch (e) {
           console.error('[reframe] Scene', sid, 'load error:', e);
         }
@@ -141,7 +241,7 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
         if (!resp.ok) return;
         const json = await resp.json();
         const rfData = deserializeToGraph(json.root || json);
-        shell.loadFromReframeGraph(rfData.graph, rfData.rootId);
+        loadGraphSuppressed(shell, rfData.graph, rfData.rootId);
         // Update session and restart sync
         const cvs = document.getElementById('reframe-viewport');
         if (cvs) (cvs as HTMLElement).dataset.session = sceneId;
@@ -153,6 +253,51 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
         window.dispatchEvent(new CustomEvent('reframe:graph-changed'));
       } catch (e) {
         console.error('[reframe] Constructor load error:', e);
+      }
+    }) as EventListener);
+
+    // 9a. Wire the "+" toolbar button → open the floating block palette.
+    document.getElementById('btn-block-palette')?.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('reframe:open-block-palette'));
+    });
+
+    // 9c. Empty-scene wizard — if the active scene is empty (no children
+    // under the page root), offer the AI compose flow on first paint.
+    // Detected after sync starts so the scene tree is populated.
+    setTimeout(() => {
+      try {
+        const ed = (window as any).__reframeEditor;
+        if (!ed || !ed.state) return;
+        const allNodes = ed.state.nodes ? Object.keys(ed.state.nodes) : [];
+        // Heuristic: if scene has only a CANVAS + PAGE (≤ 2 nodes), it's
+        // effectively blank → fire the compose wizard.
+        if (allNodes.length > 0 && allNodes.length <= 2) {
+          window.dispatchEvent(new CustomEvent('reframe:open-empty-wizard'));
+        }
+      } catch { /* best-effort */ }
+    }, 1500);
+
+    // 9b. Variant picker → load chosen scene into canvas. Same pattern
+    // as constructor-composed: fetch scene → load into shell → swap
+    // data-session → restart sync.
+    window.addEventListener('reframe:open-scene', (async (ev: Event) => {
+      const sceneId = (ev as CustomEvent).detail?.sceneId;
+      if (!sceneId || !shell) return;
+      try {
+        const resp = await fetch(`/scenes/${sceneId}?format=json`);
+        if (!resp.ok) return;
+        const json = await resp.json();
+        const rfData = deserializeToGraph(json.root || json);
+        loadGraphSuppressed(shell, rfData.graph, rfData.rootId);
+        const cvs = document.getElementById('reframe-viewport');
+        if (cvs) (cvs as HTMLElement).dataset.session = sceneId;
+        if (storeSync) {
+          storeSync.stopSync();
+          storeSync.startSync(sceneId);
+        }
+        window.dispatchEvent(new CustomEvent('reframe:graph-changed'));
+      } catch (e) {
+        console.error('[reframe] open-scene load error:', e);
       }
     }) as EventListener);
 
@@ -359,7 +504,7 @@ function wireSelfCausedRevisionHandler(sync: StoreSync) {
 
 // ─── Context menu ────────────────────────────────────────
 
-function showContextMenu(x: number, y: number, items: ReturnType<typeof getContextMenuItems>) {
+function showContextMenu(x: number, y: number, items: ReturnType<typeof getContextMenuItems>, nodeId: string | null = null) {
   document.getElementById('reframe-context-menu')?.remove();
 
   const div = document.createElement('div');
@@ -369,7 +514,9 @@ function showContextMenu(x: number, y: number, items: ReturnType<typeof getConte
 
   div.querySelectorAll<HTMLElement>('[data-action]').forEach(btn => {
     btn.addEventListener('click', () => {
-      if (shell) executeContextAction(btn.dataset.action!, shell.editor);
+      // Pass click coords + node id so context-aware actions (ask-agent)
+      // can anchor floating UI at the right spot and scope to the node.
+      if (shell) executeContextAction(btn.dataset.action!, shell.editor, { x, y, nodeId });
       div.remove();
     });
   });

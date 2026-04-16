@@ -55,7 +55,9 @@ scratch/
 # ─── Dev scripts (exploration harnesses, stress tests, phase verifiers) ─
 # Situational — written for specific debugging sessions and go stale
 # fast. Proper regression tests live under packages/*/src/tests/ and
-# run via `npm test`.
+# run via `npm test`. The scripts/dev-qa/ folder hosts the local
+# Playwright UI smoke harness — used by the maintainer to find/fix
+# bugs interactively. Not part of the product, not pushed.
 scripts/
 
 # ─── NPM artifacts ───────────────────────────────────────
