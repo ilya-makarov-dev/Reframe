@@ -1299,7 +1299,7 @@ function doEmptyTrash() {
 
 // ─── Compose Page (Blocks → Page) ────────────────────────────
 
-function doComposePage(input: { name?: string; designMd?: string; tags?: string[] }) {
+async function doComposePage(input: { name?: string; designMd?: string; tags?: string[] }) {
   // designMd field carries the blocks config as JSON array:
   // [{"block":"nav-simple"},{"block":"hero-centered","slots":{"headline":"My App"}}]
   // OR name field carries comma-separated block names: "nav-simple,hero-centered,pricing-3col"
@@ -1326,7 +1326,7 @@ function doComposePage(input: { name?: string; designMd?: string; tags?: string[
     const { registerStarterBlocks } = require('../../../core/src/blocks/index.js');
     registerStarterBlocks();
 
-    const result = composePage(blockInputs);
+    const result = await composePage(blockInputs);
 
     // Store the composed page in session
     const pageName = blockInputs.map(b => b.block.split('-')[0]).join('-');

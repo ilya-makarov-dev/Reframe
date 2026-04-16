@@ -183,44 +183,23 @@ export async function createReframeEditor(
         const editorPage = existingPages.length > 0
           ? existingPages[0]
           : editor.graph.addPage('Imported');
+
+        // Clear existing children to prevent duplication on re-pull
+        for (const existing of editor.graph.getChildren(editorPage.id)) {
+          try { editor.graph.deleteNode(existing.id); } catch { /* ok */ }
+        }
+
+        // Copy ALL fields from source nodes (not a hardcoded subset).
+        // Structural fields (type, parentId, childIds) are managed by createNode.
+        const structuralKeys = new Set(['type', 'parentId', 'childIds']);
         const copyToEditor = (srcNode: any, destParentId: string) => {
-          const created = editor.graph.createNode(srcNode.type, destParentId, {
-            name: srcNode.name,
-            x: srcNode.x, y: srcNode.y,
-            width: srcNode.width, height: srcNode.height,
-            fills: srcNode.fills, strokes: srcNode.strokes,
-            effects: srcNode.effects,
-            opacity: srcNode.opacity,
-            visible: srcNode.visible,
-            cornerRadius: srcNode.cornerRadius,
-            clipsContent: srcNode.clipsContent,
-            text: srcNode.text,
-            fontSize: srcNode.fontSize,
-            fontFamily: srcNode.fontFamily,
-            fontWeight: srcNode.fontWeight,
-            layoutMode: srcNode.layoutMode,
-            paddingTop: srcNode.paddingTop,
-            paddingRight: srcNode.paddingRight,
-            paddingBottom: srcNode.paddingBottom,
-            paddingLeft: srcNode.paddingLeft,
-            itemSpacing: srcNode.itemSpacing,
-            primaryAxisAlign: srcNode.primaryAxisAlign,
-            counterAxisAlign: srcNode.counterAxisAlign,
-            primaryAxisSizing: srcNode.primaryAxisSizing,
-            counterAxisSizing: srcNode.counterAxisSizing,
-            counterAxisSpacing: srcNode.counterAxisSpacing,
-            minHeight: srcNode.minHeight,
-            minWidth: srcNode.minWidth,
-            maxHeight: srcNode.maxHeight,
-            maxWidth: srcNode.maxWidth,
-            rotation: srcNode.rotation,
-            layoutGrow: srcNode.layoutGrow,
-            layoutAlignSelf: srcNode.layoutAlignSelf,
-            textAlignHorizontal: srcNode.textAlignHorizontal,
-            textAutoResize: srcNode.textAutoResize,
-            lineHeight: srcNode.lineHeight,
-            letterSpacing: srcNode.letterSpacing,
-          });
+          const overrides: Record<string, any> = { id: srcNode.id };
+          for (const key of Object.keys(srcNode)) {
+            if (!structuralKeys.has(key) && srcNode[key] !== undefined) {
+              overrides[key] = srcNode[key];
+            }
+          }
+          const created = editor.graph.createNode(srcNode.type, destParentId, overrides);
           for (const child of opGraph.getChildren(srcNode.id)) {
             copyToEditor(child, created.id);
           }

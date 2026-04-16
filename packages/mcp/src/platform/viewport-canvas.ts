@@ -174,6 +174,12 @@ export const VIEWPORT_CANVAS_JS = `
     try { computeAllLayouts(graph); } catch (e) {}
     editor.state.currentPageId = page.id;
 
+    // Set data-session so platform scripts.ts can route API calls.
+    // For single-scene: use that scene ID. For multi-scene: use first.
+    if (sceneIds.length > 0 && !canvas.dataset.session) {
+      canvas.dataset.session = sceneIds[0];
+    }
+
     // ── 6. Zoom to fit ──
     editor.zoomToFit();
 

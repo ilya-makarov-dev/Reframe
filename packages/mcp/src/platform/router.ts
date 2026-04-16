@@ -278,7 +278,7 @@ export default async function(o){
         if (blocksModule.blockCount() === 0) blocksModule.registerStarterBlocks();
 
         const { composePage } = await import('../../../core/src/content/compose.js');
-        const result = composePage(blockNames.map((name: string) => ({ block: name })));
+        const result = await composePage(blockNames.map((name: string) => ({ block: name })));
 
         if (result.blocks.length === 0) {
           sendJson(res, 400, { ok: false, error: 'No valid blocks found. Not found: ' + result.notFound.join(', ') });
@@ -292,7 +292,20 @@ export default async function(o){
           name: pageName.replace(/[-]/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
         });
 
-        sendJson(res, 200, { ok: true, sceneId: sessionId, slug: pageName, blockCount: result.blocks.length, notFound: result.notFound });
+        // Apply brand if provided
+        let brandApplied = false;
+        if (brand) {
+          try {
+            const { applyBrandToScene } = await import('./api/variations.js');
+            await applyBrandToScene(sessionId, brand, ctx);
+            brandApplied = true;
+          } catch (brandErr: any) {
+            // Non-fatal — page composed but brand failed
+            console.warn('[constructor] Brand application failed:', brandErr.message);
+          }
+        }
+
+        sendJson(res, 200, { ok: true, sceneId: sessionId, slug: pageName, blockCount: result.blocks.length, notFound: result.notFound, brandApplied });
       } catch (err: any) {
         sendJson(res, 500, { ok: false, error: err.message });
       }
@@ -339,6 +352,57 @@ export default async function(o){
           sectionName: refineCtx.section.info.name,
           totalSections: sections.length,
         });
+      } catch (err: any) {
+        sendJson(res, 500, { ok: false, error: err.message });
+      }
+      return true;
+    }
+
+    // Section refinement acceptance — compile refined HTML, replace section
+    if (pathname === '/platform/api/constructor/refine-accept' && req.method === 'POST') {
+      try {
+        const body = await readBody(req);
+        const { sceneId, sectionIndex, refinedHtml } = JSON.parse(body);
+
+        if (!sceneId || sectionIndex === undefined || !refinedHtml) {
+          sendJson(res, 400, { ok: false, error: 'sceneId + sectionIndex + refinedHtml required' });
+          return true;
+        }
+
+        const store = await import('../store.js');
+        const scene = store.getScene(sceneId);
+        if (!scene) {
+          sendJson(res, 404, { ok: false, error: `scene ${sceneId} not found` });
+          return true;
+        }
+
+        // Compile the refined HTML into an INode SceneGraph
+        const { importFromHtml } = await import('../../../core/src/importers/html.js');
+        const { ensureSceneLayout } = await import('../../../core/src/engine/layout.js');
+        const { replaceSectionSubtree } = await import('../../../core/src/content/refine.js');
+
+        const imported = await importFromHtml(refinedHtml, { name: `section-${sectionIndex}` });
+        ensureSceneLayout(imported.graph, imported.rootId);
+
+        const success = replaceSectionSubtree(
+          scene.graph, scene.rootId, sectionIndex,
+          imported.graph, imported.rootId,
+        );
+
+        if (!success) {
+          sendJson(res, 400, { ok: false, error: `Failed to replace section ${sectionIndex}` });
+          return true;
+        }
+
+        ensureSceneLayout(scene.graph, scene.rootId);
+        store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
+
+        try {
+          const { emitEvent } = await import('../http-server.js');
+          emitEvent({ type: 'scene:session-changed', sceneId } as any);
+        } catch { /* best-effort */ }
+
+        sendJson(res, 200, { ok: true, sceneId, sectionIndex });
       } catch (err: any) {
         sendJson(res, 500, { ok: false, error: err.message });
       }

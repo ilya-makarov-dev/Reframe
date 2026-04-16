@@ -44,8 +44,13 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
+  // REFRAME_HTTP_PORT=0 disables the sidecar — used when this MCP is
+  // spawned by a parent reframe sidecar (the parent already owns the
+  // HTTP port and we'd kill it during the takeover dance).
   const port = parseInt(process.env.REFRAME_HTTP_PORT ?? '4100', 10);
-  startHttpSidecar(port);
+  if (port > 0) {
+    startHttpSidecar(port);
+  }
 }
 
 main().catch((err) => {

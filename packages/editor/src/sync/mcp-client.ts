@@ -83,22 +83,23 @@ export class MCPClient {
     return resp.json();
   }
 
-  /** Push scene graph changes to the MCP server. */
-  async pushScene(sceneId: string, data: {
-    graph: any;
-    rootId: string;
-    name?: string;
-    revision?: number;
-  }): Promise<boolean> {
+  /** Push scene graph changes to the MCP server. Returns revision on success. */
+  async pushScene(sceneId: string, data: Record<string, any>): Promise<{ ok: boolean; revision?: number }> {
     try {
       const resp = await fetch(`${this.baseUrl}/scenes/${sceneId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       });
-      return resp.ok;
+      if (!resp.ok) return { ok: false };
+      try {
+        const json = await resp.json();
+        return { ok: true, revision: json.revision };
+      } catch {
+        return { ok: true };
+      }
     } catch {
-      return false;
+      return { ok: false };
     }
   }
 

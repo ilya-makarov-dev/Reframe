@@ -46,10 +46,10 @@ export interface ComposePageResult {
  * Each block is instantiated, then its subtree is merged into
  * a single vertical-layout page frame (1440px wide by default).
  */
-export function composePage(
+export async function composePage(
   blocks: ComposePageInput[],
   options?: { pageWidth?: number; pageName?: string },
-): ComposePageResult {
+): Promise<ComposePageResult> {
   const pageWidth = options?.pageWidth ?? 1440;
   const pageName = options?.pageName ?? 'Page';
 
@@ -72,31 +72,37 @@ export function composePage(
 
   for (const input of blocks) {
     const def = getBlock(input.block);
-    if (!def) {
-      notFound.push(input.block);
-      continue;
-    }
 
-    // Instantiate the block
-    const { graph: blockGraph, rootId: blockRootId, filledSlots } = instantiateBlock(def, input.slots);
+    if (def) {
+      // Programmatic block — instantiate from pre-serialized INode tree
+      const { graph: blockGraph, rootId: blockRootId, filledSlots } = instantiateBlock(def, input.slots);
+      const blockRoot = blockGraph.getNode(blockRootId);
+      if (!blockRoot) continue;
 
-    // Merge block subtree into page graph
-    const blockRoot = blockGraph.getNode(blockRootId);
-    if (!blockRoot) continue;
-
-    // Clone the block subtree into the page graph
-    const mergedRootId = mergeSubtree(pageGraph, blockGraph, blockRootId, rootId, pageWidth);
-
-    if (mergedRootId) {
-      composed.push({
-        name: input.block,
-        rootNodeId: mergedRootId,
-        filledSlots,
-      });
-
-      // Track height for page sizing
-      const mergedNode = pageGraph.getNode(mergedRootId);
-      if (mergedNode) currentY += mergedNode.height;
+      const mergedRootId = mergeSubtree(pageGraph, blockGraph, blockRootId, rootId, pageWidth);
+      if (mergedRootId) {
+        composed.push({ name: input.block, rootNodeId: mergedRootId, filledSlots });
+        const mergedNode = pageGraph.getNode(mergedRootId);
+        if (mergedNode) currentY += mergedNode.height;
+      }
+    } else {
+      // Try HTML section from manifest (compile on-the-fly)
+      try {
+        const { instantiateHtmlSection } = await import('../sections/manifest.js');
+        const result = await instantiateHtmlSection(input.block);
+        if (result) {
+          const mergedRootId = mergeSubtree(pageGraph, result.graph, result.rootId, rootId, pageWidth);
+          if (mergedRootId) {
+            composed.push({ name: input.block, rootNodeId: mergedRootId, filledSlots: 0 });
+            const mergedNode = pageGraph.getNode(mergedRootId);
+            if (mergedNode) currentY += mergedNode.height;
+          }
+        } else {
+          notFound.push(input.block);
+        }
+      } catch {
+        notFound.push(input.block);
+      }
     }
   }
 

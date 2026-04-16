@@ -147,6 +147,33 @@ export function renderEditorShell(options: {
     .panel-tab:hover { color: var(--text-2); }
     .panel-tab.active { color: var(--text-1); border-bottom-color: var(--accent); }
     #panel-content { flex: 1; overflow-y: auto; padding: 0 10px; }
+    .prop-input {
+      padding: 3px 6px; border-radius: 4px;
+      border: 1px solid var(--border); background: var(--bg-0);
+      color: var(--text-1); font-size: 11px; font-family: var(--mono);
+      outline: none; transition: border-color 0.15s;
+    }
+    .prop-input:focus { border-color: var(--accent); }
+    .prop-input:hover { border-color: var(--border-active); }
+    .prop-input[type="number"] { -moz-appearance: textfield; }
+    .prop-input[type="number"]::-webkit-inner-spin-button,
+    .prop-input[type="number"]::-webkit-outer-spin-button { opacity: 0; width: 12px; }
+    .prop-input[type="number"]:hover::-webkit-inner-spin-button,
+    .prop-input[type="number"]:hover::-webkit-outer-spin-button { opacity: 1; }
+    .prop-select {
+      padding: 3px 4px; border-radius: 4px;
+      border: 1px solid var(--border); background: var(--bg-0);
+      color: var(--text-1); font-size: 10px; font-family: var(--font);
+      outline: none; cursor: pointer; max-width: 120px;
+    }
+    .prop-select:focus { border-color: var(--accent); }
+    .prop-textarea {
+      width: 100%; padding: 4px 6px; border-radius: 4px;
+      border: 1px solid var(--border); background: var(--bg-0);
+      color: var(--text-1); font-size: 11px; font-family: var(--font);
+      outline: none; resize: vertical; min-height: 32px;
+    }
+    .prop-textarea:focus { border-color: var(--accent); }
 
     /* ── Bottom Bar (AI prompt + status) ── */
     #bottom {

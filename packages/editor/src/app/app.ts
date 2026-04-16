@@ -9,7 +9,7 @@ import { createReframeEditor, type ReframeEditorShell } from '../canvas/editor-s
 import { setupCanvasInteraction } from '../canvas/interaction.js';
 import { MCPClient } from '../sync/mcp-client.js';
 import { StoreSync } from '../sync/store-sync.js';
-import { renderPropertiesPanel } from '../panels/properties.js';
+import { renderPropertiesPanel, setupPropertiesHandlers } from '../panels/properties.js';
 import { renderBlocksPanel } from '../panels/blocks.js';
 import { renderAIChatPanel, type AIChatMessage } from '../panels/ai-chat.js';
 import { renderExportPanel } from '../panels/export.js';
@@ -276,6 +276,17 @@ function updatePropertiesPanel() {
     node: selected ?? null,
     extension: ext,
   });
+
+  // Wire interactive inputs → editor.updateNode()
+  if (selected) {
+    const editorRef = shell.editor;
+    setupPropertiesHandlers(container, {
+      getSelectedNode: () => editorRef.getSelectedNode() ?? null,
+      updateNode: (id, props) => editorRef.updateNode(id, props),
+      requestRender: () => editorRef.requestRender(),
+      onGraphChanged: () => updateLayerTree(),
+    });
+  }
 }
 
 // ─── Layer Tree ─────────────────────────────────────────────
@@ -560,7 +571,7 @@ function setupKeyboard() {
     if (!shell) return;
     const editor = shell.editor;
     const tag = (e.target as HTMLElement)?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
     const mod = e.metaKey || e.ctrlKey;
 

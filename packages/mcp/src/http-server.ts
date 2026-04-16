@@ -829,6 +829,27 @@ export function startHttpSidecar(port = 4100): void {
       process.stderr.write(
         `reframe HTTP sidecar on http://${displayHost}:${port} (bind ${listenHost}; scenes + events + MCP)\n`,
       );
+      // Auto-load .reframe/ project from cwd if present so scenes survive
+      // server restarts. Without this every restart wipes the in-memory
+      // session store, breaking already-open Platform tabs.
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        // loadAllScenes/loadProject expect the workspace dir (parent of
+        // .reframe), not the .reframe directory itself — they append the
+        // .reframe segment internally.
+        const workspace = process.cwd();
+        const projectFile = path.join(workspace, '.reframe', 'project.json');
+        if (fs.existsSync(projectFile)) {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { setProjectDir, loadProjectScenes } = require('./store.js');
+          setProjectDir(workspace);
+          const n = loadProjectScenes(workspace);
+          process.stderr.write(`reframe HTTP: auto-loaded ${n} scenes from .reframe/\n`);
+        }
+      } catch (err: any) {
+        process.stderr.write(`reframe HTTP: auto-load failed: ${err?.message || err}\n`);
+      }
     });
   }
 

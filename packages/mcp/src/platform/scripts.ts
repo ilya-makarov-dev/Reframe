@@ -54,6 +54,12 @@ export const PLATFORM_JS = `
     mode: null,
     sectionsLoaded: false,
     varyPanelLoaded: false,
+    constructorPanelLoaded: false,
+    agentPanelLoaded: false,
+    agentSessionId: null, // for --resume multi-turn
+    agentChatId: null,    // current in-flight chat id (for cancel)
+    agentReader: null,    // ReadableStream reader for the active SSE response
+    agentToolMap: {},     // tool_use id → DOM element (for inline tool_result wiring)
   };
 
   const VIEWPORT_DIMS = {
@@ -3907,6 +3913,14 @@ export const PLATFORM_JS = `
         if (target === 'vary' && !state.varyPanelLoaded) {
           initVaryPanel();
         }
+        // Lazy-init constructor panel on first activation
+        if (target === 'constructor' && !state.constructorPanelLoaded) {
+          initConstructorPanel();
+        }
+        // Lazy-init agent panel on first activation
+        if (target === 'agent' && !state.agentPanelLoaded) {
+          initAgentPanel();
+        }
         // Quality tab: fetch aesthetic score
         if (target === 'quality') {
           var analyzeBtn = $('[data-quality-analyze]');
@@ -4086,6 +4100,544 @@ export const PLATFORM_JS = `
   }
 
   // ── Variations panel ───────────────────────────────────────
+  // ── Constructor Panel (lazy-init on first tab click) ──────────
+  function initConstructorPanel() {
+    state.constructorPanelLoaded = true;
+    var panel = $('[data-panel="constructor"]');
+    if (!panel) return;
+
+    panel.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px">Loading blocks...</div>';
+
+    // Fetch blocks and brands in parallel
+    var blocksData = null;
+    var brandsData = [];
+    var sectionsData = [];
+    var constructorSections = [];
+    var constructorSceneId = null;
+
+    Promise.all([
+      api('/platform/api/constructor/sections').catch(function() { return { ok: false }; }),
+      api('/platform/api/brands').catch(function() { return { ok: false, brands: [] }; }),
+    ]).then(function(results) {
+      if (results[0].ok) sectionsData = results[0].sections || [];
+      if (results[1].ok) brandsData = results[1].brands || [];
+      renderConstructorUI();
+    });
+
+    function renderConstructorUI() {
+      // Group blocks by category
+      var blockList = '';
+      try {
+        // Try to use starter blocks
+        var categories = {};
+        var BLOCKS = [
+          { name: 'nav-simple', cat: 'Nav' },
+          { name: 'hero-centered', cat: 'Hero' }, { name: 'hero-split', cat: 'Hero' }, { name: 'hero-gradient', cat: 'Hero' },
+          { name: 'features-grid-3col', cat: 'Features' }, { name: 'features-alternating', cat: 'Features' },
+          { name: 'pricing-3tier', cat: 'Pricing' },
+          { name: 'testimonials-grid', cat: 'Testimonials' },
+          { name: 'cta-centered', cat: 'CTA' }, { name: 'cta-split', cat: 'CTA' },
+          { name: 'stats-bar', cat: 'Stats' },
+          { name: 'faq-expandable', cat: 'FAQ' },
+          { name: 'contact-form', cat: 'Contact' },
+          { name: 'gallery-grid', cat: 'Gallery' },
+          { name: 'team-grid', cat: 'Team' },
+          { name: 'footer-4col', cat: 'Footer' }, { name: 'footer-simple', cat: 'Footer' },
+        ];
+        BLOCKS.forEach(function(b) {
+          if (!categories[b.cat]) categories[b.cat] = [];
+          categories[b.cat].push(b.name);
+        });
+        for (var cat in categories) {
+          blockList += '<div style="margin-bottom:8px"><div style="font-size:10px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">' + escape(cat) + '</div>';
+          blockList += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">';
+          categories[cat].forEach(function(name) {
+            blockList += '<button class="ctr-add-block" data-block="' + escape(name) + '" style="padding:5px 6px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-secondary);cursor:pointer;text-align:left;font-family:inherit">' + escape(name.replace(/-/g, ' ')) + '</button>';
+          });
+          blockList += '</div></div>';
+        }
+      } catch (_) {}
+
+      // HTML sections
+      var sectionList = '';
+      if (sectionsData.length > 0) {
+        sectionList = '<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px"><div style="font-size:10px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">HTML Sections</div>';
+        sectionList += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">';
+        sectionsData.slice(0, 20).forEach(function(s) {
+          sectionList += '<button class="ctr-add-section" data-section="' + escape(s.id || s.name) + '" style="padding:5px 6px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-secondary);cursor:pointer;text-align:left;font-family:inherit">' + escape(s.name || s.id) + '</button>';
+        });
+        sectionList += '</div></div>';
+      }
+
+      // Brand selector
+      var brandOpts = '<option value="">— No Brand —</option>';
+      brandsData.forEach(function(b) {
+        var slug = typeof b === 'string' ? b : b.slug;
+        brandOpts += '<option value="' + escape(slug) + '">' + escape(slug) + '</option>';
+      });
+
+      panel.innerHTML =
+        '<div style="padding:0 4px">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:8px 0;border-bottom:1px solid var(--border)">' +
+            '<select id="ctr-brand" style="flex:1;padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-primary);font-family:inherit">' + brandOpts + '</select>' +
+          '</div>' +
+          '<div id="ctr-section-list" style="margin-bottom:8px"></div>' +
+          blockList +
+          sectionList +
+          '<div id="ctr-refine-panel" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px">' +
+            '<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Refine section</div>' +
+            '<div id="ctr-refine-target" style="font-size:11px;font-weight:600;margin-bottom:4px"></div>' +
+            '<textarea id="ctr-refine-prompt" placeholder="Describe the refinement..." style="width:100%;min-height:50px;padding:6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-primary);resize:vertical;font-family:inherit"></textarea>' +
+            '<button id="ctr-refine-ask" style="width:100%;margin-top:4px;padding:5px;font-size:11px;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer">Ask Agent</button>' +
+            '<div id="ctr-refine-result" style="margin-top:6px;font-size:10px;color:var(--text-muted);max-height:80px;overflow-y:auto;white-space:pre-wrap"></div>' +
+            '<textarea id="ctr-refine-html" placeholder="Paste refined HTML..." style="width:100%;min-height:60px;padding:6px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:var(--surface-elevated);color:var(--text-primary);resize:vertical;font-family:var(--mono, monospace);margin-top:6px"></textarea>' +
+            '<button id="ctr-refine-accept" style="width:100%;margin-top:4px;padding:5px;font-size:11px;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer">Accept Refined HTML</button>' +
+          '</div>' +
+        '</div>';
+
+      bindConstructorEvents();
+    }
+
+    function renderSectionList() {
+      var el = $('#ctr-section-list');
+      if (!el) return;
+      if (constructorSections.length === 0) {
+        el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:4px 0">Click a block to start building.</div>';
+        return;
+      }
+      el.innerHTML = constructorSections.map(function(name, i) {
+        return '<div class="ctr-section-item" data-idx="' + i + '" style="display:flex;align-items:center;gap:6px;padding:4px 6px;margin-bottom:2px;border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer">' +
+          '<span style="color:var(--text-muted);font-size:10px;width:16px">' + (i + 1) + '</span>' +
+          '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escape(name.replace(/-/g, ' ')) + '</span>' +
+          '<button class="ctr-dup" data-idx="' + i + '" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:11px;padding:0 2px" title="Duplicate">&#x2398;</button>' +
+          '<button class="ctr-rm" data-idx="' + i + '" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:13px;padding:0 2px" title="Remove">&times;</button>' +
+        '</div>';
+      }).join('');
+
+      // Remove
+      el.querySelectorAll('.ctr-rm').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          constructorSections.splice(parseInt(btn.dataset.idx), 1);
+          renderSectionList();
+          constructorRecompose();
+        });
+      });
+      // Duplicate
+      el.querySelectorAll('.ctr-dup').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          var idx = parseInt(btn.dataset.idx);
+          constructorSections.splice(idx + 1, 0, constructorSections[idx]);
+          renderSectionList();
+          constructorRecompose();
+        });
+      });
+      // Click to select for refinement
+      el.querySelectorAll('.ctr-section-item').forEach(function(item) {
+        item.addEventListener('click', function(e) {
+          if (e.target.closest('.ctr-rm') || e.target.closest('.ctr-dup')) return;
+          var idx = parseInt(item.dataset.idx);
+          el.querySelectorAll('.ctr-section-item').forEach(function(el2) { el2.style.borderColor = ''; });
+          item.style.borderColor = 'var(--accent)';
+          var refinePanel = $('#ctr-refine-panel');
+          if (refinePanel) {
+            refinePanel.style.display = '';
+            refinePanel.dataset.sectionIdx = String(idx);
+            var target = $('#ctr-refine-target');
+            if (target) target.textContent = constructorSections[idx] + ' (section ' + (idx + 1) + ')';
+          }
+        });
+      });
+    }
+
+    function constructorRecompose() {
+      if (constructorSections.length === 0) {
+        constructorSceneId = null;
+        return;
+      }
+      var brandSelect = $('#ctr-brand');
+      var brand = brandSelect ? brandSelect.value : '';
+
+      api('/platform/api/constructor/compose', {
+        blocks: constructorSections,
+        brand: brand || undefined,
+      }).then(function(data) {
+        if (!data.ok) return;
+        constructorSceneId = data.sceneId;
+        // Dispatch event for CanvasKit canvas to load
+        window.dispatchEvent(new CustomEvent('reframe:constructor-composed', {
+          detail: { sceneId: data.sceneId, brandApplied: data.brandApplied },
+        }));
+      }).catch(function() {});
+    }
+
+    function bindConstructorEvents() {
+      // Add block buttons
+      panel.querySelectorAll('.ctr-add-block').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          constructorSections.push(btn.dataset.block);
+          renderSectionList();
+          constructorRecompose();
+        });
+      });
+      // Add HTML section buttons
+      panel.querySelectorAll('.ctr-add-section').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          constructorSections.push(btn.dataset.section);
+          renderSectionList();
+          constructorRecompose();
+        });
+      });
+      // Brand change
+      var brandEl = $('#ctr-brand');
+      if (brandEl) {
+        brandEl.addEventListener('change', function() {
+          if (constructorSections.length > 0) constructorRecompose();
+        });
+      }
+      // Refine: ask agent — now routes through the unified chat panel.
+      // We build a prompt that targets the specific section, switch the
+      // user to the Agent tab so they see live progress, and let the
+      // chat handle spawn + tool-call rendering + canvas auto-update.
+      // No more copy-paste textarea — the agent applies the change
+      // directly via reframe MCP tools.
+      var askBtn = $('#ctr-refine-ask');
+      if (askBtn) {
+        askBtn.addEventListener('click', function() {
+          var refinePanel = $('#ctr-refine-panel');
+          var idx = parseInt(refinePanel ? refinePanel.dataset.sectionIdx : '-1');
+          var userText = ($('#ctr-refine-prompt') || {}).value || '';
+          if (idx < 0 || !constructorSceneId || !userText.trim()) return;
+
+          var sectionLabel = constructorSections[idx] || ('section ' + (idx + 1));
+          // Phrase the prompt so the agent knows exactly what to touch.
+          // The chat preamble already injects scene id + brand, so we
+          // only need to pinpoint the section + the user's intent.
+          var fullPrompt =
+            'Refine the section "' + sectionLabel + '" (index ' + idx + ') in the active composed page. ' +
+            'Use reframe_inspect to examine the section, then reframe_edit to apply the change. ' +
+            'User wants: ' + userText.trim();
+
+          // Switch to Agent tab so the user sees what is happening.
+          var agentTab = document.querySelector('[data-tab="agent"]');
+          if (agentTab) agentTab.click();
+
+          // Lazy-init then send. initAgentPanel is idempotent via
+          // state.agentPanelLoaded — but we need its inner streamChat
+          // function which is closured. Easiest: drop the prompt into
+          // the chat textarea and click Send.
+          setTimeout(function() {
+            var chatInput = $('[data-agent-input]');
+            var chatSend = $('[data-agent-send]');
+            if (chatInput && chatSend) {
+              chatInput.value = fullPrompt;
+              chatSend.click();
+              // Clear the constructor prompt now that it has moved to chat.
+              var p = $('#ctr-refine-prompt');
+              if (p) p.value = '';
+            }
+          }, 50);
+        });
+      }
+      // Refine: accept HTML
+      var acceptBtn = $('#ctr-refine-accept');
+      if (acceptBtn) {
+        acceptBtn.addEventListener('click', function() {
+          var refinePanel = $('#ctr-refine-panel');
+          var idx = parseInt(refinePanel ? refinePanel.dataset.sectionIdx : '-1');
+          var html = ($('#ctr-refine-html') || {}).value || '';
+          if (idx < 0 || !constructorSceneId || !html.trim()) return;
+          acceptBtn.disabled = true;
+          acceptBtn.textContent = 'Applying...';
+          api('/platform/api/constructor/refine-accept', {
+            sceneId: constructorSceneId,
+            sectionIndex: idx,
+            refinedHtml: html.trim(),
+          }).then(function(data) {
+            if (data.ok) {
+              var htmlEl = $('#ctr-refine-html');
+              if (htmlEl) htmlEl.value = '';
+              var result = $('#ctr-refine-result');
+              if (result) result.textContent = 'Section refined successfully';
+              // Canvas updates automatically via SSE → StoreSync pull
+            } else {
+              var result = $('#ctr-refine-result');
+              if (result) result.textContent = 'Error: ' + data.error;
+            }
+          }).catch(function(e) {
+            var result = $('#ctr-refine-result');
+            if (result) result.textContent = 'Error: ' + e.message;
+          }).finally(function() { acceptBtn.disabled = false; acceptBtn.textContent = 'Accept Refined HTML'; });
+        });
+      }
+
+      renderSectionList();
+    }
+  }
+
+  // ── Agent chat panel ──────────────────────────────────────────────
+  // Embedded Claude Code agent. Talks to /api/agent/chat which spawns
+  // claude (-p, --output-format stream-json) server-side and pipes parsed
+  // events back as SSE. We render text/tool_use/tool_result inline so the
+  // user sees what the agent is doing without leaving the UI.
+  function initAgentPanel() {
+    state.agentPanelLoaded = true;
+
+    var statusDot = $('[data-agent-status-dot]');
+    var banner = $('[data-agent-banner]');
+    var logEl = $('[data-agent-log]');
+    var inputEl = $('[data-agent-input]');
+    var sendBtn = $('[data-agent-send]');
+    var cancelBtn = $('[data-agent-cancel]');
+    var clearBtn = $('[data-agent-clear]');
+
+    // Health check — show banner if claude isn't installed.
+    fetch('/api/agent/health').then(function(r) { return r.json(); }).then(function(h) {
+      if (!h.claudeFound) {
+        if (statusDot) statusDot.style.background = '#e85a5a';
+        if (banner) {
+          banner.style.display = '';
+          banner.innerHTML = 'Claude Code CLI not found. <a href="https://claude.com/download" target="_blank" style="color:var(--accent)">Install</a> then refresh.';
+        }
+      } else {
+        if (statusDot) statusDot.style.background = '#36c777';
+      }
+    }).catch(function() {
+      if (statusDot) statusDot.style.background = '#e85a5a';
+    });
+
+    function clearLog() {
+      if (logEl) logEl.innerHTML = '';
+      state.agentSessionId = null;
+      state.agentToolMap = {};
+    }
+
+    function appendBubble(role, content) {
+      if (!logEl) return null;
+      // Drop the empty-state placeholder on first real message.
+      var empty = logEl.querySelector('.agent-empty');
+      if (empty) empty.remove();
+      var b = document.createElement('div');
+      b.className = 'agent-bubble agent-' + role;
+      var bg = role === 'user' ? 'var(--accent)' : 'var(--surface-elevated)';
+      var color = role === 'user' ? '#fff' : 'var(--text-primary)';
+      var align = role === 'user' ? 'flex-end' : 'flex-start';
+      b.style.cssText = 'align-self:' + align + ';max-width:92%;padding:8px 10px;border-radius:8px;background:' + bg + ';color:' + color + ';white-space:pre-wrap;word-break:break-word';
+      b.textContent = content;
+      logEl.appendChild(b);
+      logEl.scrollTop = logEl.scrollHeight;
+      return b;
+    }
+
+    function appendToolCard(toolName, input, toolUseId) {
+      if (!logEl) return null;
+      var empty = logEl.querySelector('.agent-empty');
+      if (empty) empty.remove();
+      var card = document.createElement('div');
+      card.className = 'agent-tool';
+      card.style.cssText = 'align-self:flex-start;max-width:92%;padding:6px 8px;border-radius:6px;background:var(--surface-elevated);border:1px solid var(--border);font-family:var(--mono,monospace);font-size:11px';
+      var inputPreview = '';
+      try {
+        var s = JSON.stringify(input);
+        if (s && s.length > 80) s = s.slice(0, 80) + '...';
+        inputPreview = s || '';
+      } catch (_) {}
+      card.innerHTML = '<div style="display:flex;align-items:center;gap:6px;color:var(--text-primary)"><span style="opacity:.6">\uD83D\uDD27</span><strong>' + escapeHtml(toolName) + '</strong><span data-tool-status style="margin-left:auto;font-size:10px;color:var(--text-muted)">running\u2026</span></div>' +
+        (inputPreview ? '<div style="margin-top:3px;color:var(--text-muted);font-size:10px">' + escapeHtml(inputPreview) + '</div>' : '') +
+        '<div data-tool-result style="display:none;margin-top:4px;padding-top:4px;border-top:1px dashed var(--border);color:var(--text-muted);font-size:10px;white-space:pre-wrap;max-height:80px;overflow-y:auto"></div>';
+      logEl.appendChild(card);
+      logEl.scrollTop = logEl.scrollHeight;
+      if (toolUseId) state.agentToolMap[toolUseId] = card;
+      return card;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+      });
+    }
+
+    function setSending(on) {
+      if (sendBtn) { sendBtn.disabled = on; sendBtn.textContent = on ? 'Working\u2026' : 'Send'; }
+      if (cancelBtn) cancelBtn.style.display = on ? '' : 'none';
+      if (inputEl) inputEl.disabled = on;
+    }
+
+    // Parse SSE stream produced by /api/agent/chat. The browser EventSource
+    // API cannot do POST, so we use fetch + ReadableStream and parse the
+    // text/event-stream format by hand (each event is one event-line plus
+    // one data-line, separated from the next event by a blank line).
+    function streamChat(prompt) {
+      setSending(true);
+      var body = { prompt: prompt };
+      if (state.agentSessionId) body.sessionId = state.agentSessionId;
+      // Tell the server which scene the user is currently editing so the
+      // preamble can include scene id, dimensions, and brand. Without
+      // this, claude has no idea what "header" / "this section" mean.
+      var sid = state.currentSceneId
+        || (document.querySelector('[data-session]') && document.querySelector('[data-session]').getAttribute('data-session'))
+        || (document.querySelector('canvas[data-session]') && document.querySelector('canvas[data-session]').getAttribute('data-session'));
+      if (sid) body.sceneId = sid;
+
+      // User bubble first.
+      appendBubble('user', prompt);
+
+      var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      state.agentReader = ctrl; // store the controller so cancelBtn can abort.
+
+      fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl ? ctrl.signal : undefined,
+      }).then(function(resp) {
+        if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = '';
+
+        function processBuf() {
+          // SSE events are separated by blank lines.
+          var idx;
+          while ((idx = buf.indexOf('\\n\\n')) !== -1) {
+            var raw = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            handleSseBlock(raw);
+          }
+        }
+
+        function pump() {
+          return reader.read().then(function(r) {
+            if (r.done) {
+              if (buf.trim()) handleSseBlock(buf);
+              setSending(false);
+              return;
+            }
+            buf += decoder.decode(r.value, { stream: true });
+            processBuf();
+            return pump();
+          });
+        }
+        return pump();
+      }).catch(function(err) {
+        if (err && err.name === 'AbortError') {
+          appendBubble('assistant', '[cancelled]');
+        } else {
+          appendBubble('assistant', '[error] ' + (err && err.message ? err.message : err));
+        }
+        setSending(false);
+      });
+    }
+
+    function handleSseBlock(raw) {
+      // Each block: "event: <name>" + "data: <json>" lines (other lines ignored).
+      var ev = null;
+      var data = null;
+      raw.split(/\\r?\\n/).forEach(function(line) {
+        if (line.indexOf('event:') === 0) {
+          ev = line.slice(6).trim();
+        } else if (line.indexOf('data:') === 0) {
+          var rest = line.slice(5).trim();
+          try { data = JSON.parse(rest); } catch (_) { data = rest; }
+        }
+      });
+      if (!ev || data === null) return;
+      handleAgentEvent(ev, data);
+    }
+
+    var pendingAssistantBubble = null;
+
+    function handleAgentEvent(name, data) {
+      switch (name) {
+        case 'chat_id':
+          state.agentChatId = data.chatId;
+          break;
+        case 'session_start':
+          state.agentSessionId = data.sessionId || state.agentSessionId;
+          pendingAssistantBubble = null;
+          break;
+        case 'text':
+          // Coalesce successive text blocks into one bubble for readability.
+          if (!pendingAssistantBubble) {
+            pendingAssistantBubble = appendBubble('assistant', data.text);
+          } else {
+            pendingAssistantBubble.textContent += data.text;
+            if (logEl) logEl.scrollTop = logEl.scrollHeight;
+          }
+          break;
+        case 'tool_use':
+          pendingAssistantBubble = null; // break the bubble before a tool call
+          appendToolCard(data.toolName, data.input, data.toolUseId);
+          break;
+        case 'tool_result':
+          var card = state.agentToolMap[data.toolUseId];
+          if (card) {
+            var statusEl = card.querySelector('[data-tool-status]');
+            if (statusEl) {
+              statusEl.textContent = data.ok ? 'ok' : 'error';
+              statusEl.style.color = data.ok ? '#36c777' : '#e85a5a';
+            }
+            var resEl = card.querySelector('[data-tool-result]');
+            if (resEl && data.preview) {
+              resEl.style.display = '';
+              resEl.textContent = data.preview;
+            }
+          }
+          break;
+        case 'done':
+          pendingAssistantBubble = null;
+          if (data.cost && logEl) {
+            var meta = document.createElement('div');
+            meta.style.cssText = 'align-self:center;font-size:10px;color:var(--text-muted);padding:4px 0';
+            meta.textContent = 'Done in ' + Math.round(data.durationMs / 100) / 10 + 's' + (data.cost ? ' \u00B7 $' + data.cost.toFixed(4) : '');
+            logEl.appendChild(meta);
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+          break;
+        case 'error':
+          appendBubble('assistant', '[error] ' + (data.message || data.code || 'unknown'));
+          break;
+      }
+    }
+
+    if (sendBtn) {
+      sendBtn.addEventListener('click', function() {
+        var text = (inputEl && inputEl.value || '').trim();
+        if (!text) return;
+        if (inputEl) inputEl.value = '';
+        streamChat(text);
+      });
+    }
+    if (inputEl) {
+      inputEl.addEventListener('keydown', function(e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault();
+          if (sendBtn) sendBtn.click();
+        }
+      });
+    }
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', function() {
+        // Best-effort cancel: tell server (kills subprocess) AND abort the stream.
+        if (state.agentChatId) {
+          fetch('/api/agent/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chatId: state.agentChatId }),
+          }).catch(function() {});
+        }
+        if (state.agentReader && state.agentReader.abort) {
+          try { state.agentReader.abort(); } catch (_) {}
+        }
+        setSending(false);
+      });
+    }
+    if (clearBtn) {
+      clearBtn.addEventListener('click', clearLog);
+    }
+  }
+
   function initVaryPanel() {
     state.varyPanelLoaded = true;
     fetch('/platform/api/variations/presets')
@@ -5732,8 +6284,8 @@ export const PLATFORM_JS = `
   async function refreshLayersTree() {
     var container = $('[data-layers-tree]');
     if (!container) return;
-    var frame = $('.viewport-frame');
-    var sessionId = frame ? frame.getAttribute('data-session') : null;
+    var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
+    var sessionId = frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
     if (!sessionId) {
       container.innerHTML = '<div class="sidebar-empty">No scene</div>';
       return;
@@ -5848,6 +6400,12 @@ export const PLATFORM_JS = `
         }
         showPropsForNode(nodeId, sessionId);
         postToIframe({ type: 'reframe:highlight', inode: nodeId });
+        // If CanvasKit is active, select the node on the OP canvas too.
+        if (document.getElementById('reframe-viewport')) {
+          window.dispatchEvent(new CustomEvent('reframe:layer-select', {
+            detail: { nodeId: nodeId },
+          }));
+        }
       });
     });
   }
@@ -6154,10 +6712,57 @@ export const PLATFORM_JS = `
           showPropsForNode(detail.nodeId, sessionId);
         }
       });
+      // ── Canvas → Server: structural mutations ──
+
+      window.addEventListener('reframe:node-created', function(evt) {
+        var detail = evt.detail || {};
+        var sessionId = getCanvasSessionId();
+        if (!detail.nodeId || !sessionId) return;
+        api('/platform/api/node/add', {
+          sceneId: sessionId,
+          parentId: detail.parentId,
+          type: detail.type || 'FRAME',
+          name: detail.name || 'Frame',
+        }).catch(function() {});
+        setTimeout(function() { refreshLayersTree(); }, 100);
+      });
+
+      window.addEventListener('reframe:node-deleted', function(evt) {
+        var detail = evt.detail || {};
+        var sessionId = getCanvasSessionId();
+        if (!detail.nodeId || !sessionId) return;
+        api('/platform/api/node/delete', {
+          sceneId: sessionId,
+          nodeId: detail.nodeId,
+        }).catch(function() {});
+        setTimeout(function() { refreshLayersTree(); }, 100);
+      });
+
+      window.addEventListener('reframe:node-reparented', function(evt) {
+        var detail = evt.detail || {};
+        var sessionId = getCanvasSessionId();
+        if (!detail.nodeId || !sessionId) return;
+        api('/platform/api/node/edit', {
+          sceneId: sessionId,
+          nodeId: detail.nodeId,
+          props: { 'parent-id': detail.newParentId },
+        }).catch(function() {});
+        setTimeout(function() { refreshLayersTree(); }, 100);
+      });
+
       // OP canvas is always in "edit mode" — set state so CSS classes work
       state.editMode = true;
       var appEl2 = $('.app');
       if (appEl2) appEl2.classList.add('edit-mode');
+
+      // Initial layers tree load for CanvasKit pages.
+      // Wait a beat for scene hydration to finish before fetching tree.
+      setTimeout(function() { refreshLayersTree(); }, 800);
+
+      // Refresh layers tree on SSE scene changes.
+      window.addEventListener('reframe:graph-changed', function() {
+        setTimeout(function() { refreshLayersTree(); }, 300);
+      });
     } else {
       bindPreviewBridge();
       bindGesturePointerSubstrate();

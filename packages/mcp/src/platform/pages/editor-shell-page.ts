@@ -283,12 +283,12 @@ export function renderEditorShell(options: {
 
     <aside id="sidebar">
       <div class="sidebar-head">Layers</div>
-      <div id="layer-tree"></div>
+      <div id="layer-tree" data-layers-tree></div>
     </aside>
 
     <main id="canvas-area">
       <div id="loading"><div class="spinner"></div></div>
-      <canvas id="reframe-viewport" tabindex="0"${sceneAttr}></canvas>
+      <canvas id="reframe-viewport" tabindex="0"${sceneAttr} data-session="${esc(options.sceneIds?.split(',')[0] ?? '')}"></canvas>
 
       <!-- Floating toolbar: tools + undo/redo -->
       <div id="float-toolbar">
@@ -324,18 +324,47 @@ export function renderEditorShell(options: {
     </main>
 
     <aside id="panel">
-      <div class="panel-tabs" style="display:flex;align-items:center;">
-        <button class="panel-tab active" data-panel="design" style="flex:1">Design</button>
-        <button class="panel-tab" data-panel="constructor" style="flex:1">Constructor</button>
+      <div class="right-tabs" style="display:flex;align-items:center;border-bottom:1px solid var(--border);">
+        <button class="right-tab active" data-tab="design" style="flex:1">Design</button>
+        <button class="right-tab" data-tab="constructor" style="flex:1">Constructor</button>
+        <button class="right-tab" data-tab="agent" style="flex:1;display:flex;align-items:center;justify-content:center;gap:5px">
+          <span data-agent-status-dot style="width:6px;height:6px;border-radius:50%;background:#888"></span>
+          Agent
+        </button>
       </div>
-      <div id="panel-content">
-        <div style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
+      <div data-panel="design" style="display:block;flex:1;overflow-y:auto;padding:0 12px;">
+        <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
           Select a node to inspect
+        </div>
+      </div>
+      <div data-panel="constructor" style="display:none;flex:1;flex-direction:column;overflow-y:auto;padding:12px;">
+        <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
+          Constructor
+        </div>
+      </div>
+      <div data-panel="agent" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
+        <div data-agent-banner style="display:none;padding:8px 12px;font-size:11px;background:var(--surface-elevated);color:var(--text-muted);border-bottom:1px solid var(--border)"></div>
+        <div data-agent-log style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;font-size:12px;line-height:1.45">
+          <div class="agent-empty" style="color:var(--text-muted);text-align:center;padding:40px 10px;">
+            Ask the agent to design, refine, or audit anything.<br><br>
+            Try: <em>"make a hero section in the loaded brand"</em>
+          </div>
+        </div>
+        <div style="padding:8px;border-top:1px solid var(--border);background:var(--surface-elevated)">
+          <textarea data-agent-input placeholder="Describe what you want..." rows="2" style="width:100%;padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text-primary);resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>
+          <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+            <button data-agent-send style="flex:1;padding:6px;font-size:12px;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer">Send</button>
+            <button data-agent-cancel style="display:none;padding:6px 10px;font-size:12px;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;cursor:pointer">Stop</button>
+            <button data-agent-clear title="Clear conversation" style="padding:6px 8px;font-size:11px;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;cursor:pointer">Clear</button>
+          </div>
         </div>
       </div>
     </aside>
   </div>
-  <script type="module" src="${options.editorJsPath}"></script>
+  <link rel="stylesheet" href="/platform/style.css?v=${Date.now()}">
+  <script src="/platform/theme-init.js?v=${Date.now()}"></script>
+  <script src="/platform/app.js?v=${Date.now()}"></script>
+  <script type="module" src="${options.editorJsPath}${options.editorJsPath.includes('?') ? '&' : '?'}v=${Date.now()}"></script>
 </body>
 </html>`;
 }
