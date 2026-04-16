@@ -55,6 +55,11 @@ export const PLATFORM_JS = `
     sectionsLoaded: false,
     varyPanelLoaded: false,
     constructorPanelLoaded: false,
+    agentPanelLoaded: false,
+    agentSessionId: null, // for --resume multi-turn
+    agentChatId: null,    // current in-flight chat id (for cancel)
+    agentReader: null,    // ReadableStream reader for the active SSE response
+    agentToolMap: {},     // tool_use id → DOM element (for inline tool_result wiring)
   };
 
   const VIEWPORT_DIMS = {
@@ -3912,6 +3917,10 @@ export const PLATFORM_JS = `
         if (target === 'constructor' && !state.constructorPanelLoaded) {
           initConstructorPanel();
         }
+        // Lazy-init agent panel on first activation
+        if (target === 'agent' && !state.agentPanelLoaded) {
+          initAgentPanel();
+        }
         // Quality tab: fetch aesthetic score
         if (target === 'quality') {
           var analyzeBtn = $('[data-quality-analyze]');
@@ -4287,27 +4296,48 @@ export const PLATFORM_JS = `
           if (constructorSections.length > 0) constructorRecompose();
         });
       }
-      // Refine: ask agent
+      // Refine: ask agent — now routes through the unified chat panel.
+      // We build a prompt that targets the specific section, switch the
+      // user to the Agent tab so they see live progress, and let the
+      // chat handle spawn + tool-call rendering + canvas auto-update.
+      // No more copy-paste textarea — the agent applies the change
+      // directly via reframe MCP tools.
       var askBtn = $('#ctr-refine-ask');
       if (askBtn) {
         askBtn.addEventListener('click', function() {
           var refinePanel = $('#ctr-refine-panel');
           var idx = parseInt(refinePanel ? refinePanel.dataset.sectionIdx : '-1');
-          var prompt = ($('#ctr-refine-prompt') || {}).value || '';
-          if (idx < 0 || !constructorSceneId || !prompt.trim()) return;
-          askBtn.disabled = true;
-          askBtn.textContent = 'Asking...';
-          api('/platform/api/constructor/refine', {
-            sceneId: constructorSceneId,
-            sectionIndex: idx,
-            prompt: prompt.trim(),
-          }).then(function(data) {
-            var result = $('#ctr-refine-result');
-            if (result) result.textContent = data.ok ? data.agentPrompt.slice(0, 400) + '...' : 'Error: ' + data.error;
-          }).catch(function(e) {
-            var result = $('#ctr-refine-result');
-            if (result) result.textContent = 'Error: ' + e.message;
-          }).finally(function() { askBtn.disabled = false; askBtn.textContent = 'Ask Agent'; });
+          var userText = ($('#ctr-refine-prompt') || {}).value || '';
+          if (idx < 0 || !constructorSceneId || !userText.trim()) return;
+
+          var sectionLabel = constructorSections[idx] || ('section ' + (idx + 1));
+          // Phrase the prompt so the agent knows exactly what to touch.
+          // The chat preamble already injects scene id + brand, so we
+          // only need to pinpoint the section + the user's intent.
+          var fullPrompt =
+            'Refine the section "' + sectionLabel + '" (index ' + idx + ') in the active composed page. ' +
+            'Use reframe_inspect to examine the section, then reframe_edit to apply the change. ' +
+            'User wants: ' + userText.trim();
+
+          // Switch to Agent tab so the user sees what is happening.
+          var agentTab = document.querySelector('[data-tab="agent"]');
+          if (agentTab) agentTab.click();
+
+          // Lazy-init then send. initAgentPanel is idempotent via
+          // state.agentPanelLoaded — but we need its inner streamChat
+          // function which is closured. Easiest: drop the prompt into
+          // the chat textarea and click Send.
+          setTimeout(function() {
+            var chatInput = $('[data-agent-input]');
+            var chatSend = $('[data-agent-send]');
+            if (chatInput && chatSend) {
+              chatInput.value = fullPrompt;
+              chatSend.click();
+              // Clear the constructor prompt now that it has moved to chat.
+              var p = $('#ctr-refine-prompt');
+              if (p) p.value = '';
+            }
+          }, 50);
         });
       }
       // Refine: accept HTML
@@ -4343,6 +4373,268 @@ export const PLATFORM_JS = `
       }
 
       renderSectionList();
+    }
+  }
+
+  // ── Agent chat panel ──────────────────────────────────────────────
+  // Embedded Claude Code agent. Talks to /api/agent/chat which spawns
+  // claude (-p, --output-format stream-json) server-side and pipes parsed
+  // events back as SSE. We render text/tool_use/tool_result inline so the
+  // user sees what the agent is doing without leaving the UI.
+  function initAgentPanel() {
+    state.agentPanelLoaded = true;
+
+    var statusDot = $('[data-agent-status-dot]');
+    var banner = $('[data-agent-banner]');
+    var logEl = $('[data-agent-log]');
+    var inputEl = $('[data-agent-input]');
+    var sendBtn = $('[data-agent-send]');
+    var cancelBtn = $('[data-agent-cancel]');
+    var clearBtn = $('[data-agent-clear]');
+
+    // Health check — show banner if claude isn't installed.
+    fetch('/api/agent/health').then(function(r) { return r.json(); }).then(function(h) {
+      if (!h.claudeFound) {
+        if (statusDot) statusDot.style.background = '#e85a5a';
+        if (banner) {
+          banner.style.display = '';
+          banner.innerHTML = 'Claude Code CLI not found. <a href="https://claude.com/download" target="_blank" style="color:var(--accent)">Install</a> then refresh.';
+        }
+      } else {
+        if (statusDot) statusDot.style.background = '#36c777';
+      }
+    }).catch(function() {
+      if (statusDot) statusDot.style.background = '#e85a5a';
+    });
+
+    function clearLog() {
+      if (logEl) logEl.innerHTML = '';
+      state.agentSessionId = null;
+      state.agentToolMap = {};
+    }
+
+    function appendBubble(role, content) {
+      if (!logEl) return null;
+      // Drop the empty-state placeholder on first real message.
+      var empty = logEl.querySelector('.agent-empty');
+      if (empty) empty.remove();
+      var b = document.createElement('div');
+      b.className = 'agent-bubble agent-' + role;
+      var bg = role === 'user' ? 'var(--accent)' : 'var(--surface-elevated)';
+      var color = role === 'user' ? '#fff' : 'var(--text-primary)';
+      var align = role === 'user' ? 'flex-end' : 'flex-start';
+      b.style.cssText = 'align-self:' + align + ';max-width:92%;padding:8px 10px;border-radius:8px;background:' + bg + ';color:' + color + ';white-space:pre-wrap;word-break:break-word';
+      b.textContent = content;
+      logEl.appendChild(b);
+      logEl.scrollTop = logEl.scrollHeight;
+      return b;
+    }
+
+    function appendToolCard(toolName, input, toolUseId) {
+      if (!logEl) return null;
+      var empty = logEl.querySelector('.agent-empty');
+      if (empty) empty.remove();
+      var card = document.createElement('div');
+      card.className = 'agent-tool';
+      card.style.cssText = 'align-self:flex-start;max-width:92%;padding:6px 8px;border-radius:6px;background:var(--surface-elevated);border:1px solid var(--border);font-family:var(--mono,monospace);font-size:11px';
+      var inputPreview = '';
+      try {
+        var s = JSON.stringify(input);
+        if (s && s.length > 80) s = s.slice(0, 80) + '...';
+        inputPreview = s || '';
+      } catch (_) {}
+      card.innerHTML = '<div style="display:flex;align-items:center;gap:6px;color:var(--text-primary)"><span style="opacity:.6">\uD83D\uDD27</span><strong>' + escapeHtml(toolName) + '</strong><span data-tool-status style="margin-left:auto;font-size:10px;color:var(--text-muted)">running\u2026</span></div>' +
+        (inputPreview ? '<div style="margin-top:3px;color:var(--text-muted);font-size:10px">' + escapeHtml(inputPreview) + '</div>' : '') +
+        '<div data-tool-result style="display:none;margin-top:4px;padding-top:4px;border-top:1px dashed var(--border);color:var(--text-muted);font-size:10px;white-space:pre-wrap;max-height:80px;overflow-y:auto"></div>';
+      logEl.appendChild(card);
+      logEl.scrollTop = logEl.scrollHeight;
+      if (toolUseId) state.agentToolMap[toolUseId] = card;
+      return card;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+      });
+    }
+
+    function setSending(on) {
+      if (sendBtn) { sendBtn.disabled = on; sendBtn.textContent = on ? 'Working\u2026' : 'Send'; }
+      if (cancelBtn) cancelBtn.style.display = on ? '' : 'none';
+      if (inputEl) inputEl.disabled = on;
+    }
+
+    // Parse SSE stream produced by /api/agent/chat. The browser EventSource
+    // API cannot do POST, so we use fetch + ReadableStream and parse the
+    // text/event-stream format by hand (each event is one event-line plus
+    // one data-line, separated from the next event by a blank line).
+    function streamChat(prompt) {
+      setSending(true);
+      var body = { prompt: prompt };
+      if (state.agentSessionId) body.sessionId = state.agentSessionId;
+      // Tell the server which scene the user is currently editing so the
+      // preamble can include scene id, dimensions, and brand. Without
+      // this, claude has no idea what "header" / "this section" mean.
+      var sid = state.currentSceneId
+        || (document.querySelector('[data-session]') && document.querySelector('[data-session]').getAttribute('data-session'))
+        || (document.querySelector('canvas[data-session]') && document.querySelector('canvas[data-session]').getAttribute('data-session'));
+      if (sid) body.sceneId = sid;
+
+      // User bubble first.
+      appendBubble('user', prompt);
+
+      var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      state.agentReader = ctrl; // store the controller so cancelBtn can abort.
+
+      fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl ? ctrl.signal : undefined,
+      }).then(function(resp) {
+        if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = '';
+
+        function processBuf() {
+          // SSE events are separated by blank lines.
+          var idx;
+          while ((idx = buf.indexOf('\\n\\n')) !== -1) {
+            var raw = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            handleSseBlock(raw);
+          }
+        }
+
+        function pump() {
+          return reader.read().then(function(r) {
+            if (r.done) {
+              if (buf.trim()) handleSseBlock(buf);
+              setSending(false);
+              return;
+            }
+            buf += decoder.decode(r.value, { stream: true });
+            processBuf();
+            return pump();
+          });
+        }
+        return pump();
+      }).catch(function(err) {
+        if (err && err.name === 'AbortError') {
+          appendBubble('assistant', '[cancelled]');
+        } else {
+          appendBubble('assistant', '[error] ' + (err && err.message ? err.message : err));
+        }
+        setSending(false);
+      });
+    }
+
+    function handleSseBlock(raw) {
+      // Each block: "event: <name>" + "data: <json>" lines (other lines ignored).
+      var ev = null;
+      var data = null;
+      raw.split(/\\r?\\n/).forEach(function(line) {
+        if (line.indexOf('event:') === 0) {
+          ev = line.slice(6).trim();
+        } else if (line.indexOf('data:') === 0) {
+          var rest = line.slice(5).trim();
+          try { data = JSON.parse(rest); } catch (_) { data = rest; }
+        }
+      });
+      if (!ev || data === null) return;
+      handleAgentEvent(ev, data);
+    }
+
+    var pendingAssistantBubble = null;
+
+    function handleAgentEvent(name, data) {
+      switch (name) {
+        case 'chat_id':
+          state.agentChatId = data.chatId;
+          break;
+        case 'session_start':
+          state.agentSessionId = data.sessionId || state.agentSessionId;
+          pendingAssistantBubble = null;
+          break;
+        case 'text':
+          // Coalesce successive text blocks into one bubble for readability.
+          if (!pendingAssistantBubble) {
+            pendingAssistantBubble = appendBubble('assistant', data.text);
+          } else {
+            pendingAssistantBubble.textContent += data.text;
+            if (logEl) logEl.scrollTop = logEl.scrollHeight;
+          }
+          break;
+        case 'tool_use':
+          pendingAssistantBubble = null; // break the bubble before a tool call
+          appendToolCard(data.toolName, data.input, data.toolUseId);
+          break;
+        case 'tool_result':
+          var card = state.agentToolMap[data.toolUseId];
+          if (card) {
+            var statusEl = card.querySelector('[data-tool-status]');
+            if (statusEl) {
+              statusEl.textContent = data.ok ? 'ok' : 'error';
+              statusEl.style.color = data.ok ? '#36c777' : '#e85a5a';
+            }
+            var resEl = card.querySelector('[data-tool-result]');
+            if (resEl && data.preview) {
+              resEl.style.display = '';
+              resEl.textContent = data.preview;
+            }
+          }
+          break;
+        case 'done':
+          pendingAssistantBubble = null;
+          if (data.cost && logEl) {
+            var meta = document.createElement('div');
+            meta.style.cssText = 'align-self:center;font-size:10px;color:var(--text-muted);padding:4px 0';
+            meta.textContent = 'Done in ' + Math.round(data.durationMs / 100) / 10 + 's' + (data.cost ? ' \u00B7 $' + data.cost.toFixed(4) : '');
+            logEl.appendChild(meta);
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+          break;
+        case 'error':
+          appendBubble('assistant', '[error] ' + (data.message || data.code || 'unknown'));
+          break;
+      }
+    }
+
+    if (sendBtn) {
+      sendBtn.addEventListener('click', function() {
+        var text = (inputEl && inputEl.value || '').trim();
+        if (!text) return;
+        if (inputEl) inputEl.value = '';
+        streamChat(text);
+      });
+    }
+    if (inputEl) {
+      inputEl.addEventListener('keydown', function(e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault();
+          if (sendBtn) sendBtn.click();
+        }
+      });
+    }
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', function() {
+        // Best-effort cancel: tell server (kills subprocess) AND abort the stream.
+        if (state.agentChatId) {
+          fetch('/api/agent/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chatId: state.agentChatId }),
+          }).catch(function() {});
+        }
+        if (state.agentReader && state.agentReader.abort) {
+          try { state.agentReader.abort(); } catch (_) {}
+        }
+        setSending(false);
+      });
+    }
+    if (clearBtn) {
+      clearBtn.addEventListener('click', clearLog);
     }
   }
 

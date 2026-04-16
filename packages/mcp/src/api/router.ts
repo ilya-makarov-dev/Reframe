@@ -12,6 +12,7 @@ import { handleTokensApi } from './tokens.js';
 import { handleBlocksApi } from './blocks.js';
 import { handleAuditApi } from './audit.js';
 import { handleScenesApi } from './scenes.js';
+import { handleAgentApi } from './agent.js';
 
 /** Try to handle an /api/* request. Returns true if handled. */
 export async function handleApiRequest(
@@ -68,6 +69,12 @@ export async function handleApiRequest(
     if (path === '/api/scenes' && method === 'GET') {
       await handleScenesApi(req, res);
       return true;
+    }
+
+    // /api/agent/* — chat / cancel / health for embedded Claude Code agent
+    if (path.startsWith('/api/agent/')) {
+      const handled = await handleAgentApi(req, res, url);
+      if (handled) return true;
     }
 
     // /api/compile (POST)
