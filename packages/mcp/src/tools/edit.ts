@@ -465,14 +465,6 @@ const operationSchema = z.discriminatedUnion('op', [
     limit: z.number().optional().describe('Max variants to generate (safety cap, default 64)'),
   }),
 
-  // Instantiate a block from the block library into the session
-  z.object({
-    op: z.literal('instantiateBlock'),
-    block: z.string().describe('Block name to instantiate (e.g. "hero-centered", "pricing-3col"). Use reframe_project list_blocks to see available blocks.'),
-    slots: z.record(z.string()).optional().describe('Slot values to fill: { headline: "Ship Faster", subtitle: "..." }'),
-    sceneId: z.string().optional(),
-  }),
-
   // Configure a node as multi-column grid layout
   z.object({
     op: z.literal('multiColumn'),
@@ -1884,41 +1876,6 @@ export async function handleEdit(input: {
           touchedScenes.add(sceneId);
         } catch (e: any) {
           results.push(`VARY ERROR: ${e?.message ?? e}`);
-        }
-        break;
-      }
-
-      case 'instantiateBlock': {
-        // Instantiate a block from the block library into the current scene
-        try {
-          const { getBlock, instantiateBlock: instBlock, registerStarterBlocks, blockCount } = await import('../../../core/src/blocks/index.js');
-          if (blockCount() === 0) registerStarterBlocks();
-
-          const blockName = (op as any).block ?? (op as any).name;
-          if (!blockName) {
-            results.push('instantiateBlock: block name is required');
-            break;
-          }
-
-          const block = getBlock(blockName);
-          if (!block) {
-            results.push(`instantiateBlock: block "${blockName}" not found. Use reframe_project list_blocks to see available blocks.`);
-            break;
-          }
-
-          const slots = (op as any).slots ?? {};
-          const result = instBlock(block, slots);
-
-          // Store as a new scene
-          const newSceneId = storeScene(result.graph, result.rootId, undefined, {
-            slug: blockName,
-            name: block.description || blockName,
-          });
-
-          touchedScenes.add(newSceneId);
-          results.push(`instantiateBlock: "${blockName}" → ${newSceneId} (${result.filledSlots}/${result.totalSlots} slots, ${result.graph.nodes.size} nodes)`);
-        } catch (e: any) {
-          results.push(`instantiateBlock ERROR: ${e?.message ?? e}`);
         }
         break;
       }

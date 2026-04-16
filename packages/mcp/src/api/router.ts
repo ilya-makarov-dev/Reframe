@@ -9,11 +9,9 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { handleRenderApi } from './render.js';
 import { handleBatchApi } from './batch.js';
 import { handleTokensApi } from './tokens.js';
-import { handleBlocksApi } from './blocks.js';
 import { handleAuditApi } from './audit.js';
 import { handleScenesApi } from './scenes.js';
 import { handleAgentApi } from './agent.js';
-import { handleBlocksApi as handleAgentBlocksApi } from './blocks-insert.js';
 
 /** Try to handle an /api/* request. Returns true if handled. */
 export async function handleApiRequest(
@@ -54,12 +52,6 @@ export async function handleApiRequest(
       return true;
     }
 
-    // /api/blocks
-    if (path.startsWith('/api/blocks')) {
-      await handleBlocksApi(req, res, url);
-      return true;
-    }
-
     // /api/audit/:sceneId
     if (path.match(/^\/api\/audit\/[^/]+$/) && method === 'GET') {
       await handleAuditApi(req, res, url);
@@ -76,10 +68,6 @@ export async function handleApiRequest(
     if (path.startsWith('/api/agent/')) {
       const handled = await handleAgentApi(req, res, url);
       if (handled) return true;
-      // Block library lives under /api/agent/blocks, /api/agent/insert,
-      // /api/agent/compose-page — try those next.
-      const blocksHandled = await handleAgentBlocksApi(req, res, url);
-      if (blocksHandled) return true;
     }
 
     // /api/compile (POST)

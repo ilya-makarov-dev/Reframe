@@ -314,10 +314,6 @@ export function renderEditorShell(options: {
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2v8M5 5v5a3 3 0 006 0V5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         </button>
         <div class="tb-sep"></div>
-        <button class="tb" id="btn-block-palette" title="Insert section (\u2318P)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-        </button>
-        <div class="tb-sep"></div>
         <button class="tb" id="btn-undo" title="Undo (Ctrl+Z)">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5 6L2 8.5 5 11M2.5 8.5H11a3 3 0 010 6H9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -330,7 +326,7 @@ export function renderEditorShell(options: {
     <aside id="panel">
       <!-- Single always-visible Properties pane. Right-panel tabs are gone:
            Agent moved to a floating prompt (right-click on canvas / Cmd+K),
-           Constructor will return as a floating block library later. The
+           block insertion moved to the floating block palette (Cmd+P). The
            panel content is updated by scripts.ts on canvas-select events
            (showPropsForNode). data-panel="design" + class .properties is
            kept so existing scripts.ts selectors still resolve. -->

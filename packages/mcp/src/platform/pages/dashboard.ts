@@ -130,10 +130,6 @@ function renderOverview(data: DashboardData): string {
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
         Create Canvas
       </button>
-      <a href="/platform/constructor" class="btn btn-secondary btn-sm" style="display:flex;align-items:center;gap:6px;text-decoration:none">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1" y="1" width="12" height="4" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="1" y="7" width="5" height="6" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="8" y="7" width="5" height="6" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
-        Constructor
-      </a>
     </div>
     <div class="overview-grid">${cards}</div>
   </div>`;
@@ -160,20 +156,6 @@ function renderEmpty(): string {
           <svg class="dash-card-arrow" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
 
-        <a class="dash-primary-card" href="/platform/constructor">
-          <div class="dash-card-icon">
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-              <rect x="3" y="3" width="22" height="8" rx="2" stroke="currentColor" stroke-width="1.6"/>
-              <rect x="3" y="14" width="10" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/>
-              <rect x="16" y="14" width="9" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/>
-            </svg>
-          </div>
-          <div class="dash-card-text">
-            <span class="dash-card-title">Constructor</span>
-            <span class="dash-card-desc">Pick hero, features, pricing, footer \u2014 assemble a page from section blocks.</span>
-          </div>
-          <svg class="dash-card-arrow" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </a>
       </div>
 
       <!-- BRAND STRIP -->
