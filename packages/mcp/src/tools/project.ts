@@ -45,17 +45,6 @@ import type { ProjectManifest, SceneEntry } from '../../../core/src/project/type
 import { detectBrandDrift } from '../../../core/src/project/types.js';
 import { parseDesignMd } from '../../../core/src/design-system/index.js';
 import { exportToDTCG, importFromDTCG } from '../../../core/src/design-system/dtcg.js';
-import {
-  registerStarterBlocks,
-  listBlocks as listRegistryBlocks,
-  getBlock,
-  instantiateBlock,
-  saveBlock as saveBlockToDisk,
-  loadBlocksFromDisk,
-  deleteBlockFile,
-  blockCount,
-} from '../../../core/src/blocks/index.js';
-import type { BlockCategory } from '../../../core/src/blocks/types.js';
 import { serializeGraph } from '../../../core/src/serialize.js';
 import {
   getScene,
@@ -73,8 +62,6 @@ import { detectPatternsFromGraphs, formatPatternDetection } from '../../../core/
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { extractContent } from '../../../core/src/content/extract.js';
 import { applyContent, formatApplyResult } from '../../../core/src/content/apply.js';
-import { createPageFromTemplate, buildSite, formatBuildSiteResult } from '../../../core/src/content/constructor.js';
-import { composePage, formatComposeResult } from '../../../core/src/content/compose.js';
 import { resolve, normalize, relative, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 
@@ -143,10 +130,8 @@ export const projectInputSchema = {
       'save_macro', 'list_macros', 'apply_macro', 'delete_macro',
       'list_components', 'show_component', 'delete_component',
       'export_tokens', 'import_tokens',
-      'list_blocks', 'get_block', 'add_block', 'save_block', 'delete_block',
       'product_audit', 'detect_patterns', 'list_trash', 'restore', 'empty_trash',
       'extract_content', 'apply_content',
-      'create_from_template', 'build_site', 'compose_page',
     ])
     .describe(
       'Action: init, open, save, load, list, status, delete, save_design, list_brands, set_active_brand, show_source, history, history_clear, add_variant, list_variants, refresh_variants, save_macro, list_macros, apply_macro, delete_macro, list_components (show every component master stored in the project), show_component (return a component master with its slots + revisions), delete_component (remove a component master from disk — scenes that reference it by name will show as missing on next load)',
@@ -207,20 +192,12 @@ export async function handleProject(input: {
       case 'delete_component': return doDeleteComponent(input);
       case 'export_tokens': return doExportTokens(input);
       case 'import_tokens': return doImportTokens();
-      case 'list_blocks': return doListBlocks(input);
-      case 'get_block': return doGetBlock(input);
-      case 'add_block': return doAddBlock(input);
-      case 'save_block': return doSaveBlock(input);
-      case 'delete_block': return doDeleteBlock(input);
       case 'render_project': return doRenderProject();
       case 'project_graph': return doProjectGraph();
       case 'product_audit': return doProductAudit(input);
       case 'detect_patterns': return doDetectPatterns(input);
       case 'extract_content': return doExtractContent(input);
       case 'apply_content': return doApplyContent(input);
-      case 'create_from_template': return doCreateFromTemplate(input);
-      case 'build_site': return doBuildSite(input);
-      case 'compose_page': return doComposePage(input);
       case 'list_trash': return doListTrash();
       case 'restore': return doRestore(input);
       case 'empty_trash': return doEmptyTrash();
@@ -276,9 +253,6 @@ function doOpen(input: { dir?: string }) {
 
   const manifest = loadProject(projectDir);
   setProjectDir(projectDir);
-
-  // Auto-register block library on project open
-  ensureBlocks();
 
   emitProjectEvent({ type: 'project:opened', manifest });
 
@@ -838,129 +812,6 @@ function doProjectGraph() {
   };
 }
 
-// ─── Block Library ──────────────────────────────────────────
-
-let _blocksInitialized = false;
-
-function ensureBlocks(): void {
-  if (_blocksInitialized) return;
-  _blocksInitialized = true;
-  // Load starter blocks
-  registerStarterBlocks();
-  // Load project blocks from disk
-  const dir = getProjectDir();
-  if (dir) loadBlocksFromDisk(dir);
-}
-
-function doListBlocks(input: { brand?: string }) {
-  ensureBlocks();
-  const category = input.brand as BlockCategory | undefined; // reuse 'brand' param as category filter
-  const blocks = listRegistryBlocks(category ?? undefined);
-  if (blocks.length === 0) return ok('No blocks found.' + (category ? ` Category: ${category}` : ''));
-
-  const lines = [`Block library: ${blocks.length} blocks` + (category ? ` in "${category}"` : '')];
-  const byCategory = new Map<string, string[]>();
-  for (const b of blocks) {
-    const cat = byCategory.get(b.category) ?? [];
-    cat.push(`  ${b.name} — ${b.description} (${b.slots.length} slots)`);
-    byCategory.set(b.category, cat);
-  }
-  for (const [cat, names] of byCategory) {
-    lines.push(`\n[${cat}]`);
-    lines.push(...names);
-  }
-  return ok(lines.join('\n'));
-}
-
-function doGetBlock(input: { name?: string }) {
-  if (!input.name) return err('name is required for get_block');
-  ensureBlocks();
-  const block = getBlock(input.name);
-  if (!block) return err(`Block "${input.name}" not found. Use list_blocks to see available blocks.`);
-  return {
-    content: [{
-      type: 'text' as const,
-      text: `Block: ${block.name}\nCategory: ${block.category}\nDescription: ${block.description}\nSlots: ${block.slots.map(s => `${s.name} (${s.type})`).join(', ')}\nTags: ${block.tags?.join(', ') ?? 'none'}`,
-    }],
-  };
-}
-
-function doAddBlock(input: { name?: string; description?: string; sceneId?: string }) {
-  if (!input.name) return err('name is required for add_block (block name to instantiate)');
-  ensureBlocks();
-
-  const block = getBlock(input.name);
-  if (!block) return err(`Block "${input.name}" not found. Use list_blocks to see available blocks.`);
-
-  // Parse slots from description field (JSON) if provided
-  let slots: Record<string, string> = {};
-  if (input.description) {
-    try {
-      slots = JSON.parse(input.description);
-    } catch {
-      // Treat description as headline slot
-      slots = { headline: input.description };
-    }
-  }
-
-  const result = instantiateBlock(block, slots);
-
-  // Store in session
-  const sceneId = storeScene(result.graph, result.rootId, undefined, { slug: block.name, name: block.name });
-
-  return ok(`Block "${block.name}" instantiated as scene ${sceneId} (${result.filledSlots}/${result.totalSlots} slots filled, ${result.graph.nodes.size} nodes)`);
-}
-
-function doSaveBlock(input: { sceneId?: string; name?: string; description?: string }) {
-  if (!input.sceneId) return err('sceneId is required for save_block');
-  if (!input.name) return err('name is required for save_block');
-
-  const stored = getScene(input.sceneId);
-  if (!stored) return err(`Scene "${input.sceneId}" not found`);
-
-  // Serialize the scene graph
-  const { serializeGraph } = require('../../../core/src/serialize.js');
-  const scene = serializeGraph(stored.graph, stored.rootId);
-
-  const def = {
-    version: 1 as const,
-    category: 'content' as const, // default category
-    name: input.name,
-    description: input.description ?? `Custom block from scene ${input.sceneId}`,
-    slots: [],
-    tree: scene.root,
-  };
-
-  // Save to disk if project dir exists
-  const dir = getProjectDir();
-  if (dir) {
-    const path = saveBlockToDisk(dir, def);
-    return ok(`Block "${input.name}" saved to ${path}`);
-  }
-
-  // Register in memory only
-  const { registerBlock } = require('../../../core/src/blocks/registry.js');
-  registerBlock(def);
-  return ok(`Block "${input.name}" registered in memory (no project dir — use init to persist)`);
-}
-
-function doDeleteBlock(input: { name?: string }) {
-  if (!input.name) return err('name is required for delete_block');
-  ensureBlocks();
-
-  const block = getBlock(input.name);
-  if (!block) return err(`Block "${input.name}" not found`);
-
-  const dir = getProjectDir();
-  if (dir) {
-    deleteBlockFile(dir, block.category, block.name);
-  }
-
-  const { removeBlock } = require('../../../core/src/blocks/registry.js');
-  removeBlock(input.name);
-  return ok(`Block "${input.name}" deleted`);
-}
-
 // ─── Token Export/Import ────────────────────────────────────
 
 function doExportTokens(input: { sceneId?: string }) {
@@ -1295,156 +1146,6 @@ function doEmptyTrash() {
     require('fs').unlinkSync(join(trashDir, f));
   }
   return ok(`Emptied trash (${files.length} files permanently deleted).`);
-}
-
-// ─── Compose Page (Blocks → Page) ────────────────────────────
-
-async function doComposePage(input: { name?: string; designMd?: string; tags?: string[] }) {
-  // designMd field carries the blocks config as JSON array:
-  // [{"block":"nav-simple"},{"block":"hero-centered","slots":{"headline":"My App"}}]
-  // OR name field carries comma-separated block names: "nav-simple,hero-centered,pricing-3col"
-
-  let blockInputs: Array<{ block: string; slots?: Record<string, string> }> = [];
-
-  if (input.designMd) {
-    try {
-      blockInputs = JSON.parse(input.designMd);
-    } catch {
-      return err('designMd must be a JSON array of {block, slots?} objects.');
-    }
-  } else if (input.name) {
-    // Simple mode: comma-separated block names
-    blockInputs = input.name.split(',').map(b => ({ block: b.trim() }));
-  } else {
-    return err('Provide block names via name (comma-separated) or designMd (JSON array).');
-  }
-
-  if (blockInputs.length === 0) return err('No blocks specified.');
-
-  try {
-    // Ensure starter blocks are registered
-    const { registerStarterBlocks } = require('../../../core/src/blocks/index.js');
-    registerStarterBlocks();
-
-    const result = await composePage(blockInputs);
-
-    // Store the composed page in session
-    const pageName = blockInputs.map(b => b.block.split('-')[0]).join('-');
-    const group = input.tags?.[0] ?? undefined;
-
-    const sessionId = storeScene(result.graph, result.rootId, {
-      slug: pageName,
-      name: pageName.replace(/[-_]/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
-      group,
-    } as any);
-
-    const formatted = formatComposeResult(result);
-    return ok(`${formatted}\n\nSession ID: ${sessionId}\nInspect: reframe_inspect({ sceneId: "${sessionId}" })`);
-  } catch (e: any) {
-    return err(`Compose page failed: ${e.message}`);
-  }
-}
-
-// ─── Constructor (Template → Pages → Site) ──────────────────
-
-function doCreateFromTemplate(input: { sceneId?: string; name?: string; designMd?: string }) {
-  if (!input.sceneId) return err('sceneId required (template scene ID).');
-  if (!input.name) return err('name required (new page slug, e.g. "site/features").');
-  if (!input.designMd) return err('designMd required (markdown content for this page).');
-
-  try {
-    // Resolve template scene
-    const resolved = getScene(input.sceneId);
-    if (!resolved) return err(`Template scene "${input.sceneId}" not found in session.`);
-
-    const { graph: templateGraph, rootId: templateRootId } = resolved;
-
-    // Parse name: "site/features" → group="site", slug="features", name="Features"
-    const nameParts = input.name.split('/');
-    const slug = nameParts[nameParts.length - 1];
-    const group = nameParts.length > 1 ? nameParts.slice(0, -1).join('/') : undefined;
-    const displayName = slug.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-
-    // Create page from template
-    const result = createPageFromTemplate(
-      templateGraph,
-      templateRootId,
-      slug,
-      displayName,
-      input.designMd,
-    );
-
-    // Store in session
-    const sessionId = storeScene(result.graph, result.rootId, {
-      slug: input.name.replace(/\//g, '-'),
-      name: displayName,
-      group,
-    } as any);
-
-    const cr = result.contentResult;
-    return ok(
-      `Page "${displayName}" created from template.\n` +
-      `Session ID: ${sessionId}\n` +
-      `Content: ${cr.updated} edits applied, ${cr.skipped.length} skipped.\n` +
-      `\nNext: reframe_inspect({ sceneId: "${sessionId}" }) to verify, or create more pages.`,
-    );
-  } catch (e: any) {
-    return err(`Create from template failed: ${e.message}`);
-  }
-}
-
-function doBuildSite(input: { sceneId?: string; name?: string }) {
-  if (!input.sceneId) return err('sceneId required (template scene ID).');
-  if (!_projectDir) return err('No project open. Use "init" or "open" first.');
-
-  try {
-    // Resolve template scene
-    const resolved = getScene(input.sceneId);
-    if (!resolved) return err(`Template scene "${input.sceneId}" not found in session.`);
-
-    const { graph: templateGraph, rootId: templateRootId } = resolved;
-
-    // Scan .reframe/content/ for .md files
-    const contentDir = join(_projectDir, '.reframe', 'content');
-    if (!existsSync(contentDir)) return err('No .reframe/content/ directory. Extract content first.');
-
-    const readdirSync = require('fs').readdirSync as (p: string) => string[];
-    const mdFiles = readdirSync(contentDir).filter((f: string) => f.endsWith('.md'));
-
-    if (mdFiles.length === 0) return err('No .md files in .reframe/content/. Extract content or add files.');
-
-    // Build pages
-    const siteGroup = input.name || 'site';
-    const pages = mdFiles.map((f: string) => {
-      const slug = f.replace(/\.md$/, '');
-      const name = slug.replace(/[-_]/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
-      const markdown = readFileSync(join(contentDir, f), 'utf-8');
-      return { slug, name, markdown };
-    });
-
-    const result = buildSite(templateGraph, templateRootId, pages);
-
-    // Store all pages in session
-    const sessionIds: string[] = [];
-    for (const page of result.pages) {
-      const sessionId = storeScene(page.graph, page.rootId, {
-        slug: `${siteGroup}-${page.slug}`,
-        name: page.name,
-        group: siteGroup,
-      } as any);
-      sessionIds.push(sessionId);
-    }
-
-    const summary = formatBuildSiteResult(result);
-    const sessionList = sessionIds.map((id, i) => `  ${id}: ${result.pages[i].name}`).join('\n');
-
-    return ok(
-      `${summary}\n\nSession scenes:\n${sessionList}\n\n` +
-      `Export: reframe_export({ sceneId: "${sessionIds[0]}", format: "site" })`,
-    );
-  } catch (e: any) {
-    return err(`Build site failed: ${e.message}`);
-  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────

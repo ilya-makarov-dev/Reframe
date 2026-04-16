@@ -83,9 +83,6 @@ async function main() {
   const hasDesign = await page.$('[data-kind="describe"]');
   hasDesign ? pass('Design card present', '') : fail('Design card missing', '');
 
-  const hasBlocks = await page.$('a[href="/platform/blocks"], [data-kind="blocks"]');
-  hasBlocks ? pass('Build card present', '') : fail('Build card missing', '');
-
   const hasRebrand = await page.$('[data-kind="html"]');
   hasRebrand ? pass('Rebrand card present', '') : fail('Rebrand card missing', '');
 
@@ -124,14 +121,6 @@ async function main() {
     await page.keyboard.press('Escape');
     await page.waitForTimeout(200);
   }
-
-  // ═══ 4. BLOCKS PAGE ═══
-  console.log('\n\x1b[1m4. Blocks page\x1b[0m');
-  await go(page, '/platform/blocks');
-  const blockCards = await page.$$('.spec-card[data-block-name]');
-  blockCards.length > 0
-    ? pass(`Block library: ${blockCards.length} blocks`, '')
-    : fail('Block library empty', '');
 
   // ═══ 5. PROJECT CANVAS ═══
   console.log('\n\x1b[1m5. Project canvas\x1b[0m');
@@ -192,10 +181,6 @@ async function main() {
   await go(page, '/platform/batch');
   const batchH1 = await page.$eval('h1', el => el.textContent).catch(() => '');
   batchH1?.includes('Batch') ? pass('Batch export page', '') : fail('Batch page', `h1="${batchH1}"`);
-
-  await go(page, '/platform/blocks');
-  const blocksH1 = await page.$eval('h1', el => el.textContent).catch(() => '');
-  blocksH1?.includes('Block') ? pass('Block library page', '') : fail('Blocks page', `h1="${blocksH1}"`);
 
   // ═══ SUMMARY ═══
   await browser.close();

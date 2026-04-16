@@ -172,31 +172,6 @@ export {
   type AestheticScore,
 } from './aesthetic';
 
-// ── Block Library ──
-export {
-  registerBlock,
-  getBlock,
-  removeBlock,
-  listBlocks,
-  searchBlocks,
-  listBlockNames,
-  blockCount,
-  clearBlocks,
-  saveBlock,
-  loadBlock,
-  deleteBlockFile,
-  loadBlocksFromDisk,
-  listBlockFiles,
-  instantiateBlock,
-  registerStarterBlocks,
-  ALL_BLOCK_CATEGORIES,
-  type BlockCategory,
-  type BlockSlot,
-  type BlockDefinition,
-  type BlockInstantiateParams,
-  type InstantiateResult,
-} from './blocks';
-
 // ── Headless Adaptation ──
 export {
   adapt,
@@ -411,12 +386,8 @@ export type { CompileOptions, CompileContent, LayoutStyle } from './compiler/typ
 // -- Content (Markdown Control Layer) --
 export { extractContent } from './content/index';
 export { applyContent, formatApplyResult } from './content/index';
-export { createPageFromTemplate, buildSite, formatBuildSiteResult } from './content/index';
-export { composePage, formatComposeResult } from './content/index';
 export type {
   ContentProjection, ContentElement, ContentEdit, ContentApplyResult, BackReference,
-  PageResult, SiteBuildResult, SitePageInput,
-  ComposePageInput, ComposePageResult,
 } from './content/index';
 
 // -- Brand Fidelity --

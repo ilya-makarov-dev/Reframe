@@ -10,7 +10,7 @@
  *   B) Server→Canvas: reframe:prop-changed → apply CSS→OP mapping
  *   C) Full graph: MCPClient SSE → StoreSync pull → loadFromReframeGraph
  *
- * ALL UI (layers, properties, constructor) is handled by Platform scripts.ts.
+ * ALL UI (layers, properties, block palette) is handled by Platform scripts.ts.
  */
 
 import { createReframeEditor, type ReframeEditorShell } from '../canvas/editor-shell.js';
@@ -18,7 +18,6 @@ import { setupCanvasInteraction } from '../canvas/interaction.js';
 import { setupFileDragDrop } from './file-handler.js';
 import { getContextMenuItems, renderContextMenu, executeContextAction } from './context-menu.js';
 import { initAgentPrompt } from './agent-prompt.js';
-import { initBlockPalette } from './block-palette.js';
 import { MCPClient } from '../sync/mcp-client.js';
 import { StoreSync } from '../sync/store-sync.js';
 import { computeAllLayouts } from '@open-pencil/core';
@@ -70,9 +69,9 @@ function dispatchSelection(ids: Set<string> | ReadonlySet<string>): void {
  * skip POSTing every "created" event back to the server (the server
  * already has those nodes; without suppression every load → 404 spam).
  *
- * Used by the initial scene-load + the constructor-composed +
- * variant-open + open-scene flows. StoreSync.pullFromMCP also sets the
- * same flag for SSE-triggered rebuilds.
+ * Used by the initial scene-load + variant-open + open-scene flows.
+ * StoreSync.pullFromMCP also sets the same flag for SSE-triggered
+ * rebuilds.
  */
 function loadGraphSuppressed(s: ReframeEditorShell, graph: any, rootId: string): void {
   (window as any).__reframeSyncing = true;
@@ -121,9 +120,6 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
     // cursor. Selection is automatically scoped, scene id pulled from
     // the canvas data attribute. Idempotent — safe to call once at boot.
     initAgentPrompt();
-    // Wire the floating block palette: + button in toolbar, Cmd+P
-    // hotkey, or empty-scene wizard auto-opens it in compose mode.
-    initBlockPalette();
 
     // 2. Create editor shell
     shell = await createReframeEditor({
@@ -232,54 +228,8 @@ export async function initPlatformViewport(): Promise<ReframeEditorShell | null>
     wirePropChangedHandler(shell, storeSync);
     wireSelfCausedRevisionHandler(storeSync);
 
-    // 9. Constructor compose → load new scene into canvas
-    window.addEventListener('reframe:constructor-composed', (async (ev: Event) => {
-      const sceneId = (ev as CustomEvent).detail?.sceneId;
-      if (!sceneId || !shell) return;
-      try {
-        const resp = await fetch(`/scenes/${sceneId}?format=json`);
-        if (!resp.ok) return;
-        const json = await resp.json();
-        const rfData = deserializeToGraph(json.root || json);
-        loadGraphSuppressed(shell, rfData.graph, rfData.rootId);
-        // Update session and restart sync
-        const cvs = document.getElementById('reframe-viewport');
-        if (cvs) (cvs as HTMLElement).dataset.session = sceneId;
-        if (storeSync) {
-          storeSync.stopSync();
-          storeSync.startSync(sceneId);
-        }
-        // Refresh layers tree
-        window.dispatchEvent(new CustomEvent('reframe:graph-changed'));
-      } catch (e) {
-        console.error('[reframe] Constructor load error:', e);
-      }
-    }) as EventListener);
-
-    // 9a. Wire the "+" toolbar button → open the floating block palette.
-    document.getElementById('btn-block-palette')?.addEventListener('click', () => {
-      window.dispatchEvent(new CustomEvent('reframe:open-block-palette'));
-    });
-
-    // 9c. Empty-scene wizard — if the active scene is empty (no children
-    // under the page root), offer the AI compose flow on first paint.
-    // Detected after sync starts so the scene tree is populated.
-    setTimeout(() => {
-      try {
-        const ed = (window as any).__reframeEditor;
-        if (!ed || !ed.state) return;
-        const allNodes = ed.state.nodes ? Object.keys(ed.state.nodes) : [];
-        // Heuristic: if scene has only a CANVAS + PAGE (≤ 2 nodes), it's
-        // effectively blank → fire the compose wizard.
-        if (allNodes.length > 0 && allNodes.length <= 2) {
-          window.dispatchEvent(new CustomEvent('reframe:open-empty-wizard'));
-        }
-      } catch { /* best-effort */ }
-    }, 1500);
-
-    // 9b. Variant picker → load chosen scene into canvas. Same pattern
-    // as constructor-composed: fetch scene → load into shell → swap
-    // data-session → restart sync.
+    // 9b. Variant picker → load chosen scene into canvas.
+    // Fetch scene → load into shell → swap data-session → restart sync.
     window.addEventListener('reframe:open-scene', (async (ev: Event) => {
       const sceneId = (ev as CustomEvent).detail?.sceneId;
       if (!sceneId || !shell) return;

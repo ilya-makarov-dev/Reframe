@@ -58,7 +58,13 @@ scratch/
 # run via `npm test`. The scripts/dev-qa/ folder hosts the local
 # Playwright UI smoke harness — used by the maintainer to find/fix
 # bugs interactively. Not part of the product, not pushed.
-scripts/
+# Use `scripts/*` (not `scripts/`) so negations below can re-include
+# specific files — git won't descend into a fully-ignored directory.
+scripts/*
+# Exception: copy-platform-assets.mjs is a permanent post-build step
+# for @reframe/mcp (copies platform-ui.js / platform-ui.css into dist).
+# It MUST ship — the npm build breaks without it.
+!scripts/copy-platform-assets.mjs
 
 # ─── NPM artifacts ───────────────────────────────────────
 *.tgz
@@ -75,6 +81,10 @@ packages/*/src/**/*.d.ts.map
 # that ship without their own types (svg-parser, others). These ARE
 # source files — the rule above wants to drop tsc output, not typings.
 !packages/core/src/importers/svg-parser.d.ts
+# Exception: platform/ui/*.js are hand-authored Platform UI modules
+# that get concatenated at build time into dist/.../platform-ui.js.
+# They're source, not tsc output.
+!packages/mcp/src/platform/ui/*.js
 
 # ─── Legacy studio package (removed, keep path ignored) ──
 # We removed packages/studio in favor of the platform UI served by

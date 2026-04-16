@@ -3,9 +3,9 @@
 Import → Graph → Audit → Transform → Export. INode is to structured content what AST is to code.
 Interactive CanvasKit viewport powered by @open-pencil/core. 37-rule quality engine. 8 export formats.
 
-**Architecture:** `@open-pencil/core` (MIT, npm) = viewport rendering + .fig + pointer interaction. `@reframe/core` = INode AST + SceneGraph + layout + audit + tokens + resize + export + blocks + variations + animation + semantic layer — the engine. `@reframe/editor` = GraphBridge (OP ↔ INode) + canvas bootstrap + panels + sync. `@reframe/mcp` = MCP tools + Platform UI + REST API.
+**Architecture:** `@open-pencil/core` (MIT, npm) = viewport rendering + .fig + pointer interaction. `@reframe/core` = INode AST + SceneGraph + layout + audit + tokens + resize + variations + animation + semantic layer + 8 exporters — the engine. `@reframe/editor` = GraphBridge (OP ↔ INode) + canvas bootstrap + panels + sync. `@reframe/mcp` = MCP tools + Platform UI + REST API.
 
-**For design work:** THREE input modes — AI agent writes HTML, user picks blocks from library, or direct canvas editing (Figma-like). All converge on one CanvasKit viewport.
+**For design work:** three input paths — DESIGN.md seeds brand context, AI agent writes HTML, direct canvas editing (Figma-like). All converge on one INode SceneGraph.
 
 ## Build & Test
 
@@ -37,23 +37,24 @@ node packages/editor/src/bridge/bridge.integration.test.mjs  # editor integratio
 ## Packages (4)
 
 ```
-packages/core      @reframe/core    — headless engine: SceneGraph, audit (37 rules), tokens, resize, 8 exporters, HTML import, blocks, animation
-packages/mcp       @reframe/mcp     — MCP server (7 tools) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
+packages/core      @reframe/core    — headless engine: SceneGraph, audit (37 rules), tokens, resize, variations, 8 exporters, HTML import, animation
+packages/mcp       @reframe/mcp     — MCP server (6 core tools + 1 experimental) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
 packages/editor    @reframe/editor  — interactive editor: GraphBridge (@open-pencil/core ↔ reframe), CanvasKit viewport, panels, sync
 packages/cli       @reframe/cli     — CLI: init/build/test
 ```
 
-## MCP Tools (7 registered)
+## MCP Tools — 6 core
 
 ```
 reframe_design     brand load/list/extract (60+ brands via getdesign npm)
 reframe_compile    HTML → INode scene + 37-rule audit + auto-fix + .fig import (via @open-pencil/core)
 reframe_inspect    tree + 37-rule audit + 8 aesthetic metrics + brand fidelity + diff + semantic skeleton
-reframe_edit       ALL mutations — structural + theming + variations + adapt + vary + components + multiColumn
+reframe_edit       ALL mutations — structural + theming + variations + adapt + vary + components + multiColumn + resize
 reframe_export     8 core formats: html / react / svg / png / pdf / lottie / animated_html / site (+ theatre, transition for advanced use)
-reframe_project    persistence — save/load/history/blocks/content/macros/brands/components
-reframe_collab     EXPERIMENTAL — async intent queue worker stub
+reframe_project    persistence — save/load/history/content/macros/brands/components
 ```
+
+One extra experimental tool, off the happy path: `reframe_collab` — async intent queue worker stub, not part of the main flow.
 
 ## reframe_edit — the one place for mutations
 
@@ -92,7 +93,6 @@ Agent receives the **full DESIGN.md** from `reframe_design` — 300+ lines with 
 - `reframe_compile` shows warnings inline now — fix them before export
 - Brand DESIGN.md files cached in `.reframe/brands/` — delete to re-fetch
 - Token export: `defineTokens` auto-saves `.reframe/tokens.json` (DTCG format)
-- Block library: 30+ starter blocks auto-registered on first `list_blocks` or `add_block`. 60+ HTML sections in manifest.
 - Aesthetic scoring: 8 metrics (alignment, whitespace, balance, harmony, hierarchy, rhythm, readability, proportion)
 - PNG/PDF export: requires CanvasKit WASM (auto-initialized on first call)
 - Layout backend: Yoga WASM (own mapping logic). Optional Taffy fallback via `setLayoutBackend('taffy')` before `initYoga()` — requires `yoga-layout-taffy` npm.

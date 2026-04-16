@@ -69,7 +69,7 @@ Two HTML input modes:
 
 Source HTML is auto-saved to .reframe/src/<name>.html on every compile. Edit that file for big changes, then re-compile with file parameter.
 
-Alternative inputs: blueprint JSON for programmatic generation, or use reframe_project add_block to instantiate from the block library (20+ section templates: hero, features, pricing, testimonials, cta, stats, team, faq, footer, nav, contact, gallery).
+Alternative input: blueprint JSON for programmatic generation (same engine, typed tree instead of HTML).
 
 Returns: scene ID (e.g. "s1"), node count, audit result (PASS/FAIL with issue details), source HTML path, and export file paths. Use reframe_inspect with aesthetic: true for design quality scores.
 
@@ -108,9 +108,6 @@ Variation ops (were previously standalone reframe_vary/reframe_resize/reframe_it
 - iterate: run audit+fix loop (auto mode, up to maxRounds) or propose mode (audit only, suggestions returned)
 - adapt: generate responsive variants at given sizes (smart/contain/cover/stretch/reflow strategies). Each size produces a new session scene.
 - vary: generate a Cartesian variation grid from { brand, density, radius, shadows, typography, mode, colorRotation } axes. Returns N new session scenes, one per axis combination.
-
-Block ops:
-- instantiateBlock: create a new scene from a block template. Requires block name (e.g. "hero-centered", "pricing-3col"). Optional slots for content fill. Use reframe_project list_blocks to browse 17+ templates.
 
 Layout ops:
 - multiColumn: convert a container node into multi-column grid layout. Specify columns (2-12) and gap. Great for feature grids, pricing comparisons.
@@ -203,14 +200,7 @@ Token actions (W3C DTCG 2025.10 format):
 - export_tokens: export all design tokens from a scene to .reframe/tokens.json in DTCG format. Compatible with Tokens Studio, Style Dictionary v4, Specify. Requires sceneId.
 - import_tokens: import tokens from .reframe/tokens.json into all session scenes. Creates Variables + TokenIndex.
 
-Block library actions (section-level template system):
-- list_blocks: browse 20+ starter blocks by category (hero, features, pricing, testimonials, cta, stats, team, faq, footer, nav, contact, gallery). Use brand param as category filter.
-- get_block: get block definition by name (slots, description, tags).
-- add_block: instantiate a block into the session as a new scene. Requires name. Use description param as JSON slots (e.g. '{"headline":"Ship Faster"}') or as headline text.
-- save_block: extract a scene as a reusable block. Requires sceneId + name.
-- delete_block: remove a block from library. Requires name.
-
-Returns: confirmation with file paths for save/load, scene list for list, project summary for status, source HTML block for show_source, ordered op list for history, variant details for add_variant/list_variants/refresh_variants, macro details for macro actions, token count for export/import_tokens, block list for list_blocks.
+Returns: confirmation with file paths for save/load, scene list for list, project summary for status, source HTML block for show_source, ordered op list for history, variant details for add_variant/list_variants/refresh_variants, macro details for macro actions, token count for export/import_tokens.
 
 Scenes auto-save to disk when a project is open. Stable DOM-path ids survive re-compile so reframe_edit operations keep addressing the same nodes. Variants auto-refresh on every reframe_compile of their base, keeping responsive output in sync with source HTML edits, replayed history operations, and macro applications.`,
     projectInputSchema,
