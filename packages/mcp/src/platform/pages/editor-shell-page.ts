@@ -5,7 +5,15 @@
  * Layout: header (wordmark + actions) + sidebar (layers) + canvas + right panel.
  * Floating toolbar at bottom-center (tools + undo/redo).
  * No old platform scripts — editor bundle handles everything.
+ *
+ * Macro-dropdowns (Generate / Modify / Preview / More) + sectioned right-click
+ * context menu + bottom agent chat are injected from layout.ts so the same
+ * UI shows on /platform/project/:slug (this shell) and any legacy baseShell
+ * scene page. `data-scene` on the root wrapper triggers the platform-ui.js
+ * binders to run (they early-return without a scene attribute).
  */
+
+import { renderMacroDropdowns, renderBottomChat } from '../layout.js';
 
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -14,11 +22,16 @@ function esc(s: string): string {
 export function renderEditorShell(options: {
   title?: string;
   sceneIds?: string;
+  sceneSlug?: string;
   editorJsPath: string;
   fontsLink?: string;
 }): string {
   const title = esc(options.title ?? 'reframe');
   const sceneAttr = options.sceneIds ? ` data-project-scenes="${esc(options.sceneIds)}"` : '';
+  // `data-scene` on #app activates platform-ui.js binders (bindMacroDropdowns,
+  // bindContextMenu, bindBottomChat). Without it they still register but the
+  // top macro-dropdowns + bottom chat markup would be absent.
+  const appSceneAttr = options.sceneSlug ? ` data-scene="${esc(options.sceneSlug)}"` : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -266,11 +279,12 @@ export function renderEditorShell(options: {
   </script>
 </head>
 <body>
-  <div id="app">
+  <div id="app"${appSceneAttr}>
     <header id="header">
       <a class="wordmark" href="/platform">reframe</a>
       <div class="header-sep"></div>
       <span class="crumb">${title.replace('reframe · ', '')}</span>
+      ${renderMacroDropdowns()}
       <div class="spacer"></div>
       <button class="h-btn primary" id="btn-export">Export</button>
       <div class="header-sep"></div>
@@ -336,6 +350,7 @@ export function renderEditorShell(options: {
         </div>
       </div>
     </aside>
+    ${renderBottomChat()}
   </div>
   <link rel="stylesheet" href="/platform/style.css?v=${Date.now()}">
   <script src="/platform/theme-init.js?v=${Date.now()}"></script>

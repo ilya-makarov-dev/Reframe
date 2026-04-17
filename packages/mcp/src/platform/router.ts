@@ -306,6 +306,7 @@ export default async function(o){
     const html = renderEditorShell({
       title: `reframe \u00B7 ${project.name}`,
       sceneIds,
+      sceneSlug: project.slug,
       editorJsPath: '/platform/viewport-init.js',
       fontsLink: '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">',
     });

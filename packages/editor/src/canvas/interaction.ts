@@ -200,29 +200,33 @@ export function setupCanvasInteraction(
     }
 
     if (drag.kind === 'reorder') {
+      // Destructure into locals so the arrow callback on .filter()
+      // below doesn't lose TS's discriminated-union narrowing
+      // (closure over `let drag: Drag | null` resets the narrow).
+      const { parentId, draggedId, direction, currentIndex } = drag;
       // Compute a new insertion index by walking siblings and finding
       // the first one whose midpoint is past the pointer along the
       // flex axis. This is cheap — O(siblings) per pointermove.
-      const parent = editor.getNode(drag.parentId);
+      const parent = editor.getNode(parentId);
       if (!parent) return;
       const siblings = parent.childIds
-        .filter((id) => id !== drag.draggedId)
+        .filter((id) => id !== draggedId)
         .map((id) => editor.getNode(id))
         .filter((n): n is NonNullable<typeof n> => !!n);
       let newIndex = siblings.length; // default: append to end
-      const p = drag.direction === 'row' ? cx : cy;
+      const p = direction === 'row' ? cx : cy;
       for (let i = 0; i < siblings.length; i++) {
         const n = siblings[i];
-        const mid = drag.direction === 'row'
+        const mid = direction === 'row'
           ? n.x + n.width / 2
           : n.y + n.height / 2;
         if (p < mid) { newIndex = i; break; }
       }
       // Apply reorder live if index changed so user sees siblings shift.
-      if (newIndex !== drag.currentIndex) {
+      if (newIndex !== currentIndex) {
         drag.currentIndex = newIndex;
         try {
-          (editor as any).reorderInAutoLayout?.(drag.draggedId, drag.parentId, newIndex);
+          (editor as any).reorderInAutoLayout?.(draggedId, parentId, newIndex);
           editor.requestRender();
         } catch { /* reorder-mid-drag failure is non-fatal */ }
       }

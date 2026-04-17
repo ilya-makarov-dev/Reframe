@@ -16,6 +16,7 @@
 import { cpSync, mkdirSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -56,3 +57,41 @@ console.log(`bundled ${uiFiles.length} ui/*.js files -> platform-ui.js (${bundle
 
 cpSync(resolve(platformSrc, 'platform-ui.css'), resolve(platformDist, 'platform-ui.css'));
 console.log(`copied platform-ui.css`);
+
+// ── Editor bundle (CanvasKit editor served as /platform/viewport.js) ──
+// The MCP router looks for editor-bundle.js in dist; without it, it falls
+// back to a legacy IIFE that does not export initPlatformViewport, which
+// leaves the canvas loading spinner stuck forever. Bundle it here so a
+// plain `npm run build -w @reframe/mcp` produces a working canvas.
+const editorEntry = resolve(repoRoot, 'packages/editor/src/app/platform-bootstrap.ts');
+const editorOut = resolve(platformDist, 'editor-bundle.js');
+if (existsSync(editorEntry)) {
+  const bundleProc = spawnSync(
+    'npx',
+    [
+      'esbuild',
+      editorEntry,
+      '--bundle',
+      '--format=esm',
+      '--platform=browser',
+      '--target=es2022',
+      `--outfile=${editorOut}`,
+      `--alias:@reframe/core=${resolve(repoRoot, 'packages/core/src/browser.ts')}`,
+      `--alias:@open-pencil/core=${resolve(repoRoot, 'node_modules/@open-pencil/core/dist/index.js')}`,
+      '--external:canvaskit-wasm',
+      '--external:node:fs/promises',
+      '--external:node:url',
+      '--external:node:path',
+      '--external:node:fs',
+      '--external:fs',
+      '--external:path',
+    ],
+    { stdio: 'inherit', shell: true },
+  );
+  if (bundleProc.status !== 0) {
+    throw new Error(`esbuild editor bundle failed with code ${bundleProc.status}`);
+  }
+  console.log(`bundled editor -> editor-bundle.js`);
+} else {
+  console.warn(`skip editor-bundle: ${editorEntry} not found`);
+}

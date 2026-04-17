@@ -1,5 +1,7 @@
   function init() {
-    const appEl = $('.app');
+    // The scene-slug carrier is either `.app` (baseShell) or `#app`
+    // (editor-shell). Both set data-scene to the current project slug.
+    const appEl = $('.app') || document.getElementById('app');
     if (appEl) state.currentSceneSlug = appEl.getAttribute('data-scene') || null;
     // Initialize original viewport dims from scene data
     var vpFrame = $('.viewport-frame');
@@ -186,8 +188,11 @@
     bindStreamClearBtn();
     bindMacroApplyBtns();
     bindHeaderToolbar();
+    bindMacroDropdowns();
     bindSidebarActions();
     bindContextMenu();
+    bindInlinePopover();
+    bindBottomChat();
     bindBatchExport();
     bindVariantStrip();
     bindPipelineStepper();

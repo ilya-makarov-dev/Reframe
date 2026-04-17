@@ -108,6 +108,16 @@ export function renderShell(props: ShellProps): string {
           ? 'body with-right'
           : 'body';
 
+  // Top-center macro-dropdowns — only on scene pages. The 4 verbs that
+  // wrap our unique engine capability: Generate (vary / regenerate /
+  // responsive), Modify (rebrand / scale spacing / radius / shadows /
+  // rotate colors / typography / iterate), Preview (viewport switch +
+  // QR + new tab), More (export / save / brand-pick / settings).
+  //
+  // Positioned absolutely in the center so it doesn't push the
+  // right-side chrome around when it changes width.
+  const macroDropdownsEl = props.sceneSlug ? renderMacroDropdowns() : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -125,6 +135,7 @@ export function renderShell(props: ShellProps): string {
     <header class="header">
       <a href="/platform" class="wordmark">refram<span class="e-final">e</span></a>
       ${crumbsEl}
+      ${macroDropdownsEl}
       <span class="spacer"></span>
       ${props.sceneSlug ? `
       <!-- Brand picker — global toolbar for instant rebrand -->
@@ -207,6 +218,7 @@ export function renderShell(props: ShellProps): string {
       ${props.sidebar ? '<div class="panel-resize panel-resize-sidebar" data-panel-resize="sidebar"></div>' : ''}
       ${props.rightPanel ? '<div class="panel-resize panel-resize-right" data-panel-resize="right"></div>' : ''}
     </div>
+    ${props.sceneSlug ? renderBottomChat() : ''}
   </div>
   <script type="importmap">{"imports":{"canvaskit-wasm":"/platform/vendor/canvaskit-shim.js","canvaskit-wasm/full":"/platform/vendor/canvaskit-shim.js"}}</script>
   <script src="/platform/app.js?v=${ASSET_VERSION}"></script>
@@ -453,6 +465,186 @@ function describeShort(p: any): string {
     case 'undo':         return `undo ${p.steps} step(s)`;
     default:             return p.kind;
   }
+}
+
+// ─── Top-center macro-dropdowns ─────────────────────────────
+//
+// 4 verbs that wrap our unique engine capability, Stitch-style.
+// Each opens a dropdown with actions that hit existing platform APIs:
+//   Generate  → /platform/api/variations/grid (vary) + agent prompts
+//   Modify    → /platform/api/variations/apply (scale *, rotate, mode)
+//              + /platform/api/rebrand/apply (Rebrand from DESIGN.md)
+//   Preview   → local viewport class swap (desktop/tablet/mobile)
+//   More      → export / save / brand-pick / settings shortcuts
+//
+// The shell renders the DOM; bindMacroDropdowns() in 140-toolbar.js
+// wires click handlers. Kept inert here so markup stays grep-able.
+
+function caretSvg(): string {
+  return '<svg class="macro-caret" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 4L5 6.5 7.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
+function chevronSvg(): string {
+  return '<svg class="submenu-caret" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M4 2.5L6.5 5 4 7.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
+function hotkeyEl(hk: string): string {
+  return hk ? `<span class="macro-hotkey">${escape(hk)}</span>` : '';
+}
+
+function renderMacroItem(opts: { action: string; label: string; hotkey?: string; data?: Record<string, string>; badge?: string; disabled?: boolean }): string {
+  const extra = opts.data ? Object.entries(opts.data).map(([k, v]) => `data-${k}="${escape(v)}"`).join(' ') : '';
+  const badge = opts.badge ? `<span class="macro-badge">${escape(opts.badge)}</span>` : '';
+  const dis = opts.disabled ? 'disabled' : '';
+  return `<button class="macro-item" data-macro-action="${escape(opts.action)}" ${extra} ${dis}>
+    <span class="macro-label">${escape(opts.label)}${badge}</span>
+    ${hotkeyEl(opts.hotkey ?? '')}
+  </button>`;
+}
+
+function renderSubmenu(label: string, icon: string, items: string): string {
+  return `<div class="macro-submenu">
+    <button class="macro-item macro-submenu-trigger">
+      <span class="macro-label"><span class="macro-icon">${icon}</span>${escape(label)}</span>
+      ${chevronSvg()}
+    </button>
+    <div class="macro-submenu-panel">${items}</div>
+  </div>`;
+}
+
+export function renderMacroDropdowns(): string {
+  // ─── Generate ──────────────────────────────────────────────
+  const generateMenu = [
+    renderMacroItem({ action: 'variants',   label: '✨ Variants',         hotkey: '⇧V' }),
+    renderMacroItem({ action: 'regenerate', label: '🔄 Regenerate',       hotkey: '⇧R' }),
+    renderMacroItem({ action: 'responsive', label: '📱 Responsive set',   hotkey: '⇧A' }),
+    '<div class="macro-sep"></div>',
+    renderMacroItem({ action: 'heatmap',    label: '🔮 Predict heatmap',  badge: 'Soon', disabled: true }),
+  ].join('');
+
+  // ─── Modify ────────────────────────────────────────────────
+  const densityItems = [
+    renderMacroItem({ action: 'variation', label: 'Compact  −20%', data: { kind: 'density', value: '0.8' } }),
+    renderMacroItem({ action: 'variation', label: 'Compact  −10%', data: { kind: 'density', value: '0.9' } }),
+    renderMacroItem({ action: 'variation', label: 'Normal',        data: { kind: 'density', value: '1.0' } }),
+    renderMacroItem({ action: 'variation', label: 'Spacious +10%', data: { kind: 'density', value: '1.1' } }),
+    renderMacroItem({ action: 'variation', label: 'Spacious +20%', data: { kind: 'density', value: '1.2' } }),
+  ].join('');
+  const radiusItems = [
+    renderMacroItem({ action: 'variation', label: 'Sharp (0px)',    data: { kind: 'radius', value: 'sharp' } }),
+    renderMacroItem({ action: 'variation', label: 'Editorial (2–4)', data: { kind: 'radius', value: 'editorial' } }),
+    renderMacroItem({ action: 'variation', label: 'Soft (×1.5)',    data: { kind: 'radius', value: 'soft' } }),
+    renderMacroItem({ action: 'variation', label: 'Pill (9999)',    data: { kind: 'radius', value: 'pill' } }),
+  ].join('');
+  const shadowsItems = [
+    renderMacroItem({ action: 'variation', label: 'Flat',     data: { kind: 'shadows', value: 'flat' } }),
+    renderMacroItem({ action: 'variation', label: 'Subtle',   data: { kind: 'shadows', value: 'subtle' } }),
+    renderMacroItem({ action: 'variation', label: 'Normal',   data: { kind: 'shadows', value: 'normal' } }),
+    renderMacroItem({ action: 'variation', label: 'Dramatic', data: { kind: 'shadows', value: 'dramatic' } }),
+  ].join('');
+  const colorsItems = [
+    renderMacroItem({ action: 'variation', label: 'Invert accent (primary ↔ accent)', data: { kind: 'colorRotation', value: 'invert-accent' } }),
+    renderMacroItem({ action: 'variation', label: 'Invert mode (bg ↔ text)',           data: { kind: 'colorRotation', value: 'invert-mode' } }),
+  ].join('');
+  const typoItems = [
+    renderMacroItem({ action: 'variation', label: 'Dramatic (max contrast)',   data: { kind: 'typography', value: 'dramatic' } }),
+    renderMacroItem({ action: 'variation', label: 'Flat (all 500)',            data: { kind: 'typography', value: 'flat' } }),
+    renderMacroItem({ action: 'variation', label: 'Editorial (tight headings)', data: { kind: 'typography', value: 'editorial' } }),
+    renderMacroItem({ action: 'variation', label: 'Technical (wide tracking)', data: { kind: 'typography', value: 'technical' } }),
+    renderMacroItem({ action: 'variation', label: 'Friendly (rounded)',        data: { kind: 'typography', value: 'friendly' } }),
+  ].join('');
+
+  const modifyMenu = [
+    renderMacroItem({ action: 'rebrand',      label: '🎨 Rebrand…',        hotkey: '⇧B' }),
+    renderMacroItem({ action: 'toggle-theme', label: '🌓 Toggle theme',    hotkey: '⇧T' }),
+    '<div class="macro-sep"></div>',
+    renderSubmenu('Scale spacing',   '📏', densityItems),
+    renderSubmenu('Corner radius',   '🔘', radiusItems),
+    renderSubmenu('Shadows',         '☁',  shadowsItems),
+    renderSubmenu('Rotate colors',   '🎭', colorsItems),
+    renderSubmenu('Typography',      '🔤', typoItems),
+    '<div class="macro-sep"></div>',
+    renderMacroItem({ action: 'iterate-fix',  label: '🔧 Iterate · Fix audit', hotkey: '⇧I' }),
+  ].join('');
+
+  // ─── Preview ───────────────────────────────────────────────
+  const previewMenu = [
+    renderMacroItem({ action: 'viewport', label: '🖥 Desktop  1440', data: { vp: 'desktop' } }),
+    renderMacroItem({ action: 'viewport', label: '📲 Tablet   768',  data: { vp: 'tablet' } }),
+    renderMacroItem({ action: 'viewport', label: '📱 Mobile   390',  data: { vp: 'mobile' } }),
+    '<div class="macro-sep"></div>',
+    renderMacroItem({ action: 'new-tab',  label: '🆕 Open in new tab', hotkey: '⇧P' }),
+    renderMacroItem({ action: 'qr',       label: '📋 Show QR',         badge: 'Soon', disabled: true }),
+  ].join('');
+
+  // ─── More ──────────────────────────────────────────────────
+  const moreMenu = [
+    renderMacroItem({ action: 'export-html',   label: '📄 Export HTML',    data: { format: 'html' } }),
+    renderMacroItem({ action: 'export-react',  label: '⚛ Export React',    data: { format: 'react' } }),
+    renderMacroItem({ action: 'export-png',    label: '🖼 Export PNG',     data: { format: 'png' } }),
+    renderMacroItem({ action: 'export-svg',    label: '🖼 Export SVG',     data: { format: 'svg' } }),
+    renderMacroItem({ action: 'export-pdf',    label: '📄 Export PDF',     data: { format: 'pdf' } }),
+    renderMacroItem({ action: 'export-lottie', label: '🎬 Export Lottie',  data: { format: 'lottie' } }),
+    renderMacroItem({ action: 'export-site',   label: '🌐 Export Site',    data: { format: 'site' } }),
+    '<div class="macro-sep"></div>',
+    renderMacroItem({ action: 'pick-brand', label: '🎯 Pick brand…' }),
+    renderMacroItem({ action: 'settings',   label: '⚙ Settings', disabled: true, badge: 'Soon' }),
+  ].join('');
+
+  const makeDropdown = (key: string, icon: string, label: string, menuInner: string) => `
+    <div class="macro-group" data-macro-dropdown="${key}">
+      <button class="macro-btn" data-macro-btn="${key}" title="${escape(label)}">
+        <span class="macro-icon">${icon}</span>
+        <span>${escape(label)}</span>
+        ${caretSvg()}
+      </button>
+      <div class="macro-menu hidden" data-macro-menu="${key}">${menuInner}</div>
+    </div>`;
+
+  return `<div class="macro-dropdowns" data-macro-dropdowns>
+    ${makeDropdown('generate', '✨', 'Generate', generateMenu)}
+    ${makeDropdown('modify',   '✎',  'Modify',   modifyMenu)}
+    ${makeDropdown('preview',  '👁', 'Preview',  previewMenu)}
+    ${makeDropdown('more',     '⋯',  'More',     moreMenu)}
+  </div>`;
+}
+
+// ─── Bottom chat bar ─────────────────────────────────────────
+//
+// Docked glass pill at the viewport bottom, scene pages only. Holds:
+//   · chips row (scope: selected node, active brand, viewport)
+//   · textarea prompt input
+//   · mic button (voice capture, wired in step 7)
+//   · send button
+//
+// Input delegates to the existing sidebar agent via [data-agent-input]
+// + [data-agent-send] so streaming / tool-rendering behaviour stays in
+// one place. The chip scope is prepended to the prompt text as a
+// single structured line ("[Scope: hero section · brand: Stripe · vp: desktop]")
+// so Claude sees explicit context without any server-side prompt changes.
+export function renderBottomChat(): string {
+  return `<div class="bottom-chat" data-bottom-chat>
+    <div class="bc-chips" data-bc-chips aria-label="Context chips"></div>
+    <div class="bc-input-row">
+      <button class="bc-mic" data-bc-mic title="Voice input (coming)" aria-label="Voice input">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <rect x="5" y="2" width="4" height="7" rx="2" stroke="currentColor" stroke-width="1.3"/>
+          <path d="M3 7a4 4 0 0 0 8 0M7 11v1M5 12h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <textarea
+        class="bc-input"
+        data-bc-input
+        rows="1"
+        placeholder="Describe a change, ask about this scene, or paste a URL…"
+        aria-label="Agent prompt"></textarea>
+      <button class="bc-send" data-bc-send title="Send (⌘↵)" aria-label="Send">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </div>`;
 }
 
 // ─── Backwards-compat exports — old call sites are getting rewritten ─

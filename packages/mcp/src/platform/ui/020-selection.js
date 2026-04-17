@@ -109,69 +109,10 @@
   }
 
   // ── Right-click context menu ────────────────────────
-  function bindContextMenu() {
-    // Bind on the SVG annotation layer AND the HTML marks layer —
-    // these sit on top of the iframe so their contextmenu fires
-    // (iframe is cross-origin, its contextmenu doesn't propagate).
-    var targets = [
-      $('.viewport-frame .annotations'),
-      $('.viewport-frame .annotation-marks-html'),
-      $('.viewport-frame'),
-    ];
-    targets.forEach(function(el) {
-      if (!el) return;
-      el.addEventListener('contextmenu', function(e) {
-        if (!state.editMode || !state.selection.inode) return;
-        e.preventDefault();
-        e.stopPropagation();
-        showContextMenu(e.clientX, e.clientY);
-      });
-    });
-    // Close on any left click outside.
-    document.addEventListener('click', function() { closeContextMenu(); });
-    // Also close on Escape.
-    document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape') closeContextMenu();
-    });
-  }
-
-  function showContextMenu(x, y) {
-    closeContextMenu();
-    var menu = document.createElement('div');
-    menu.className = 'context-menu show';
-    menu.style.left = x + 'px';
-    menu.style.top = y + 'px';
-    menu.innerHTML =
-      '<div class="ctx-item" data-ctx="add-frame">Add frame<span class="shortcut">child</span></div>' +
-      '<div class="ctx-item" data-ctx="add-text">Add text<span class="shortcut">child</span></div>' +
-      '<div class="ctx-item" data-ctx="duplicate">Duplicate<span class="shortcut">⌘D</span></div>' +
-      '<div class="ctx-item danger" data-ctx="delete">Delete<span class="shortcut">⌫</span></div>' +
-      '<div class="ctx-sep"></div>' +
-      '<div class="ctx-item ai-verb" data-ctx="ask">✦ Ask about this…</div>' +
-      '<div class="ctx-item ai-verb" data-ctx="echo">✦ Echo from…</div>' +
-      '<div class="ctx-item ai-verb" data-ctx="pin">✦ Pin reference</div>' +
-      '<div class="ctx-item ai-verb" data-ctx="rule">✦ Set rule</div>' +
-      '<div class="ctx-item ai-verb" data-ctx="brush">✦ Brush with macro</div>' +
-      '<div class="ctx-sep"></div>' +
-      '<div class="ctx-item" data-ctx="wrap">Wrap in container</div>' +
-      '<div class="ctx-item" data-ctx="extract">Extract component</div>';
-    document.body.appendChild(menu);
-    // Clamp to viewport.
-    var rect = menu.getBoundingClientRect();
-    if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
-    if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
-    // Bind items.
-    menu.querySelectorAll('[data-ctx]').forEach(function(item) {
-      item.addEventListener('click', function(e) {
-        e.stopPropagation();
-        var action = item.getAttribute('data-ctx');
-        closeContextMenu();
-        handleContextAction(action);
-      });
-    });
-    // Prevent menu itself from closing on its own click.
-    menu.addEventListener('click', function(e) { e.stopPropagation(); });
-  }
+  // bindContextMenu + showContextMenu moved to 045-context-menu.js
+  // (full sectioned catalog — Generate / Modify / Preview / Export,
+  // plus the node-specific actions below when a selection exists).
+  // closeContextMenu + handleContextAction stay here as shared utils.
 
   function closeContextMenu() {
     var existing = $('.context-menu');
