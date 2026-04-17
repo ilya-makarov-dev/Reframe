@@ -7,8 +7,15 @@ export type { RasterExportOptions, RasterFormat } from './raster.js';
 export { exportToHtml } from './html.js';
 export type { HtmlExportOptions } from './html.js';
 
-export { exportToReact } from './react.js';
-export type { ReactExportOptions } from './react.js';
+export { exportToReact, exportToReactModule, exportToReactTree } from './react.js';
+export type {
+  ReactExportOptions,
+  ReactExportResult,
+  ReactTreeOptions,
+  ReactTreeResult,
+  ReactTreeManifest,
+  ReactTreeTarget,
+} from './react.js';
 
 export { exportToAnimatedHtml } from './animated-html.js';
 export type { AnimatedHtmlExportOptions } from './animated-html.js';

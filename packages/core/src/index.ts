@@ -321,8 +321,19 @@ export { diffTrees, formatDiff } from './diff';
 export type { DiffEntry, DiffResult, DiffOptions, DiffType, PropertyChange, FormatDiffOptions } from './diff';
 
 // -- React Export --
-export { exportToReact } from './exporters/react';
-export type { ReactExportOptions } from './exporters/react';
+export {
+  exportToReact,
+  exportToReactModule,
+  exportToReactTree,
+} from './exporters/react';
+export type {
+  ReactExportOptions,
+  ReactExportResult,
+  ReactTreeOptions,
+  ReactTreeResult,
+  ReactTreeManifest,
+  ReactTreeTarget,
+} from './exporters/react';
 
 // -- Assertions --
 export { assertDesign, formatAssertions, DesignAssertionError } from './assert';

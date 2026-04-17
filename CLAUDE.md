@@ -7,6 +7,21 @@ Interactive CanvasKit viewport powered by @open-pencil/core. 37-rule quality eng
 
 **For design work:** three input paths — DESIGN.md seeds brand context, AI agent writes HTML, direct canvas editing (Figma-like). All converge on one INode SceneGraph.
 
+## When running as the in-app agent
+
+When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right sidebar), you're inside an open reframe session talking to a designer — not a developer. Route every intent through one of these four skills:
+
+| User intent | Skill | First move |
+|---|---|---|
+| "make / build / design …" a page, section, landing, dashboard | `reframe-design` | Check brand, then Write source + `reframe_compile` |
+| Names a brand (Stripe, Linear, Airbnb…) or says "rebrand" | `reframe-brand` | `reframe_design action=extract` then Read the DESIGN.md |
+| Asks for multiple pages / a full site | `reframe-site-loop` | Write SITE.md + next-prompt.md, loop one page per turn |
+| Vague one-liner ("a landing page", "something nice") | `reframe-enhance` | Rewrite into structured DESIGN SYSTEM + sections block, then hand to `reframe-design` |
+
+**The costume, not the CLI.** You have the full reframe MCP (6 core tools) plus all normal Claude Code tools. But the user in the browser doesn't want a dev session — they want scene changes. Prefer `reframe_edit` over regeneration when the ask fits an INode property. Keep tool chatter short. Show your work in the preview, not in words.
+
+**Scope context is pre-loaded.** The bottom chat prepends `[Scope: node: … · brand: … · viewport: …]` to each message. Trust it. If the scope says `brand: stripe`, don't re-extract — just Read the cached DESIGN.md.
+
 ## Build & Test
 
 ```bash
@@ -76,6 +91,20 @@ Flow:           iterate (audit+fix loop),
 - Min 44px button height (WCAG touch target)
 - Apply `font-feature-settings` if brand specifies OpenType features (ss01, tnum, etc.)
 - Full-width sections: no fixed px on stretching containers, use `width:100%`
+
+## Taste rules (the audit doesn't catch these — honor them anyway)
+
+These are enforced as a system rule, not per-skill. They apply every time the agent writes HTML, regardless of which skill is active.
+
+- **Max one accent color** above 80% saturation. A second high-sat color is noise.
+- **No pure black (`#000`).** Use `#111`–`#1a` even on dark themes. Pure black burns holes in a dark layout.
+- **Inter is banned for premium / editorial contexts.** Use Geist, Outfit, Cabinet Grotesk, or Söhne. Inter is fine for neutral SaaS / dashboards.
+- **Serif in dashboards = no.** Serif is editorial only.
+- **Never invent numbers, stats, logos, or testimonials.** If the user didn't provide them, use neutral labels ("trusted by teams", not "trusted by 40k engineers"). This is the most common way generated designs feel fake.
+- **Emoji-as-UI is a tell.** Emoji in body copy = fine. Emoji as iconography = replace with SVG or glyph characters.
+- **No "3 equal cards horizontally."** Use asymmetric grid / zig-zag / bento. The generic 3-up is the AI-slop signature.
+- **Centered hero only when variance is low.** Headline + CTA = centered okay. Headline + 3 stats + image + 2 CTAs = not centered.
+- **Motion via `transform` / `opacity` only.** Never animate `top/left/width/height`. Spring physics ≈ stiffness 100, damping 20.
 
 ## DESIGN.md = Brand Context
 

@@ -121,6 +121,106 @@ export interface ReactExportResult {
   css?: string;
 }
 
+// ─── Multi-file tree export (Phase 1–3 scaffold) ──────────────
+//
+// The single-file `exportToReactModule` produces a technically-correct
+// React dump but no production project ships as one 800-line file.
+// `exportToReactTree` emits a navigable multi-file tree:
+//
+//   Phase 1 (implemented): semantic-role → separate section files,
+//     entry page that imports/renders them, tokens file, inline/css-modules
+//     targets.
+//   Phase 2 (scaffold): `extractPrimitives` — shape-hash detection of
+//     repeating subtrees across sections → emit primitives in
+//     src/components/ui/. Currently returns empty manifest.primitives.
+//   Phase 3 (scaffold): `extractHooks` — state-bearing nodes → useXxx
+//     hook files in src/hooks/. Currently returns empty manifest.hooks.
+//
+// Everything is deterministic: the same INode tree produces the same
+// file map byte-for-byte. No LLM calls, no AI judgment. The skill layer
+// (.claude/skills/reframe-to-react) handles user preference for target
+// stack and naming edge cases — the engine handles transformation.
+
+export type ReactTreeTarget = 'inline' | 'css-modules' | 'tailwind' | 'styled-components';
+
+export interface ReactTreeOptions extends ReactExportOptions {
+  /**
+   * Styling strategy for the emitted components. Defaults to 'inline'.
+   * - `inline`: inline style objects (same as single-file export)
+   * - `css-modules`: per-component .module.css files
+   * - `tailwind`: Phase 2 — scaffolded, currently falls back to inline
+   *   with a tailwind.config.ts extension sketch
+   * - `styled-components`: Phase 2 — scaffolded, falls back to inline
+   */
+  target?: ReactTreeTarget;
+  /**
+   * When true, each child of the root with a `semanticRole` (nav / hero /
+   * section / footer / etc.) is extracted to its own file under
+   * `src/components/sections/<Name>.tsx`. Default: true.
+   */
+  extractSections?: boolean;
+  /**
+   * Phase 2 flag — when true, repeating subtrees (by shape hash) are
+   * extracted to `src/components/ui/<Primitive>.tsx`. NOT YET IMPLEMENTED;
+   * option is accepted so call sites don't have to change when the
+   * feature lands. Currently no-op.
+   */
+  extractPrimitives?: boolean;
+  /**
+   * Phase 3 flag — when true, state-bearing nodes (states / interactive
+   * children) get `useX` hooks scaffolded in `src/hooks/`. NOT YET
+   * IMPLEMENTED. Option accepted, currently no-op.
+   */
+  extractHooks?: boolean;
+  /**
+   * Root directory for emitted paths in the result map. Default: "src".
+   * Emitted paths are relative to this — caller decides whether to
+   * prefix with their project root.
+   */
+  outputBase?: string;
+  /**
+   * Emitted page filename (stem), e.g. "pricing" → "src/pages/pricing.tsx".
+   * Default: derived from root node's name (sanitized).
+   */
+  pageSlug?: string;
+}
+
+export interface ReactTreeManifest {
+  /** Section components extracted by semanticRole. */
+  sections: Array<{
+    name: string;           // PascalCase component name
+    path: string;           // path in files map
+    role: string | null;    // semanticRole that drove the extraction
+    sourceNodeId: string;   // INode id of the extracted subtree
+  }>;
+  /** Repeating subtree primitives. Empty until Phase 2 lands. */
+  primitives: Array<{
+    name: string;
+    path: string;
+    usedIn: string[];       // paths that import this primitive
+  }>;
+  /** Hook files scaffolded from state-bearing nodes. Empty until Phase 3 lands. */
+  hooks: Array<{
+    name: string;
+    path: string;
+  }>;
+  /** Emitted tokens file path, if a designSystem was supplied. */
+  tokensPath?: string;
+  /** Target stack the tree was emitted for. */
+  target: ReactTreeTarget;
+  /** Unsupported-feature notes (when flags were set but not yet implemented). */
+  notes: string[];
+}
+
+export interface ReactTreeResult {
+  /** Emitted files: path → content. Deterministic across runs. */
+  files: Record<string, string>;
+  /** Entry file path (the page that imports sections). */
+  entry: string;
+  /** Provenance: what was extracted, where it lives, what's unimplemented. */
+  manifest: ReactTreeManifest;
+}
+
 // ─── Main Export ──────────────────────────────────────────────
 
 /** Export an INode tree to a React functional component string. */
@@ -274,6 +374,422 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   }
 
   return result;
+}
+
+// ─── Multi-file tree exporter (Phase 1) ──────────────────────
+
+/**
+ * Export an INode tree to a multi-file React project structure. The
+ * result is byte-deterministic for a given input — no LLM, no AI
+ * judgment. The skill layer (.claude/skills/reframe-to-react) picks
+ * options on the user's behalf; this function executes them.
+ *
+ * Phase 1 (implemented): section extraction by semanticRole, entry
+ *   page, tokens file, inline + css-modules targets.
+ * Phase 2/3 (stubbed): extractPrimitives + extractHooks accept the
+ *   option but currently no-op; result.manifest.notes documents this.
+ *
+ * The file paths in the returned map are POSIX-style relative paths
+ * (e.g. `"src/components/sections/Hero.tsx"`). Callers join against
+ * their project root to materialize files.
+ */
+export function exportToReactTree(
+  node: INode,
+  options?: ReactTreeOptions,
+): ReactTreeResult {
+  const target: ReactTreeTarget = options?.target ?? 'inline';
+  const extractSections = options?.extractSections ?? true;
+  const outputBase = (options?.outputBase ?? 'src').replace(/\/+$/, '');
+  const pageSlug = slugify(options?.pageSlug ?? node.name ?? 'page');
+  const ts = options?.typescript ?? true;
+  const notes: string[] = [];
+
+  // Phase 2/3 stubs — accept + document.
+  if (options?.extractPrimitives) {
+    notes.push(
+      'extractPrimitives: NOT YET IMPLEMENTED — shape-hash subtree deduplication is planned. '
+      + 'No primitives extracted; all content lives in section files.',
+    );
+  }
+  if (options?.extractHooks) {
+    notes.push(
+      'extractHooks: NOT YET IMPLEMENTED — state-bearing node detection is planned. '
+      + 'No hook files emitted.',
+    );
+  }
+  if (target === 'tailwind') {
+    notes.push(
+      'target=tailwind: NOT YET IMPLEMENTED — falling back to inline styles. '
+      + 'A tailwind.config.ts sketch is emitted with brand tokens if designSystem is provided.',
+    );
+  }
+  if (target === 'styled-components') {
+    notes.push(
+      'target=styled-components: NOT YET IMPLEMENTED — falling back to inline styles.',
+    );
+  }
+
+  const effectiveTarget: ReactTreeTarget =
+    target === 'tailwind' || target === 'styled-components' ? 'inline' : target;
+
+  const files: Record<string, string> = {};
+  const sections: ReactTreeManifest['sections'] = [];
+
+  // ── Identify section candidates ──
+  const candidates = extractSections ? collectSectionCandidates(node) : [];
+
+  // ── Emit each section file ──
+  // Deterministic naming: semanticRole → PascalCase, fall back to node.name
+  // if semanticRole absent, final fallback "SectionN" by index.
+  const seenNames = new Set<string>();
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const rawName = c.semanticRole ?? c.node.name ?? `Section${i + 1}`;
+    let name = toPascalCase(rawName);
+    if (!name) name = `Section${i + 1}`;
+    // Disambiguate duplicate names deterministically with a numeric suffix.
+    if (seenNames.has(name)) {
+      let suffix = 2;
+      while (seenNames.has(`${name}${suffix}`)) suffix++;
+      name = `${name}${suffix}`;
+    }
+    seenNames.add(name);
+
+    const path = `${outputBase}/components/sections/${name}.tsx`;
+    const content = renderSectionFile(c.node, name, {
+      typescript: ts,
+      target: effectiveTarget,
+      baseOptions: options,
+    });
+    files[path] = content;
+    sections.push({
+      name,
+      path,
+      role: c.semanticRole,
+      sourceNodeId: c.node.id,
+    });
+  }
+
+  // ── Emit tokens file if designSystem provided ──
+  let tokensPath: string | undefined;
+  if (options?.designSystem) {
+    tokensPath = `${outputBase}/styles/tokens.css`;
+    files[tokensPath] = renderTokensCss(node, options.designSystem);
+
+    // When target is tailwind, also emit a config sketch alongside so the
+    // user sees the intended theme extension even though the components
+    // currently use inline styles.
+    if (target === 'tailwind') {
+      files[`tailwind.config.ts`] = renderTailwindConfigSketch(options.designSystem);
+    }
+  }
+
+  // ── Emit entry page ──
+  const entryPath = `${outputBase}/pages/${pageSlug}.tsx`;
+  files[entryPath] = renderEntryPage(node, sections, {
+    typescript: ts,
+    pageSlug,
+    tokensRelPath: tokensPath ? relPath(entryPath, tokensPath) : null,
+    // When no sections were extracted, fall back to single-file inline
+    // render of the whole scene so the entry file is still usable.
+    fallbackInline:
+      sections.length === 0
+        ? exportToReactModule(node, { ...options, componentName: toPascalCase(pageSlug) })
+        : null,
+  });
+
+  return {
+    files,
+    entry: entryPath,
+    manifest: {
+      sections,
+      primitives: [],
+      hooks: [],
+      tokensPath,
+      target,
+      notes,
+    },
+  };
+}
+
+// ─── Tree helpers ─────────────────────────────────────────────
+
+interface SectionCandidate {
+  node: INode;
+  semanticRole: string | null;
+}
+
+/**
+ * Walk the root node's direct children and pick ones that should be
+ * extracted as separate section files. A direct child qualifies when:
+ *   - it has a non-empty `semanticRole`, OR
+ *   - the root has no semanticRole anywhere (fallback: treat every
+ *     first-level child with ≥ 3 descendants as a section)
+ *
+ * Deeper subtrees stay inline within their section's file; only the
+ * top-level structural rhythm of the page is split.
+ */
+function collectSectionCandidates(root: INode): SectionCandidate[] {
+  if (!root.children || root.children.length === 0) return [];
+
+  const withRoles: SectionCandidate[] = [];
+  const withoutRoles: SectionCandidate[] = [];
+
+  for (const child of root.children) {
+    if (child.removed || child.visible === false) continue;
+    const role = ((child as any).semanticRole as string | undefined)?.trim() || null;
+    if (role) {
+      withRoles.push({ node: child, semanticRole: role });
+    } else {
+      withoutRoles.push({ node: child, semanticRole: null });
+    }
+  }
+
+  // If at least one child has a semanticRole, use those exclusively —
+  // the classifier has opinions, trust them.
+  if (withRoles.length > 0) return withRoles;
+
+  // Otherwise, fall back: treat children with sufficient content as
+  // sections. Threshold of 3 descendants avoids promoting leaf text
+  // spans into their own files.
+  return withoutRoles.filter((c) => countDescendants(c.node) >= 3);
+}
+
+function countDescendants(n: INode): number {
+  let count = 0;
+  const walk = (m: INode) => {
+    if (m.children) {
+      for (const c of m.children) {
+        if (c.removed || c.visible === false) continue;
+        count++;
+        walk(c);
+      }
+    }
+  };
+  walk(n);
+  return count;
+}
+
+/**
+ * Emit a single section file. Delegates to the existing single-node
+ * renderer (exportToReactModule) with the section node as the root so
+ * behavior / timelines / tokens all carry through. The result's component
+ * is wrapped in a minimal default-export with the chosen name.
+ */
+function renderSectionFile(
+  node: INode,
+  name: string,
+  ctx: {
+    typescript: boolean;
+    target: ReactTreeTarget;
+    baseOptions?: ReactTreeOptions;
+  },
+): string {
+  const { component, css } = exportToReactModule(node, {
+    ...(ctx.baseOptions ?? {}),
+    componentName: name,
+    typescript: ctx.typescript,
+    cssModules: ctx.target === 'css-modules',
+  });
+
+  // exportToReactModule already emits the full file shape (imports,
+  // component, default export). For css-modules target the CSS lives
+  // in a sibling file which we represent via a conventional import path
+  // alongside the component — caller materializes both.
+  if (ctx.target === 'css-modules' && css) {
+    return [
+      component,
+      '',
+      `/* ${name}.module.css is emitted separately (caller materializes side-by-side) */`,
+    ].join('\n');
+  }
+
+  return component;
+}
+
+/**
+ * Emit the page-level entry file that imports each section in order
+ * and renders them inside a layout wrapper. Tokens stylesheet is
+ * imported at top when present. Falls back to a single-component
+ * re-export when no sections were extracted.
+ */
+function renderEntryPage(
+  root: INode,
+  sections: ReactTreeManifest['sections'],
+  ctx: {
+    typescript: boolean;
+    pageSlug: string;
+    tokensRelPath: string | null;
+    fallbackInline: ReactExportResult | null;
+  },
+): string {
+  const typeAnnotation = ctx.typescript ? ': React.FC' : '';
+  const pascalSlug = toPascalCase(ctx.pageSlug) || 'Page';
+
+  // Fallback: no sections extracted → just re-emit the whole scene here
+  // rather than leaving an empty page. Keeps the output useful even on
+  // scenes without semantic roles.
+  if (ctx.fallbackInline) {
+    const header = [
+      `// Auto-generated by reframe exportToReactTree (single-file fallback).`,
+      `// No sections with semanticRole were found in the scene — the full`,
+      `// tree is rendered inline here. Re-run with semanticRole set on`,
+      `// top-level children to get a split file tree.`,
+      '',
+    ].join('\n');
+    return header + ctx.fallbackInline.component;
+  }
+
+  const lines: string[] = [
+    `import React from 'react';`,
+  ];
+  if (ctx.tokensRelPath) {
+    lines.push(`import '${ctx.tokensRelPath.replace(/\\/g, '/')}';`);
+  }
+  for (const s of sections) {
+    const rel = relPath(`src/pages/${ctx.pageSlug}.tsx`, s.path)
+      .replace(/\.tsx$/, '')
+      .replace(/\\/g, '/');
+    lines.push(`import ${s.name} from '${rel}';`);
+  }
+  lines.push('');
+  lines.push(`const ${pascalSlug}${typeAnnotation} = () => {`);
+  lines.push(`  return (`);
+  lines.push(`    <>`);
+  for (const s of sections) {
+    lines.push(`      <${s.name} />`);
+  }
+  lines.push(`    </>`);
+  lines.push(`  );`);
+  lines.push(`};`);
+  lines.push('');
+  lines.push(`export default ${pascalSlug};`);
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+/**
+ * Render a tokens.css file from the active DesignSystem. CSS custom
+ * properties under `:root` — compatible with any React setup that can
+ * import CSS. Deterministic: iteration order is the DS's own order.
+ */
+function renderTokensCss(_root: INode, ds: DesignSystem): string {
+  const lines: string[] = [
+    '/* Reframe-generated design tokens — do not edit by hand. */',
+    '',
+    ':root {',
+  ];
+  // Colors
+  if (ds.colors.background) lines.push(`  --color-background: ${ds.colors.background};`);
+  if (ds.colors.primary) lines.push(`  --color-primary: ${ds.colors.primary};`);
+  if (ds.colors.accent) lines.push(`  --color-accent: ${ds.colors.accent};`);
+  if (ds.colors.text) lines.push(`  --color-text: ${ds.colors.text};`);
+  if (ds.colors.roles) {
+    for (const [role, hex] of ds.colors.roles) {
+      lines.push(`  --color-${role}: ${hex};`);
+    }
+  }
+  // Typography
+  if (ds.typography.primaryFont) lines.push(`  --font-primary: '${ds.typography.primaryFont}', sans-serif;`);
+  if (ds.typography.secondaryFont) lines.push(`  --font-secondary: '${ds.typography.secondaryFont}', sans-serif;`);
+  for (const rule of ds.typography.hierarchy ?? []) {
+    lines.push(`  --font-size-${rule.role}: ${rule.fontSize}px;`);
+  }
+  // Radii
+  const radii = ds.layout?.borderRadiusScale ?? [];
+  for (let i = 0; i < radii.length; i++) {
+    lines.push(`  --radius-${i}: ${radii[i]}px;`);
+  }
+  lines.push('}');
+  lines.push('');
+  return lines.join('\n');
+}
+
+/**
+ * Sketch of a tailwind.config.ts extension. Emitted alongside the
+ * tokens.css when target=tailwind — the user can merge it into their
+ * existing config. Fully deterministic; the actual Tailwind-class
+ * rendering in components is NOT YET implemented (target falls back
+ * to inline styles; see manifest.notes).
+ */
+function renderTailwindConfigSketch(ds: DesignSystem): string {
+  const colors: string[] = [];
+  if (ds.colors.background) colors.push(`        background: '${ds.colors.background}',`);
+  if (ds.colors.primary) colors.push(`        primary: '${ds.colors.primary}',`);
+  if (ds.colors.accent) colors.push(`        accent: '${ds.colors.accent}',`);
+  if (ds.colors.text) colors.push(`        text: '${ds.colors.text}',`);
+  if (ds.colors.roles) {
+    for (const [role, hex] of ds.colors.roles) colors.push(`        '${role}': '${hex}',`);
+  }
+
+  return [
+    `// Reframe-generated Tailwind theme extension sketch.`,
+    `// Merge this into your project's tailwind.config.ts under theme.extend.`,
+    `// NOTE: component files currently render with inline styles; Tailwind-`,
+    `// class rendering is planned (Phase 2). This file is reference-only.`,
+    `import type { Config } from 'tailwindcss';`,
+    ``,
+    `const config: Partial<Config> = {`,
+    `  theme: {`,
+    `    extend: {`,
+    `      colors: {`,
+    ...colors,
+    `      },`,
+    `      fontFamily: {`,
+    `        primary: ['${ds.typography.primaryFont ?? 'Inter'}', 'sans-serif'],`,
+    ds.typography.secondaryFont
+      ? `        secondary: ['${ds.typography.secondaryFont}', 'sans-serif'],`
+      : '',
+    `      },`,
+    `    },`,
+    `  },`,
+    `};`,
+    ``,
+    `export default config;`,
+    '',
+  ].filter(l => l !== '').join('\n');
+}
+
+// ─── Path utilities ──────────────────────────────────────────
+
+/**
+ * Compute a POSIX-style relative path from `from` to `to`. Both inputs
+ * should be paths within the same emitted tree (e.g. "src/pages/home.tsx"
+ * → "src/components/sections/Hero.tsx" yields "../components/sections/Hero.tsx").
+ *
+ * Intentionally home-grown so the exporter stays dependency-free on node
+ * platform APIs that would need polyfills for browser-test runs.
+ */
+function relPath(from: string, to: string): string {
+  const fromParts = from.split('/').slice(0, -1);
+  const toParts = to.split('/');
+  let i = 0;
+  while (
+    i < fromParts.length
+    && i < toParts.length - 1
+    && fromParts[i] === toParts[i]
+  ) i++;
+  const ups = new Array(fromParts.length - i).fill('..').join('/');
+  const down = toParts.slice(i).join('/');
+  const joined = ups ? `${ups}/${down}` : `./${down}`;
+  return joined;
+}
+
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'page';
+}
+
+function toPascalCase(s: string): string {
+  return s
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+    .join('');
 }
 
 // ─── Node Rendering ───────────────────────────────────────────

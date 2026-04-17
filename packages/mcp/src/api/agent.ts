@@ -69,7 +69,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 // ─── SSE helpers ────────────────────────────────────────────
 
-function openSse(res: ServerResponse): void {
+function openSse(res: ServerResponse): NodeJS.Timeout {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -78,6 +78,18 @@ function openSse(res: ServerResponse): void {
   });
   // Comment line keeps some proxies from holding the response.
   res.write(': agent stream open\n\n');
+  // Heartbeat — comment-line ping every 15s so intermediate proxies
+  // AND client runtimes (browser EventSource, Node undici with default
+  // 5-min bodyTimeout) never see the connection as idle when the agent
+  // is thinking between tool calls. Pure comment lines are valid SSE
+  // that clients ignore — they cost nothing to emit, they guarantee
+  // the TCP stream stays warm. Returns the interval handle so the
+  // caller can clear it on stream end / client disconnect.
+  const heartbeat = setInterval(() => {
+    try { res.write(`: ping ${Date.now()}\n\n`); }
+    catch { /* writable stream torn down — ignore */ }
+  }, 15_000);
+  return heartbeat;
 }
 
 function sendSseEvent(res: ServerResponse, eventName: string, data: unknown): void {
@@ -147,15 +159,21 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
     }
   });
 
+  // cwd must be the workspace root (not the mcp sidecar's cwd) so
+  // claude subprocess picks up .claude/skills/ + CLAUDE.md + .reframe/.
+  // Without this, agents spawn in whatever dir the sidecar launched
+  // from — skills silently don't load and CLAUDE.md is invisible.
+  const { getWorkspaceRoot } = await import('../store.js');
   const session = spawnAgentSession({
     prompt: fullPrompt,
     sessionId: typeof body?.sessionId === 'string' ? body.sessionId : undefined,
     allowedTools: Array.isArray(body?.allowedTools) ? body.allowedTools : undefined,
+    cwd: getWorkspaceRoot(),
   });
   activeChats.set(chatId, session);
 
   // ── Open the SSE response ──
-  openSse(res);
+  const heartbeat = openSse(res);
   sendSseEvent(res, 'chat_id', { chatId, mcpConfig: cfg });
 
   // If the client disconnects we kill the spawned agent so we don't
@@ -163,6 +181,7 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
   let clientGone = false;
   req.on('close', () => {
     clientGone = true;
+    clearInterval(heartbeat);
     session.kill();
     activeChats.delete(chatId);
   });
@@ -172,17 +191,21 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
   try {
     for await (const ev of session.events) {
       if (clientGone) break;
-      sendSseEvent(res, ev.type, ev);
+      try {
+        sendSseEvent(res, ev.type, ev);
+      } catch { /* response already closed */ }
       if (ev.type === 'done' && (ev as any).reason === 'success') {
         agentSucceeded = true;
       }
     }
   } catch (err) {
-    sendSseEvent(res, 'error', {
-      type: 'error',
-      code: 'STREAM_ERROR',
-      message: (err as Error).message,
-    });
+    try {
+      sendSseEvent(res, 'error', {
+        type: 'error',
+        code: 'STREAM_ERROR',
+        message: (err as Error).message,
+      });
+    } catch { /* response already closed */ }
   } finally {
     // Stop tracking scene events before doing variants (the variants
     // themselves emit scene:session-changed events, and we don't want
@@ -234,6 +257,7 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
     }
 
     activeChats.delete(chatId);
+    clearInterval(heartbeat);
     if (!clientGone) {
       try { res.end(); } catch { /* ignore */ }
     }

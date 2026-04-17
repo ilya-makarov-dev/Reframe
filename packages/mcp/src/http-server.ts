@@ -31,6 +31,16 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomUUID } from 'crypto';
 import { execSync } from 'child_process';
+
+// Top-level process guards — otherwise an uncaught error inside the
+// async agent-chat generator silently kills the whole server with no
+// stderr trace. Root cause diagnosis loses its loudest signal.
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`[FATAL] uncaughtException: ${err?.stack || err}\n`);
+});
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`[FATAL] unhandledRejection: ${reason instanceof Error ? reason.stack : JSON.stringify(reason)}\n`);
+});
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 

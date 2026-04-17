@@ -26,7 +26,13 @@ yarn-error.log*
 .vscode/
 .idea/
 .cursor/
-.claude/
+# .claude/ is user-scoped by default (settings.local.json, worktrees),
+# but .claude/skills/ ships with the repo — these are the "costume" that
+# teaches Claude Code how to be a reframe agent and benefit every user
+# who clones the project.
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 *.swp
 *.swo
 *~

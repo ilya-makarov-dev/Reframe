@@ -67,15 +67,22 @@ export function buildAgentPreamble(opts: ContextOptions = {}): string {
     }
   }
 
-  // ── Other scenes in session ──
+  // ── Full project context: all scenes with name + rough status ──
+  // Stitch-style "agent sees the whole project, not just one screen".
+  // Lists every scene with name, slug, size, and a built-out hint from
+  // node count (empty / sparse / built / dense). Agent can reason about
+  // cross-scene decisions ("reuse home's hero pattern on about") without
+  // calling reframe_inspect on each.
   const all = listScenes();
   if (all.length > 0) {
-    const others = opts.activeSceneId
-      ? all.filter((s) => s.id !== opts.activeSceneId && s.slug !== opts.activeSceneId)
-      : all;
-    if (others.length > 0) {
-      const list = others.slice(0, 10).map((s) => `${s.id}/${s.slug}`).join(', ');
-      lines.push(`Other scenes available: ${list}${others.length > 10 ? ` (+${others.length - 10} more)` : ''}`);
+    lines.push('');
+    lines.push('Project scenes:');
+    for (const s of all) {
+      const isActive = opts.activeSceneId && (s.id === opts.activeSceneId || s.slug === opts.activeSceneId);
+      const marker = isActive ? '→' : ' ';
+      const nodes = typeof s.nodes === 'number' ? s.nodes : 0;
+      const status = nodes === 0 ? 'empty' : nodes < 10 ? 'sparse' : nodes < 50 ? 'built' : 'dense';
+      lines.push(`  ${marker} ${s.slug} "${s.name}" — ${s.size}, ${nodes} nodes (${status})`);
     }
   }
 
@@ -104,6 +111,7 @@ export function buildAgentPreamble(opts: ContextOptions = {}): string {
     lines.push('  4. ONE tool call when possible. Two only if absolutely required.');
     lines.push('  5. NO long explanations. One short sentence of confirmation max.');
     lines.push('  6. NO TodoWrite for trivial single-change tasks.');
+    lines.push('  7. When the user asks for a REVIEW / critique / "how does this look" / "make it better" — route through the reframe-critic skill. It translates audit + aesthetic + brandFidelity scores into ≤3 specific fixes.');
     lines.push('');
     lines.push('Tools (you have these via MCP):');
     lines.push('  reframe_compile · reframe_edit · reframe_inspect · reframe_export');

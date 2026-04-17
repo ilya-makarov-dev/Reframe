@@ -7,9 +7,9 @@
 
 import { z } from 'zod';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join, dirname, sep } from 'path';
 import { exportToHtml } from '../../../core/src/exporters/html.js';
-import { exportToReact } from '../../../core/src/exporters/react.js';
+import { exportToReact, exportToReactTree } from '../../../core/src/exporters/react.js';
 import { exportToAnimatedHtml } from '../../../core/src/exporters/animated-html.js';
 import { exportToLottie } from '../../../core/src/exporters/lottie.js';
 import { buildLottiePreviewHtml } from '../../../core/src/exporters/lottie-preview.js';
@@ -49,6 +49,30 @@ export const exportInputSchema = {
   // React options
   componentName: z.string().optional(),
   typescript: z.boolean().optional().default(true),
+  /**
+   * React multi-file tree options. When any of these are truthy, the
+   * exporter emits a file tree instead of a single component string.
+   * The engine does the transformation deterministically — no LLM.
+   */
+  reactTree: z.boolean().optional().describe(
+    'Emit a multi-file React project tree (sections split by semanticRole, entry page, tokens).'
+    + ' Set to true for production-ready output; omit for the single-file dump.',
+  ),
+  reactTarget: z.enum(['inline', 'css-modules', 'tailwind', 'styled-components']).optional().describe(
+    'Styling strategy for the emitted tree. "inline" + "css-modules" fully implemented;'
+    + ' "tailwind" + "styled-components" accepted but currently fall back to inline + emit a config sketch.',
+  ),
+  reactExtractSections: z.boolean().optional().describe(
+    'When reactTree is true, split top-level children with semanticRole into section files. Default: true.',
+  ),
+  reactExtractPrimitives: z.boolean().optional().describe(
+    'Phase 2 (scaffolded) — shape-hash dedup into src/components/ui/. Currently no-op.',
+  ),
+  reactExtractHooks: z.boolean().optional().describe(
+    'Phase 3 (scaffolded) — state-bearing nodes into src/hooks/. Currently no-op.',
+  ),
+  reactOutputBase: z.string().optional().describe('Root dir for emitted paths. Default: "src".'),
+  reactPageSlug: z.string().optional().describe('Entry page filename stem. Default: derived from root node name.'),
 
   // PNG options
   scale: z.number().optional().default(1).describe('Scale factor for PNG (e.g. 2 for retina)'),
@@ -180,6 +204,13 @@ export async function handleExport(input: {
   svgBackground?: string;
   componentName?: string;
   typescript?: boolean;
+  reactTree?: boolean;
+  reactTarget?: 'inline' | 'css-modules' | 'tailwind' | 'styled-components';
+  reactExtractSections?: boolean;
+  reactExtractPrimitives?: boolean;
+  reactExtractHooks?: boolean;
+  reactOutputBase?: string;
+  reactPageSlug?: string;
   scale?: number;
   animate?: {
     presets?: Array<{ nodeName: string; preset: string; delay?: number; duration?: number }>;
@@ -281,7 +312,74 @@ export async function handleExport(input: {
 
       case 'react': {
         const wrappedRoot = new StandaloneNode(graph, graph.getNode(rootId)!);
-        content = exportToReact(wrappedRoot);
+
+        // Multi-file tree mode — writes a whole src/ tree to disk.
+        // Opt-in via reactTree: true OR presence of any tree-specific
+        // option (treat those as implicit enablement to reduce API surface).
+        const wantsTree =
+          input.reactTree === true
+          || input.reactTarget !== undefined
+          || input.reactExtractSections !== undefined
+          || input.reactExtractPrimitives !== undefined
+          || input.reactExtractHooks !== undefined
+          || input.reactOutputBase !== undefined
+          || input.reactPageSlug !== undefined;
+
+        if (wantsTree) {
+          const stored = getScene(sceneId);
+          const slug = input.reactPageSlug ?? stored?.slug ?? sceneId;
+          const result = exportToReactTree(wrappedRoot, {
+            componentName: input.componentName,
+            typescript: input.typescript ?? true,
+            target: input.reactTarget ?? 'inline',
+            extractSections: input.reactExtractSections,
+            extractPrimitives: input.reactExtractPrimitives,
+            extractHooks: input.reactExtractHooks,
+            outputBase: input.reactOutputBase ?? 'src',
+            pageSlug: slug,
+          });
+
+          // Materialize the file tree under .reframe/exports/<slug>-react/.
+          // Keeps outputs scoped per-scene so multiple react exports don't
+          // stomp each other.
+          const exportDir = getExportsBaseDir();
+          if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
+          const treeRoot = join(exportDir, `${slug}-react`);
+          if (!existsSync(treeRoot)) mkdirSync(treeRoot, { recursive: true });
+
+          let fileCount = 0;
+          for (const [relP, body] of Object.entries(result.files)) {
+            const abs = join(treeRoot, relP.replace(/\//g, sep));
+            const dir = dirname(abs);
+            if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+            writeFileSync(abs, body);
+            fileCount++;
+          }
+
+          const sectionLines = result.manifest.sections
+            .map((s) => `  · ${s.name} (${s.role ?? 'no-role'}) → ${s.path}`)
+            .join('\n');
+          const noteLines = result.manifest.notes.length > 0
+            ? '\n\nNotes:\n  · ' + result.manifest.notes.join('\n  · ')
+            : '';
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text:
+                `React tree exported → ${treeRoot} (${fileCount} files, target=${result.manifest.target})`
+                + `\n\nEntry: ${result.entry}`
+                + (sectionLines ? `\nSections:\n${sectionLines}` : '\n(No sections extracted — entry file contains full scene inline.)')
+                + (result.manifest.tokensPath ? `\nTokens: ${result.manifest.tokensPath}` : '')
+                + noteLines,
+            }],
+          };
+        }
+
+        content = exportToReact(wrappedRoot, {
+          componentName: input.componentName,
+          typescript: input.typescript ?? true,
+        });
         break;
       }
 
