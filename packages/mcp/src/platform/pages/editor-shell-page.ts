@@ -14,9 +14,24 @@
  */
 
 import { renderMacroDropdowns, renderBottomChat } from '../layout.js';
+import type { EditorBootPayload } from '../boot-payload.js';
 
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * JSON for inline `<script>` contexts. Unlike JSON.stringify alone,
+ * this escapes `</script>`, `<!--`, U+2028/U+2029, and forward slashes
+ * in the closing tag so the payload can never break out of its own
+ * script element, regardless of what sits in scene names / findings.
+ */
+function escapeJsonForScript(json: string): string {
+  return json
+    .replace(/<\/script/gi, '<\\/script')
+    .replace(/<!--/g, '<\\!--')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 export function renderEditorShell(options: {
@@ -25,6 +40,8 @@ export function renderEditorShell(options: {
   sceneSlug?: string;
   editorJsPath: string;
   fontsLink?: string;
+  /** Inlined as `window.__REFRAME_BOOT__` — eliminates initial fetch waterfall. */
+  boot?: EditorBootPayload;
 }): string {
   const title = esc(options.title ?? 'reframe');
   const sceneAttr = options.sceneIds ? ` data-project-scenes="${esc(options.sceneIds)}"` : '';
@@ -33,6 +50,15 @@ export function renderEditorShell(options: {
   // top macro-dropdowns + bottom chat markup would be absent.
   const appSceneAttr = options.sceneSlug ? ` data-scene="${esc(options.sceneSlug)}"` : '';
 
+  // Boot payload — inlined so init code reads it synchronously. One
+  // script avoids the old waterfall (agent health, audit, tree,
+  // annotations, tokens, root node/get — ~6 serial fetches on cold
+  // load). Escape for script-safety: never trust scene names / audit
+  // messages to be free of `</script` sequences.
+  const bootScript = options.boot
+    ? `<script>window.__REFRAME_BOOT__=${escapeJsonForScript(JSON.stringify(options.boot))};</script>`
+    : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -40,6 +66,7 @@ export function renderEditorShell(options: {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${title}</title>
   <script type="importmap">{"imports":{"canvaskit-wasm":"/platform/vendor/canvaskit-shim.js","canvaskit-wasm/full":"/platform/vendor/canvaskit-shim.js"}}</script>
+  ${bootScript}
   <link rel="dns-prefetch" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -102,6 +129,7 @@ export function renderEditorShell(options: {
     /* ── Header ── */
     #header {
       grid-area: header;
+      position: relative;
       display: flex;
       align-items: center;
       padding: 0 20px;

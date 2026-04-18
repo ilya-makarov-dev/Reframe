@@ -57,6 +57,23 @@ export interface SpawnAgentOptions {
   allowedTools?: string[];
   /** Override the binary name. Defaults to "claude". */
   binary?: string;
+  /**
+   * Enable extended thinking with a budget token cap. When > 0 we pass
+   * `--max-thinking-tokens <n>` to the CLI, which unlocks Claude's
+   * internal reasoning block (great for multi-step design tasks —
+   * "build a pricing page with 3 tiers and a comparison table"). When
+   * absent or 0, thinking stays off (default) and tokens are saved.
+   */
+  maxThinkingTokens?: number;
+  /**
+   * Slug of the canvas the user is looking at. Propagated to the
+   * spawned reframe MCP via `REFRAME_ACTIVE_SCENE_SLUG` env var; the
+   * `reframe_compile` tool uses it as the default `name` when the
+   * caller doesn't specify one. This is the deterministic guarantee
+   * that "make a pricing section" while inside canvas X lands in
+   * canvas X, not a fresh sibling scene.
+   */
+  activeSceneSlug?: string;
 }
 
 export interface AgentSession {
@@ -86,6 +103,9 @@ export function spawnAgentSession(opts: SpawnAgentOptions): AgentSession {
   }
   if (opts.allowedTools && opts.allowedTools.length > 0) {
     args.push('--allowedTools', opts.allowedTools.join(','));
+  }
+  if (opts.maxThinkingTokens && opts.maxThinkingTokens > 0) {
+    args.push('--max-thinking-tokens', String(Math.floor(opts.maxThinkingTokens)));
   }
 
   // Buffer for partial JSON lines + queue for events ready to consume.
@@ -136,6 +156,9 @@ export function spawnAgentSession(opts: SpawnAgentOptions): AgentSession {
         // running sidecar (port "in use" → takeover dance) and the
         // user's open chat SSE connection dies.
         REFRAME_HTTP_PORT: '0',
+        // Pin the subprocess `reframe_compile` to the user's active
+        // canvas by default. See SpawnAgentOptions.activeSceneSlug.
+        ...(opts.activeSceneSlug ? { REFRAME_ACTIVE_SCENE_SLUG: opts.activeSceneSlug } : {}),
       },
     });
   } catch (err) {

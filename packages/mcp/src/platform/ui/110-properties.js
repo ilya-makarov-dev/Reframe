@@ -67,18 +67,26 @@
   }
 
   async function renderSceneDashboard(panel, sessionId) {
-    // Fetch root node props for scene-level info. We use a plain fetch
-    // (not the api() helper) because nodeId="root" is a best-effort
-    // guess — real root ids are per-scene UUIDs, so a 404 is normal on
-    // first load. api() would toast "API error: node root not found"
-    // before the catch could swallow it; plain fetch stays silent.
+    // Root node props for scene-level info. First look at the inlined
+    // boot payload — it already carries {width, height, background}.
+    // Fall back to the network only when the payload is absent / stale
+    // / for a different scene.
     var sceneInfo = '';
     try {
-      var resp = await fetch('/platform/api/node/get?sceneId=' + encodeURIComponent(sessionId) + '&nodeId=root');
-      if (!resp.ok) throw new Error('no root');
-      var store = await resp.json();
-      if (!store.ok) throw new Error('no root');
-      var p = store.props || {};
+      var p = null;
+      var cachedRoot = consumeBootSection(sessionId, 'root');
+      if (cachedRoot) {
+        p = { width: cachedRoot.width, height: cachedRoot.height, background: cachedRoot.background, type: 'frame' };
+      } else {
+        // Use a plain fetch (not api()) — nodeId="root" is a best-effort
+        // guess and a 404 is normal on first load. api() would toast
+        // "API error: node root not found" before the catch could swallow it.
+        var resp = await fetch('/platform/api/node/get?sceneId=' + encodeURIComponent(sessionId) + '&nodeId=root');
+        if (!resp.ok) throw new Error('no root');
+        var store = await resp.json();
+        if (!store.ok) throw new Error('no root');
+        p = store.props || {};
+      }
       var bgColor = p.background || '#FFFFFF';
       sceneInfo =
         '<div class="props-identity">' +
@@ -339,16 +347,14 @@
       var addBtn = has
         ? '<span class="state-badge on">' + overrideCount + ' override' + (overrideCount !== 1 ? 's' : '') + '</span>' +
           '<button class="state-edit-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '">Edit</button>'
-        : '<button class="state-add-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Empty state — add overrides yourself">+ Add</button>' +
-          '<button class="state-clone-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Clone with sensible defaults" ' +
-            'style="margin-left:4px;font-size:10px;padding:3px 6px;background:transparent;border:1px solid var(--border,#333);' +
-            'color:var(--text-muted,#888);border-radius:3px;cursor:pointer">⧉ Clone base</button>';
+        : '<button class="state-add-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Empty state — add overrides yourself">Add</button>' +
+          '<button class="prop-text-btn state-clone-btn" data-state="' + escape(sn) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '" title="Clone with sensible defaults" style="margin-left:4px">Clone</button>';
       return '<div class="state-item">' +
         '<span class="state-name">' + escape(sn) + '</span>' +
         addBtn +
       '</div>';
     }).join('');
-    html += '<div class="props-section">' +
+    html += '<div class="props-section collapsed">' +
       '<div class="props-section-header" data-collapse-toggle>States<span class="chevron">▼</span></div>' +
       '<div class="props-section-body">' + stateItems + '</div>' +
     '</div>';
@@ -358,14 +364,14 @@
     var presetBtns = animPresets.map(function(p) {
       return '<button class="anim-preset-btn" data-preset="' + escape(p) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '">' + escape(p) + '</button>';
     }).join('');
-    html += '<div class="props-section">' +
+    html += '<div class="props-section collapsed">' +
       '<div class="props-section-header" data-collapse-toggle>Animation<span class="chevron">▼</span></div>' +
       '<div class="props-section-body"><div class="anim-grid">' + presetBtns + '</div></div>' +
     '</div>';
 
     // ── Grid (if applicable) ──
     if (props['grid-columns'] || props['grid-col-gap'] != null) {
-      html += '<div class="props-section">' +
+      html += '<div class="props-section collapsed">' +
         '<div class="props-section-header" data-collapse-toggle>Grid<span class="chevron">▼</span></div>' +
         '<div class="props-section-body">' +
           '<div class="prop-pair">' +

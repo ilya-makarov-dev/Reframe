@@ -164,11 +164,79 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
   // Without this, agents spawn in whatever dir the sidecar launched
   // from — skills silently don't load and CLAUDE.md is invisible.
   const { getWorkspaceRoot } = await import('../store.js');
+  // Deep-think toggle: the bottom-chat "thinking" toggle maps to a CLI
+  // `--max-thinking-tokens` budget. Cap at 10k so a runaway thinking
+  // loop doesn't eat the whole context; UI only exposes an on/off
+  // switch, not a budget slider, so the number is a server decision.
+  const thinking = body?.thinking === true;
+  const maxThinkingTokens = thinking ? 10000 : 0;
+
+  // Project-scoped chat persistence. The UI passes the project slug so
+  // each project gets its own on-disk chat log. Empty slug = ephemeral
+  // (legacy pages, dev scratch) — still streams, just not saved.
+  const projectSlug = typeof body?.projectSlug === 'string' ? body.projectSlug : '';
+  const chatStore = projectSlug ? await import('../chat-store.js') : null;
+  // If the client didn't provide a sessionId but we have one on disk
+  // from an earlier turn in this project's chat, use it so `--resume`
+  // picks up the conversation across page reloads.
+  let resumeSessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined;
+  if (!resumeSessionId && chatStore && projectSlug) {
+    const hist = chatStore.loadChat(projectSlug);
+    if (hist.sessionId) resumeSessionId = hist.sessionId;
+  }
+  if (chatStore && projectSlug && prompt) {
+    chatStore.appendMessage(projectSlug, { role: 'user', text: prompt, at: Date.now() });
+  }
+
+  // Resolve the user's active canvas → slug. Pinning the spawn to this
+  // slug via REFRAME_ACTIVE_SCENE_SLUG makes `reframe_compile` default
+  // its `name` to this slug, so "make a pricing section" while inside
+  // canvas X lands IN canvas X instead of a sibling scene called
+  // "pricing". The model can still override by explicitly passing
+  // `name` (e.g. for a -dark variant).
+  let activeSceneSlug: string | undefined;
+  if (sceneId) {
+    const stored = getScene(sceneId);
+    if (stored?.slug) activeSceneSlug = stored.slug;
+  }
+  if (!activeSceneSlug && projectSlug) {
+    // Fall back to the URL project slug — for single-scene projects
+    // this matches the active scene. Safer than leaving undefined.
+    activeSceneSlug = projectSlug;
+  }
+
+  // Default tool whitelist — Claude Code defers any tool not in its
+  // primary set when the total tool count is too high, forcing the
+  // agent into a ToolSearch round-trip before every call. By pre-
+  // declaring exactly which tools the design flow needs, everything
+  // on this list stays non-deferred → direct calls, no lookup. The UI
+  // can still override via body.allowedTools for narrower flows.
+  const defaultAllowedTools = [
+    'TodoWrite',
+    'Read',
+    'Write',
+    'Edit',
+    'Glob',
+    'Grep',
+    'Bash',
+    'mcp__reframe__reframe_design',
+    'mcp__reframe__reframe_compile',
+    'mcp__reframe__reframe_inspect',
+    'mcp__reframe__reframe_edit',
+    'mcp__reframe__reframe_export',
+    'mcp__reframe__reframe_project',
+  ];
+  const allowedTools = Array.isArray(body?.allowedTools) && body.allowedTools.length > 0
+    ? body.allowedTools
+    : defaultAllowedTools;
+
   const session = spawnAgentSession({
     prompt: fullPrompt,
-    sessionId: typeof body?.sessionId === 'string' ? body.sessionId : undefined,
-    allowedTools: Array.isArray(body?.allowedTools) ? body.allowedTools : undefined,
+    sessionId: resumeSessionId,
+    allowedTools,
     cwd: getWorkspaceRoot(),
+    maxThinkingTokens,
+    activeSceneSlug,
   });
   activeChats.set(chatId, session);
 
@@ -188,12 +256,59 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
 
   // ── Drain the agent stream ──
   let agentSucceeded = false;
+  // Coalesce consecutive assistant text deltas into one persisted
+  // message. Claude streams `text` events in small chunks; saving each
+  // one produces a shredded transcript. We flush when we hit anything
+  // non-text (tool_use / done / error).
+  let pendingAssistantText = '';
+  const flushAssistant = (): void => {
+    if (!pendingAssistantText) return;
+    if (chatStore && projectSlug) {
+      chatStore.appendMessage(projectSlug, { role: 'assistant', text: pendingAssistantText, at: Date.now() });
+    }
+    pendingAssistantText = '';
+  };
   try {
     for await (const ev of session.events) {
       if (clientGone) break;
       try {
         sendSseEvent(res, ev.type, ev);
       } catch { /* response already closed */ }
+
+      if (chatStore && projectSlug) {
+        switch (ev.type) {
+          case 'session_start':
+            if ((ev as any).sessionId) chatStore.setChatSessionId(projectSlug, (ev as any).sessionId);
+            break;
+          case 'text':
+            pendingAssistantText += (ev as any).text ?? '';
+            break;
+          case 'tool_use':
+            flushAssistant();
+            chatStore.appendMessage(projectSlug, {
+              role: 'tool_use',
+              toolName: (ev as any).toolName,
+              input: (ev as any).input,
+              toolUseId: (ev as any).toolUseId,
+              at: Date.now(),
+            });
+            break;
+          case 'tool_result':
+            chatStore.appendMessage(projectSlug, {
+              role: 'tool_result',
+              toolUseId: (ev as any).toolUseId,
+              ok: !!(ev as any).ok,
+              preview: String((ev as any).preview ?? ''),
+              at: Date.now(),
+            });
+            break;
+          case 'done':
+          case 'error':
+            flushAssistant();
+            break;
+        }
+      }
+
       if (ev.type === 'done' && (ev as any).reason === 'success') {
         agentSucceeded = true;
       }
@@ -207,6 +322,9 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
       });
     } catch { /* response already closed */ }
   } finally {
+    // Persist any trailing assistant text (e.g. when the stream ends
+    // without a `done` event because the client aborted mid-sentence).
+    flushAssistant();
     // Stop tracking scene events before doing variants (the variants
     // themselves emit scene:session-changed events, and we don't want
     // those to count as "agent touched a scene").
@@ -215,16 +333,18 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
     // The spawned claude's reframe MCP runs in its own subprocess with
     // its own in-memory store. Its scene mutations were autosaved to
     // .reframe/scenes/ but our in-memory copy is stale. Re-sync from
-    // disk now so the UI sees the agent's edits via SSE.
+    // disk regardless of agent outcome — a mid-stream error or cancel
+    // can still leave a half-compiled scene on disk, and skipping this
+    // sync on failure means the dashboard silently hides that scene
+    // until the sidecar is restarted. Better to always pick up whatever
+    // landed.
     let diskChanged: string[] = [];
-    if (agentSucceeded) {
-      try {
-        diskChanged = refreshScenesFromDisk(getWorkspaceRoot());
-        // Treat disk-detected changes as "touched" by the agent so the
-        // variant fan-out below picks one of them.
-        for (const sid of diskChanged) touchedScenes.add(sid);
-      } catch { /* best-effort */ }
-    }
+    try {
+      diskChanged = refreshScenesFromDisk(getWorkspaceRoot());
+      // Treat disk-detected changes as "touched" by the agent so the
+      // variant fan-out below picks one of them.
+      for (const sid of diskChanged) touchedScenes.add(sid);
+    } catch { /* best-effort */ }
 
     // Variant fan-out — only when agent completed cleanly, the user
     // asked for >1, and we identified at least one scene the agent
@@ -395,5 +515,29 @@ export async function handleAgentApi(
     await handleAgentPresetApply(req, res);
     return true;
   }
+
+  // Project-scoped chat history — GET replays, DELETE starts fresh.
+  // Path shape: /api/chat/<projectSlug> (URI-encoded slug).
+  if (path.startsWith('/api/chat/')) {
+    const slug = decodeURIComponent(path.slice('/api/chat/'.length));
+    if (!slug) {
+      sendJson(res, 400, { ok: false, error: 'projectSlug required' });
+      return true;
+    }
+    const chatStore = await import('../chat-store.js');
+    if (method === 'GET') {
+      const history = chatStore.loadChat(slug);
+      sendJson(res, 200, { ok: true, history });
+      return true;
+    }
+    if (method === 'DELETE') {
+      chatStore.clearChat(slug);
+      sendJson(res, 200, { ok: true });
+      return true;
+    }
+    sendJson(res, 405, { ok: false, error: 'method not allowed' });
+    return true;
+  }
+
   return false;
 }

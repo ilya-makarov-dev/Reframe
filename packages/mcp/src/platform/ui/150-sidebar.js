@@ -12,6 +12,13 @@
       container.innerHTML = '<div class="sidebar-empty">No scene</div>';
       return;
     }
+    // Prefer inlined boot payload on first paint — same tree shape.
+    var cachedTree = consumeBootSection(sessionId, 'tree');
+    if (cachedTree) {
+      container.innerHTML = renderLayerNode(cachedTree, 0);
+      bindLayerClicks(sessionId);
+      return;
+    }
     try {
       var res = await api('/platform/api/scene/tree?sceneId=' + encodeURIComponent(sessionId));
       if (!res.ok || !res.tree) {

@@ -601,9 +601,23 @@ export function renderMacroDropdowns(): string {
       <div class="macro-menu hidden" data-macro-menu="${key}">${menuInner}</div>
     </div>`;
 
+  // Detach — a direct-action button (no dropdown). Sits inline with the
+  // 4 verb dropdowns because it's a primary canvas mutation the user
+  // reaches for constantly: cut the current selection out of its
+  // auto-layout parent so it can be freely positioned. No sub-options,
+  // so a flat button is clearer than a one-item menu.
+  const detachBtn = `
+    <div class="macro-group">
+      <button class="macro-btn" id="btn-detach" title="Detach selected node(s) from parent auto-layout. Reparents to canvas, pins ABSOLUTE position. Works on multi-selection.">
+        <span class="macro-icon">✂</span>
+        <span>Detach</span>
+      </button>
+    </div>`;
+
   return `<div class="macro-dropdowns" data-macro-dropdowns>
     ${makeDropdown('generate', '✨', 'Generate', generateMenu)}
     ${makeDropdown('modify',   '✎',  'Modify',   modifyMenu)}
+    ${detachBtn}
     ${makeDropdown('preview',  '👁', 'Preview',  previewMenu)}
     ${makeDropdown('more',     '⋯',  'More',     moreMenu)}
   </div>`;
@@ -617,13 +631,20 @@ export function renderMacroDropdowns(): string {
 //   · mic button (voice capture, wired in step 7)
 //   · send button
 //
-// Input delegates to the existing sidebar agent via [data-agent-input]
-// + [data-agent-send] so streaming / tool-rendering behaviour stays in
-// one place. The chip scope is prepended to the prompt text as a
-// single structured line ("[Scope: hero section · brand: Stripe · vp: desktop]")
-// so Claude sees explicit context without any server-side prompt changes.
+// Streams directly to /api/agent/chat and renders the conversation in a
+// collapsible log above the input. The chip scope is prepended to the
+// prompt text as a single structured line
+// ("[Scope: hero section · brand: Stripe · vp: desktop]") so Claude sees
+// explicit context without any server-side prompt changes.
 export function renderBottomChat(): string {
   return `<div class="bottom-chat" data-bottom-chat>
+    <button class="bc-collapse" data-bc-collapse title="Свернуть/развернуть" aria-label="Toggle chat log" aria-expanded="true">
+      <svg class="bc-collapse-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
+        <path d="M3 4.5l3 3 3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <div class="bc-log" data-bc-log role="log" aria-label="Agent transcript" hidden></div>
+    <div class="bc-todo-pinned" data-bc-todo-pinned aria-label="Current plan" hidden></div>
     <div class="bc-chips" data-bc-chips aria-label="Context chips"></div>
     <div class="bc-input-row">
       <button class="bc-mic" data-bc-mic title="Voice input (coming)" aria-label="Voice input">
@@ -632,12 +653,28 @@ export function renderBottomChat(): string {
           <path d="M3 7a4 4 0 0 0 8 0M7 11v1M5 12h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
         </svg>
       </button>
+      <button class="bc-think" data-bc-think aria-pressed="false" title="Deep think — let the model reason through complex design asks" aria-label="Deep think">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M7 1.5a4 4 0 0 0-2.5 7.1V11h5V8.6A4 4 0 0 0 7 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+          <path d="M5.5 12.5h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+      </button>
       <textarea
         class="bc-input"
         data-bc-input
         rows="1"
         placeholder="Describe a change, ask about this scene, or paste a URL…"
         aria-label="Agent prompt"></textarea>
+      <button class="bc-new" data-bc-new title="Новый диалог" aria-label="New chat">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M7 3v8M3 7h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button class="bc-cancel" data-bc-cancel title="Stop" aria-label="Stop" hidden>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <rect x="2" y="2" width="8" height="8" rx="1" fill="currentColor"/>
+        </svg>
+      </button>
       <button class="bc-send" data-bc-send title="Send (⌘↵)" aria-label="Send">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
           <path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>

@@ -65,7 +65,8 @@ export async function handleApiRequest(
     }
 
     // /api/agent/* — chat / cancel / health for embedded Claude Code agent
-    if (path.startsWith('/api/agent/')) {
+    // /api/chat/*  — per-project persisted chat history (GET replay, DELETE clear)
+    if (path.startsWith('/api/agent/') || path.startsWith('/api/chat/')) {
       const handled = await handleAgentApi(req, res, url);
       if (handled) return true;
     }

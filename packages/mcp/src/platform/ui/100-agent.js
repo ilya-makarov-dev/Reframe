@@ -14,9 +14,17 @@
     var cancelBtn = $('[data-agent-cancel]');
     var clearBtn = $('[data-agent-clear]');
 
-    // Health check — show banner if claude isn't installed.
-    fetch('/api/agent/health').then(function(r) { return r.json(); }).then(function(h) {
-      if (!h.claudeFound) {
+    // Health — read from boot payload when available, fall back to fetch.
+    var bootAgentInfo = bootAgent();
+    if (bootAgentInfo) {
+      applyAgentHealth(bootAgentInfo);
+    } else {
+      fetch('/api/agent/health').then(function(r) { return r.json(); }).then(applyAgentHealth).catch(function() {
+        if (statusDot) statusDot.style.background = '#e85a5a';
+      });
+    }
+    function applyAgentHealth(h) {
+      if (!h || !h.claudeFound) {
         if (statusDot) statusDot.style.background = '#e85a5a';
         if (banner) {
           banner.style.display = '';
@@ -25,9 +33,7 @@
       } else {
         if (statusDot) statusDot.style.background = '#36c777';
       }
-    }).catch(function() {
-      if (statusDot) statusDot.style.background = '#e85a5a';
-    });
+    }
 
     function clearLog() {
       if (logEl) logEl.innerHTML = '';
@@ -45,11 +51,155 @@
       var bg = role === 'user' ? 'var(--accent)' : 'var(--surface-elevated)';
       var color = role === 'user' ? '#fff' : 'var(--text-primary)';
       var align = role === 'user' ? 'flex-end' : 'flex-start';
-      b.style.cssText = 'align-self:' + align + ';max-width:92%;padding:8px 10px;border-radius:8px;background:' + bg + ';color:' + color + ';white-space:pre-wrap;word-break:break-word';
-      b.textContent = content;
+      b.style.cssText = 'align-self:' + align + ';max-width:92%;padding:8px 10px;border-radius:8px;background:' + bg + ';color:' + color + ';word-break:break-word';
+      if (role === 'assistant') {
+        b._raw = content || '';
+        b.innerHTML = renderMarkdown(b._raw);
+      } else {
+        b.style.whiteSpace = 'pre-wrap';
+        b.textContent = content;
+      }
       logEl.appendChild(b);
       logEl.scrollTop = logEl.scrollHeight;
       return b;
+    }
+
+    // ── Minimal markdown renderer ───────────────────────────────────
+    // Self-contained, zero deps. Escapes HTML first then reconstructs
+    // only a known-safe subset (headings, bold, italic, code, lists,
+    // blockquote, hr, links, paragraphs). Link hrefs are restricted
+    // to http(s):// to block javascript: vectors. Code blocks keep a
+    // `lang-X` class hook so a highlighter can be layered on later.
+    function renderMarkdown(src) {
+      if (!src) return '';
+      src = String(src);
+      // 1. Extract fenced code blocks before any escaping/transforms.
+      var codes = [];
+      src = src.replace(/```([\w+-]*)\s*\n?([\s\S]*?)```/g, function(_, lang, body) {
+        codes.push({ lang: lang || '', body: body.replace(/\n$/, '') });
+        return '\uE000CODE' + (codes.length - 1) + '\uE001';
+      });
+      // 2. Escape all HTML in the remainder.
+      src = src.replace(/[&<>"']/g, function(c) {
+        return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+      });
+      // 3. Inline code.
+      src = src.replace(/`([^`\n]+)`/g, '<code class="md-ci">$1</code>');
+      // 4. Bold then italic (order matters — ** before *).
+      src = src.replace(/\*\*([^\*\n]+)\*\*/g, '<strong>$1</strong>');
+      src = src.replace(/(^|[^\*\w])\*([^\*\n]+)\*/g, '$1<em>$2</em>');
+      src = src.replace(/(^|[^_\w])_([^_\n]+)_/g, '$1<em>$2</em>');
+      // 5. Links [text](url) — http(s) only.
+      src = src.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function(_, text, url) {
+        if (!/^https?:\/\//i.test(url) && !/^\//.test(url)) return text;
+        return '<a href="' + url + '" target="_blank" rel="noopener">' + text + '</a>';
+      });
+      // 6. Block-level pass — split into lines, accumulate blocks.
+      var lines = src.split('\n');
+      var out = [];
+      var i = 0;
+      var CODE_RE = /^\uE000CODE\d+\uE001$/;
+      while (i < lines.length) {
+        var line = lines[i];
+        // Standalone code-block placeholder — emit as-is, resolved later.
+        if (CODE_RE.test(line.trim())) { out.push(line.trim()); i++; continue; }
+        // Heading
+        var mh = /^(#{1,6})\s+(.*)$/.exec(line);
+        if (mh) {
+          out.push('<h' + mh[1].length + ' class="md-h md-h' + mh[1].length + '">' + mh[2] + '</h' + mh[1].length + '>');
+          i++; continue;
+        }
+        // Horizontal rule
+        if (/^\s*(-{3,}|_{3,}|\*{3,})\s*$/.test(line)) { out.push('<hr class="md-hr">'); i++; continue; }
+        // Blockquote
+        if (/^>\s?/.test(line)) {
+          var bq = [];
+          while (i < lines.length && /^>\s?/.test(lines[i])) { bq.push(lines[i].replace(/^>\s?/, '')); i++; }
+          out.push('<blockquote class="md-bq">' + bq.join('<br>') + '</blockquote>');
+          continue;
+        }
+        // Unordered list
+        if (/^\s*[-*+]\s+/.test(line)) {
+          var ui = [];
+          while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+            ui.push('<li>' + lines[i].replace(/^\s*[-*+]\s+/, '') + '</li>');
+            i++;
+          }
+          out.push('<ul class="md-ul">' + ui.join('') + '</ul>');
+          continue;
+        }
+        // Ordered list
+        if (/^\s*\d+\.\s+/.test(line)) {
+          var oi = [];
+          while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+            oi.push('<li>' + lines[i].replace(/^\s*\d+\.\s+/, '') + '</li>');
+            i++;
+          }
+          out.push('<ol class="md-ol">' + oi.join('') + '</ol>');
+          continue;
+        }
+        // Blank line
+        if (line.trim() === '') { i++; continue; }
+        // Paragraph — gather until blank line or new block start.
+        var para = [line]; i++;
+        while (i < lines.length && lines[i].trim() !== '' &&
+               !CODE_RE.test(lines[i].trim()) &&
+               !/^(#{1,6}\s|>\s?|\s*[-*+]\s|\s*\d+\.\s|-{3,}|_{3,}|\*{3,})/.test(lines[i])) {
+          para.push(lines[i]); i++;
+        }
+        out.push('<p class="md-p">' + para.join('<br>') + '</p>');
+      }
+      var html = out.join('');
+      // 7. Restore code blocks.
+      html = html.replace(/\uE000CODE(\d+)\uE001/g, function(_, idx) {
+        var c = codes[parseInt(idx, 10)];
+        var body = c.body.replace(/[&<>"']/g, function(ch) {
+          return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[ch];
+        });
+        var cls = 'md-cb' + (c.lang ? ' lang-' + c.lang.replace(/[^\w-]/g, '') : '');
+        return '<pre class="md-pre"><code class="' + cls + '">' + body + '</code></pre>';
+      });
+      return html;
+    }
+
+    // ── TodoWrite pinned panel ──────────────────────────────────────
+    // Each TodoWrite tool call carries {todos:[{content,status,activeForm}]}.
+    // Instead of a one-off card, render a single sticky panel at the top
+    // of the log and re-render (not re-append) on every subsequent call,
+    // so the user sees the plan mutate in place.
+    function renderTodoPanel(todos) {
+      if (!logEl || !Array.isArray(todos)) return;
+      var panel = logEl.querySelector('[data-agent-todo-panel]');
+      if (!panel) {
+        panel = document.createElement('div');
+        panel.setAttribute('data-agent-todo-panel', '');
+        panel.className = 'agent-todo-panel';
+        logEl.insertBefore(panel, logEl.firstChild);
+      }
+      var done = 0, active = 0;
+      todos.forEach(function(t) {
+        if (t.status === 'completed') done++;
+        else if (t.status === 'in_progress') active++;
+      });
+      var total = todos.length;
+      var pct = total ? Math.round(done / total * 100) : 0;
+      var rows = todos.map(function(t) {
+        var s = t.status || 'pending';
+        var ico = s === 'completed' ? '✓' : s === 'in_progress' ? '◐' : '○';
+        var label = s === 'in_progress' && t.activeForm ? t.activeForm : t.content || '';
+        return '<li class="agent-todo-item agent-todo-' + s + '">' +
+          '<span class="agent-todo-ico">' + ico + '</span>' +
+          '<span class="agent-todo-text">' + escapeHtml(label) + '</span>' +
+        '</li>';
+      }).join('');
+      panel.innerHTML =
+        '<div class="agent-todo-head">' +
+          '<span class="agent-todo-title">Plan · ' + done + '/' + total +
+            (active ? ' · <em>' + escapeHtml((todos.find(function(t){return t.status==='in_progress';})||{}).activeForm || 'working') + '</em>' : '') +
+          '</span>' +
+          '<span class="agent-todo-bar"><span class="agent-todo-bar-fill" style="width:' + pct + '%"></span></span>' +
+        '</div>' +
+        '<ul class="agent-todo-list">' + rows + '</ul>';
     }
 
     function appendToolCard(toolName, input, toolUseId) {
@@ -181,19 +331,28 @@
           break;
         case 'text':
           // Coalesce successive text blocks into one bubble for readability.
+          // Re-render markdown on each chunk so streaming looks live.
           if (!pendingAssistantBubble) {
             pendingAssistantBubble = appendBubble('assistant', data.text);
           } else {
-            pendingAssistantBubble.textContent += data.text;
+            pendingAssistantBubble._raw = (pendingAssistantBubble._raw || '') + data.text;
+            pendingAssistantBubble.innerHTML = renderMarkdown(pendingAssistantBubble._raw);
             if (logEl) logEl.scrollTop = logEl.scrollHeight;
           }
           break;
         case 'tool_use':
           pendingAssistantBubble = null; // break the bubble before a tool call
-          appendToolCard(data.toolName, data.input, data.toolUseId);
+          // TodoWrite gets a dedicated sticky panel instead of a card.
+          if (data.toolName === 'TodoWrite' && data.input && Array.isArray(data.input.todos)) {
+            renderTodoPanel(data.input.todos);
+            if (data.toolUseId) state.agentToolMap[data.toolUseId] = { _isTodo: true };
+          } else {
+            appendToolCard(data.toolName, data.input, data.toolUseId);
+          }
           break;
         case 'tool_result':
           var card = state.agentToolMap[data.toolUseId];
+          if (card && card._isTodo) break; // Todo panel manages its own state
           if (card) {
             var statusEl = card.querySelector('[data-tool-status]');
             if (statusEl) {

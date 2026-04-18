@@ -2,8 +2,9 @@
   "mcpServers": {
     "reframe": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["tsx", "packages/mcp/src/index.ts"]
+      "command": "node",
+      "args": ["packages/mcp/dist/mcp/src/index.js"],
+      "env": { "REFRAME_HTTP_PORT": "0" }
     }
   }
 }

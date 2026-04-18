@@ -159,6 +159,21 @@ export async function handleCompile(input: CompileInput) {
   const session = getSession();
   session.recordToolCall('compile');
 
+  // ─── Deterministic binding: default `name` to the active canvas ──
+  // When this MCP runs as a subprocess of the in-app agent, the sidecar
+  // sets `REFRAME_ACTIVE_SCENE_SLUG=<slug>` on spawn. Without this
+  // guard the model is free to invent a name from the prompt
+  // ("pricing", "hero", …) and the compile creates a brand-new scene
+  // instead of updating the canvas the user is looking at. The slug is
+  // the source of truth for identity — same slug = same scene. Agents
+  // can still compile to a NEW scene by explicitly passing `name:
+  // "<something-else>"` (e.g. "-dark", "-v2") when the user asked for
+  // a variant. No override when running standalone (no env var set).
+  if (!input.name) {
+    const activeSlug = process.env.REFRAME_ACTIVE_SCENE_SLUG;
+    if (activeSlug) input.name = activeSlug;
+  }
+
   // ─── Layout backend ──
   if (input.layoutBackend && input.layoutBackend !== 'yoga') {
     try {

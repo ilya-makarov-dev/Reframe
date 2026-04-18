@@ -277,9 +277,25 @@ export default async function(o){
   const forceFallback = url.searchParams.get('fallback') === '1';
 
   if (pathname === '/platform' || pathname === '/platform/') {
-    // Always use the TS renderer — the pre-compiled hydrateShell path
-    // served stale HTML from before project grouping + variations were
-    // added, and bypassing our new render logic silently broke the UI.
+    // Self-heal: re-sync scenes from disk before rendering. The
+    // dashboard's in-memory source of truth (sessionScenes) can get
+    // out of sync when a spawned agent crashes mid-compile, when the
+    // sidecar restarts while the browser is still open, or when a
+    // scene was created in another process. Running the refresh on
+    // every dashboard GET is cheap (a handful of JSON reads) and
+    // guarantees the user always sees what's on disk.
+    if (ctx.projectDir) {
+      try {
+        const store = await import('../store.js');
+        store.refreshScenesFromDisk(ctx.projectDir);
+        // The refresh above may have added new scenes to the in-memory
+        // store. Rebuild the PlatformContext so buildDashboardData sees
+        // them — the `ctx` we were passed was snapshotted before the
+        // refresh.
+        const httpMod = await import('../http-server.js');
+        ctx = httpMod.buildPlatformContext();
+      } catch { /* best-effort */ }
+    }
     const data = buildDashboardData(ctx);
     const html = renderDashboard(data);
     send(res, 200, 'text/html', html);
@@ -295,6 +311,19 @@ export default async function(o){
       send(res, 404, 'text/plain', 'Project slug required');
       return true;
     }
+    // Same self-heal as dashboard — a user navigating directly to a
+    // project by URL (bookmark, agent-generated link) still wants the
+    // in-memory store to reflect disk reality before we look up the
+    // slug. Otherwise a scene that exists on disk but not yet in memory
+    // would 404 "Project not found" until a dashboard visit refreshed.
+    if (ctx.projectDir) {
+      try {
+        const store = await import('../store.js');
+        store.refreshScenesFromDisk(ctx.projectDir);
+        const httpMod = await import('../http-server.js');
+        ctx = httpMod.buildPlatformContext();
+      } catch { /* best-effort */ }
+    }
     const data = buildDashboardData(ctx);
     const project = findProjectBySlug(data.projects ?? [], slug);
     if (!project) {
@@ -302,13 +331,17 @@ export default async function(o){
       return true;
     }
     const sceneIds = project.members.map(m => m.id).join(',');
+    const activeSceneId = project.members[0]?.id ?? null;
     const { renderEditorShell } = await import('./pages/editor-shell-page.js');
+    const { buildEditorBoot } = await import('./boot-payload.js');
+    const boot = await buildEditorBoot(ctx, activeSceneId, project.slug);
     const html = renderEditorShell({
       title: `reframe \u00B7 ${project.name}`,
       sceneIds,
       sceneSlug: project.slug,
       editorJsPath: '/platform/viewport-init.js',
       fontsLink: '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">',
+      boot,
     });
     send(res, 200, 'text/html', html);
     return true;

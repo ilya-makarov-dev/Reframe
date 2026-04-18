@@ -79,11 +79,21 @@
       // already has that state, persisting it back creates 404 floods
       // when ids don't line up). First real pointerdown flips this.
       var canvasUserInteracted = false;
+      // Track active pointer-down state so the properties-panel
+      // refresher can skip while a drag is live — re-rendering the
+      // 300+ node panel 8x/sec mid-drag steals main-thread time from
+      // canvas pointer handling and makes manipulation feel blocked.
+      var canvasPointerDown = false;
       var cvsEl = document.getElementById('reframe-viewport');
       if (cvsEl) {
         cvsEl.addEventListener('pointerdown', function() {
           canvasUserInteracted = true;
+          canvasPointerDown = true;
         }, { passive: true, capture: true });
+        var clearPointerDown = function() { canvasPointerDown = false; };
+        cvsEl.addEventListener('pointerup',   clearPointerDown, { passive: true, capture: true });
+        cvsEl.addEventListener('pointercancel', clearPointerDown, { passive: true, capture: true });
+        window.addEventListener('blur', clearPointerDown);
       }
       function shouldPersistCanvasChange() {
         // Suppress during sync OR before first real interaction.
@@ -135,13 +145,27 @@
       // enough that no single pointermove spawns a fetch.
       var propsRefreshTimer = null;
       function queuePropsRefresh() {
-        if (propsRefreshTimer) return;
+        if (propsRefreshTimer) clearTimeout(propsRefreshTimer);
+        // Trailing debounce (300ms): run AFTER the burst settles, not
+        // at the start. Previous leading-edge firing at 120ms caused a
+        // panel re-render 8x/sec during drag — full innerHTML swap +
+        // two fetches + re-binding hundreds of listeners competed with
+        // canvas pointer handling, which is why users reported the
+        // right panel "blocking" manipulations.
         propsRefreshTimer = setTimeout(function() {
           propsRefreshTimer = null;
+          // Skip while the user is still dragging — panel can update
+          // when the gesture ends.
+          if (canvasPointerDown) return;
+          // Skip if the user is typing in a panel input — a refresh
+          // would blow away their half-typed value.
+          var active = document.activeElement;
+          if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')
+              && active.closest && active.closest('[data-panel="design"]')) return;
           if (currentPropsNodeId) {
             showPropsForNode(currentPropsNodeId, getCanvasSessionId());
           }
-        }, 120);
+        }, 300);
       }
       window.addEventListener('reframe:node-moved', function(evt) {
         var detail = evt.detail || {};

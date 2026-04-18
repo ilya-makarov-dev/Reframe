@@ -1,3 +1,52 @@
+  // ── Detach from auto-layout (shared) ─────────────────────────────
+  // Reparents the node to the canvas page and pins it with ABSOLUTE
+  // positioning + FIXED sizing so Yoga stops reflowing it. Used by:
+  //   - per-node [data-break-out] button in the properties panel
+  //   - the top-bar "✂ Detach" button (applies to current selection)
+  // Returns true on success, false if the editor/node isn't available.
+  async function detachNodeFromLayout(sceneId, nodeId) {
+    if (!sceneId || !nodeId) return false;
+    var ed = window.__reframeEditor;
+    if (!ed || !ed.getNode) return false;
+    var node = ed.getNode(nodeId);
+    if (!node) return false;
+
+    var absPos = (ed.graph && ed.graph.getAbsolutePosition)
+      ? ed.graph.getAbsolutePosition(nodeId)
+      : { x: node.x || 0, y: node.y || 0 };
+
+    // Client-side reparent to canvas page — instant visual effect so
+    // the user isn't staring at a clipped/hidden frame while the
+    // server round-trip runs.
+    try {
+      var pages = ed.graph && ed.graph.getPages && ed.graph.getPages();
+      var pageId = (pages && pages[0] && pages[0].id) || null;
+      if (pageId && node.parentId !== pageId && ed.reparentNodes) {
+        ed.reparentNodes([nodeId], pageId);
+      }
+    } catch (_) {}
+
+    // Server-side reparent FIRST, then sizing/position. The server's
+    // /api/node/edit endpoint short-circuits when `parent-id` is in
+    // props — it reparents and ignores other edits in that same POST.
+    // So we split: one POST to reparent, then a POST per layout prop.
+    // Without the reparent, SSE pulls back a graph where the node is
+    // still under its original frame (with clipsContent) and it
+    // vanishes when dragged outside those bounds.
+    await editNodeProp(sceneId, nodeId, 'parent-id', 'root');
+
+    editNodeProp(sceneId, nodeId, 'layoutPositioning', 'ABSOLUTE');
+    editNodeProp(sceneId, nodeId, 'primaryAxisSizing', 'FIXED');
+    editNodeProp(sceneId, nodeId, 'counterAxisSizing', 'FIXED');
+    editNodeProp(sceneId, nodeId, 'layoutAlignSelf', 'AUTO');
+    editNodeProp(sceneId, nodeId, 'layoutGrow', 0);
+    editNodeProp(sceneId, nodeId, 'width', node.width);
+    editNodeProp(sceneId, nodeId, 'height', node.height);
+    editNodeProp(sceneId, nodeId, 'x', Math.round(absPos.x));
+    editNodeProp(sceneId, nodeId, 'y', Math.round(absPos.y));
+    return true;
+  }
+
   // ── Brand token discovery (cached per scene) ─────────────────────
   // Fetches /platform/api/tokens/<sceneId> once per scene-revision and
   // caches the result. Used by the color popover to render real brand
@@ -9,6 +58,13 @@
     // 30s TTL — tokens don't change between scene-rev bumps; we just want
     // a coarse safety net so brand-switch invalidates eventually.
     if (cached && (Date.now() - cached.ts) < 30000) return Promise.resolve(cached.tokens);
+    // Boot-payload prime: tokens are inlined with the shell, so the
+    // first popover open doesn't wait on a network round-trip.
+    var bootTokens = consumeBootSection(sceneId, 'tokens');
+    if (bootTokens && bootTokens.length) {
+      _tokenCache[sceneId] = { ts: Date.now(), tokens: bootTokens };
+      return Promise.resolve(bootTokens);
+    }
     return fetch('/platform/api/tokens/' + encodeURIComponent(sceneId))
       .then(function(r) { return r.ok ? r.json() : { tokens: [] }; })
       .then(function(j) {
@@ -41,10 +97,9 @@
     // Explicit Figma-style action: user clicks to free this frame
     // from its flex constraints so drag works.
     var breakOutHtml =
-      '<button data-break-out="1" ' + attrs + ' title="Detach from parent auto-layout — position becomes absolute, preserves current size. Lets you free-drag the frame." ' +
-        'style="margin-left:auto;padding:3px 8px;font-size:10px;background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#333);border-radius:4px;cursor:pointer;font-family:inherit">' +
-        '✂ Detach' +
-      '</button>';
+      '<button class="prop-text-btn" data-break-out="1" ' + attrs +
+        ' title="Detach from parent auto-layout — position becomes absolute, preserves current size. Lets you free-drag the frame." ' +
+        'style="margin-left:auto">Detach</button>';
 
     var dirHtml =
       '<div class="layout-direction-row" style="display:flex;gap:4px;align-items:center;margin-bottom:8px">' +
@@ -111,9 +166,8 @@
         '<div></div>' +
         '<input class="spacing-val" value="' + pl + '" data-prop="padding-left" ' + attrs + ' title="Padding left">' +
         '<div class="spacing-center">' +
-          '<button class="padding-link-toggle" data-linked="' + (allEqual ? '1' : '0') + '" title="' + (allEqual ? 'Unlink padding' : 'Link all sides') + '" ' +
-            'style="background:transparent;border:none;color:var(--text-muted,#888);cursor:pointer;font-size:11px">' +
-            (allEqual ? '🔗' : '🔓') +
+          '<button class="prop-icon-btn padding-link-toggle' + (allEqual ? ' on' : '') + '" data-linked="' + (allEqual ? '1' : '0') + '" title="' + (allEqual ? 'Unlink padding' : 'Link all sides') + '">' +
+            iconLink(allEqual) +
           '</button>' +
         '</div>' +
         '<input class="spacing-val" value="' + pr + '" data-prop="padding-right" ' + attrs + ' title="Padding right">' +
@@ -123,6 +177,24 @@
       '</div>';
 
     return dirHtml + alignHtml + paddingQuad;
+  }
+
+  // ── Shared link/unlink glyph (padding-link + aspect-lock) ────────
+  // SVG chain icon — linked draws the full chain, unlinked breaks the
+  // middle. 12×12 @ 1.4 stroke matches the dir-btn icons visually.
+  function iconLink(linked) {
+    if (linked) {
+      return '<svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">' +
+        '<path d="M5.2 8.8 8.8 5.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
+        '<path d="M7.5 3.5 9 2a2.5 2.5 0 1 1 3.5 3.5L11 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<path d="M6.5 10.5 5 12a2.5 2.5 0 1 1-3.5-3.5L3 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '</svg>';
+    }
+    return '<svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">' +
+      '<path d="M7.5 3.5 9 2a2.5 2.5 0 1 1 3.5 3.5L11 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '<path d="M6.5 10.5 5 12a2.5 2.5 0 1 1-3.5-3.5L3 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '<path d="M4 4.5 10 10.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" opacity=".55"/>' +
+      '</svg>';
   }
 
   // ── Shadow preview swatches (Phase 2) ────────────────────────────
@@ -283,51 +355,15 @@
     enhanceAnimationPreview();
     enhanceInlineAiHooks();
     // Break-out button — explicit Figma-style "detach from auto-layout".
-    // Applies:
-    //  1. Reparent to CANVAS root so x/y is in scene space (otherwise
-    //     dragging beyond parent bounds just hides the node behind
-    //     parent's clip — user reported this)
-    //  2. layoutPositioning=ABSOLUTE + FIXED sizing + pinned width/height
-    //     so Yoga doesn't collapse or snap it back
-    //  3. Translate current absolute position to new parent space
+    // Logic lives in detachNodeFromLayout() so the top-bar Detach button
+    // can apply the same operation to multi-selection.
     $$('[data-break-out]').forEach(function(btn) {
-      btn.addEventListener('click', function() {
+      btn.addEventListener('click', async function() {
         var sceneId = btn.getAttribute('data-scene');
         var nodeId = btn.getAttribute('data-node');
         if (!sceneId || !nodeId) return;
-        var ed = window.__reframeEditor;
-        if (!ed || !ed.getNode) return;
-        var node = ed.getNode(nodeId);
-        if (!node) return;
-
-        // Compute current absolute position (relative to page root),
-        // THEN reparent to canvas page so the position stays correct.
-        var absPos = (ed.graph && ed.graph.getAbsolutePosition)
-          ? ed.graph.getAbsolutePosition(nodeId)
-          : { x: node.x || 0, y: node.y || 0 };
-
-        // Reparent client-side via OP editor (instant visual effect).
-        try {
-          var pages = ed.graph && ed.graph.getPages && ed.graph.getPages();
-          var pageId = (pages && pages[0] && pages[0].id) || null;
-          if (pageId && node.parentId !== pageId && ed.reparentNodes) {
-            ed.reparentNodes([nodeId], pageId);
-          }
-        } catch (_) {}
-
-        // Commit the detach state to server. These edits map to INode
-        // fields via cssPropsToNodePartial (all added server-side).
-        editNodeProp(sceneId, nodeId, 'layoutPositioning', 'ABSOLUTE');
-        editNodeProp(sceneId, nodeId, 'primaryAxisSizing', 'FIXED');
-        editNodeProp(sceneId, nodeId, 'counterAxisSizing', 'FIXED');
-        editNodeProp(sceneId, nodeId, 'layoutAlignSelf', 'AUTO');
-        editNodeProp(sceneId, nodeId, 'layoutGrow', 0);
-        editNodeProp(sceneId, nodeId, 'width', node.width);
-        editNodeProp(sceneId, nodeId, 'height', node.height);
-        // x/y in new parent space = old absolute position.
-        editNodeProp(sceneId, nodeId, 'x', Math.round(absPos.x));
-        editNodeProp(sceneId, nodeId, 'y', Math.round(absPos.y));
-        flash('Detached — drag anywhere on canvas', 'success');
+        var ok = await detachNodeFromLayout(sceneId, nodeId);
+        if (ok) flash('Detached — drag anywhere on canvas', 'success');
       });
     });
     // Silence a11y warnings: every <input> without name/id triggers
@@ -443,8 +479,9 @@
       var linked = toggle.getAttribute('data-linked') === '1';
       linked = !linked;
       toggle.setAttribute('data-linked', linked ? '1' : '0');
-      toggle.textContent = linked ? '🔗' : '🔓';
+      toggle.innerHTML = iconLink(linked);
       toggle.title = linked ? 'Unlink padding' : 'Link all sides';
+      toggle.classList.toggle('on', linked);
     });
     // Wire ALL spacing-val inputs so when one changes and link is on,
     // all 4 update + persist.
@@ -494,7 +531,7 @@
         // Server stores under states.<name>; we send via a dedicated prop key.
         editNodeProp(sceneId, nodeId, 'state.' + state, defaults);
         btn.disabled = true;
-        btn.textContent = '✓ cloned';
+        btn.textContent = 'Cloned';
       });
     });
   }
@@ -693,11 +730,10 @@
     var chain = document.createElement('button');
     chain.id = 'reframe-aspect-chain';
     chain.type = 'button';
+    chain.className = 'prop-icon-btn' + (locked ? ' on' : '');
     chain.title = locked ? 'Aspect locked' : 'Aspect free';
-    chain.style.cssText =
-      'background:transparent;border:none;cursor:pointer;color:var(--text-muted,#888);' +
-      'padding:0 4px;font-size:11px;align-self:center';
-    chain.textContent = locked ? '🔗' : '🔓';
+    chain.style.alignSelf = 'center';
+    chain.innerHTML = iconLink(locked);
     // Insert between width and height controls (after the W .prop-compact, before H).
     var compacts = pair.querySelectorAll('.prop-compact');
     if (compacts.length < 2) return;
@@ -706,8 +742,9 @@
     chain.addEventListener('click', function() {
       locked = !locked;
       try { localStorage.setItem('reframe.aspectLock', locked ? '1' : '0'); } catch (_) {}
-      chain.textContent = locked ? '🔗' : '🔓';
+      chain.innerHTML = iconLink(locked);
       chain.title = locked ? 'Aspect locked' : 'Aspect free';
+      chain.classList.toggle('on', locked);
     });
 
     // When locked + one changes → update the other proportionally.
@@ -860,12 +897,17 @@
   }
 
   async function editNodeProp(sceneId, nodeId, prop, value) {
+    // "root" is a server-side alias resolved to scene.rootId. It isn't
+    // in the OP bridge (bridge only knows real node UUIDs), so the
+    // generic skip-if-not-in-bridge rule below would drop it. Let it
+    // through unchanged.
+    var isSceneRootAlias = nodeId === 'root';
     // Translate raw OP id → reframe id if bridge has the mapping. Skip
     // entirely when nodeId has no server counterpart (OP-only chrome,
     // synthetic events). Without this we 404 + show a toast on every
     // canvas event from a non-mapped node.
     var bridge = window.__reframeBridge;
-    if (bridge && bridge.opToReframeId && bridge.opToReframeId.get) {
+    if (!isSceneRootAlias && bridge && bridge.opToReframeId && bridge.opToReframeId.get) {
       var mapped = bridge.opToReframeId.get(nodeId);
       if (mapped) nodeId = mapped;
       else if (bridge.reframeToOpId && bridge.reframeToOpId.has && !bridge.reframeToOpId.has(nodeId)) {
@@ -875,9 +917,10 @@
     }
     var edits = {};
     edits[prop] = value;
-    // Direct fetch instead of api() — we want SILENT failure on 404
-    // (stale id), not a "API error" toast in the user's face. api()
-    // throws + flashes for any !ok response.
+    // Direct fetch instead of api() — 404 stays silent (stale id races
+    // during drag / SSE rebuild are expected and shouldn't toast). Any
+    // other error DOES flash: the user should know when their input was
+    // accepted-by-server-but-not-applied vs just dropped.
     try {
       var resp = await fetch('/platform/api/node/edit', {
         method: 'POST',
@@ -885,9 +928,17 @@
         body: JSON.stringify({ sceneId: sceneId, nodeId: nodeId, props: edits }),
       });
       if (resp.status === 404) return; // node gone (sync race) — silent
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        var errText = '';
+        try { errText = await resp.text(); } catch (_) {}
+        flash('Edit ' + prop + ' failed: ' + resp.status + (errText ? ' · ' + errText.slice(0, 80) : ''), 'error');
+        return;
+      }
       var res = await resp.json();
-      if (!res.ok) return;
+      if (!res.ok) {
+        flash('Edit ' + prop + ' rejected: ' + (res.error || 'unknown'), 'error');
+        return;
+      }
       if (res.ok && res.props) {
         // Update swatch if color changed.
         var swatch = $('.prop-swatch[data-prop="' + prop + '"]');
@@ -896,10 +947,13 @@
         }
         // If OP CanvasKit is active, notify it to re-hydrate this node
         // so the canvas reflects the property change without full reload.
+        // Use the server-resolved nodeId (res.nodeId) so aliases like
+        // "root" become the real UUID — otherwise CanvasKit listeners
+        // keyed on node id can't match the event.
         var ckCanvas = document.getElementById('reframe-viewport');
         if (ckCanvas) {
           window.dispatchEvent(new CustomEvent('reframe:prop-changed', {
-            detail: { sceneId: sceneId, nodeId: nodeId, prop: prop, value: value, props: res.props },
+            detail: { sceneId: sceneId, nodeId: res.nodeId || nodeId, prop: prop, value: value, props: res.props },
           }));
         }
       }

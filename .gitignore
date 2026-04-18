@@ -71,6 +71,11 @@ scripts/*
 # for @reframe/mcp (copies platform-ui.js / platform-ui.css into dist).
 # It MUST ship — the npm build breaks without it.
 !scripts/copy-platform-assets.mjs
+# Exceptions: permanent test runners referenced by root `npm test`.
+# Without these the first `npm test` after clone fails out of the box.
+!scripts/test-pipeline.ts
+!scripts/test-reframe-all.ts
+!scripts/test-scene-import-parity.ts
 
 # ─── NPM artifacts ───────────────────────────────────────
 *.tgz
@@ -119,5 +124,7 @@ phase*-report.md
 *-scratch.md
 
 # ─── Ad-hoc test/stress scripts in root ─────────────────
-test-*.ts
-test-*.js
+# Leading `/` anchors to repo root — we don't want this to match
+# scripts/test-*.ts (those are permanent runners whitelisted above).
+/test-*.ts
+/test-*.js

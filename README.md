@@ -38,6 +38,15 @@ Three input paths converge on one graph: **DESIGN.md** — brand spec, tokens, c
 
 <br>
 
+<p align="center">
+  <a href="https://youtu.be/bnoORvlwFXY">
+    <img src=".github/demo-thumb.jpg" alt="Reframe demo — one prompt, Linear-branded manifesto" width="100%">
+  </a>
+</p>
+<p align="center"><sub>▶ <a href="https://youtu.be/bnoORvlwFXY">Watch the demo</a> — one prompt → TodoWrite plan → brand extract → compile → live edit on canvas.</sub></p>
+
+<br>
+
 ### Core Features
 
 | 🎨 Interactive Canvas | 🤖 AI-Native Pipeline | ⚡ 8 Export Formats |
@@ -255,18 +264,20 @@ Design has no compiler. Code has ESLint, Prettier, TypeScript — parse, validat
 
 ### For AI Agents — MCP
 
-Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline):
+Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline). Point at the built entrypoint inside your cloned checkout:
 
 ```json
 {
   "mcpServers": {
     "reframe": {
       "command": "node",
-      "args": ["node_modules/@reframe/mcp/dist/mcp/src/index.js"]
+      "args": ["/absolute/path/to/reframe/packages/mcp/dist/mcp/src/index.js"]
     }
   }
 }
 ```
+
+> Once npm publish lands, this becomes `npx @reframe/mcp` — one line, zero paths. Tracking in the roadmap below.
 
 **The pipeline:**
 
@@ -317,11 +328,15 @@ const html = await render(
 
 ### For CI/CD
 
+The `@reframe/cli` exposes `build` (compile every scene listed in the project config) and `test` (assert all audit rules pass). Once published to npm:
+
 ```yaml
 # .github/workflows/design.yml
 - run: npx reframe build   # compile all scenes from config
 - run: npx reframe test    # assert design rules pass
 ```
+
+From source today: `node packages/cli/dist/index.js build` / `... test`.
 
 ---
 
@@ -753,7 +768,7 @@ Reframe is not a replacement for design tools — it's infrastructure that sits 
 
 ---
 
-## Architecture
+## Package Layout
 
 ```
 packages/
@@ -807,17 +822,162 @@ packages/
 
 ## Install
 
-**Requirements:** Node.js >= 18
+**Requirements:** Node.js >= 18, [Claude Code](https://claude.com/claude-code) on `$PATH` (optional — only if you want the embedded agent).
 
 ```bash
 git clone https://github.com/ilya-makarov-dev/reframe.git
 cd reframe
 npm install
 npm run build
-npm test
+npm test        # optional — run the regression suite
+npm start       # launches HTTP sidecar on :4100
 ```
 
-> npm packages (`@reframe/core`, `@reframe/mcp`, `@reframe/cli`, `@reframe/editor`) are not yet published to npm. Install from source for now.
+Then open `http://localhost:4100/platform` and start designing.
+
+> **Run `npm start` from the repo root, not from `packages/mcp/`.** The sidecar resolves the workspace via `process.cwd()` — scenes, brands, chat history, and `.reframe/project.json` all live relative to wherever you started. If you launch from a subdirectory the sidecar will happily boot but point at the wrong `.reframe/` folder and look empty. `packages/mcp` has its own `npm start` that runs the **stdio** MCP (for Claude Desktop / MCP clients) — that's a different entry point; don't confuse the two.
+
+### How the in-UI agent works
+
+`npm start` boots one process — the **HTTP sidecar** on `:4100`. That sidecar is everything the browser needs: it serves the Platform UI, accepts `POST /api/agent/chat`, and streams results back over SSE. You, the user, never deal with MCP wiring, API keys, or subprocess orchestration — you just open the page and type in the chat.
+
+```
+   user opens browser  :4100/platform   ◄── HTTP sidecar already running
+              │
+              │  user types in the bottom chat
+              ▼
+   POST /api/agent/chat  ───────────────┐
+                                         │
+              HTTP sidecar handles  ◄────┘
+                    │
+                    │  ensures .mcp.json exists
+                    │  injects brand + scene preamble
+                    │
+                    ▼
+              spawn  claude -p --output-format stream-json
+                    │
+                    │  claude picks up .mcp.json from cwd
+                    │  opens stdio channel to reframe-mcp
+                    │  calls reframe_compile / edit / inspect / export
+                    │
+                    ▼
+              scenes autosave to .reframe/scenes/
+                    │
+                    ▼
+              sidecar re-syncs from disk  ──► SSE event  ──► canvas updates live
+```
+
+One command (`npm start`) is all the user runs. Everything downstream — `.mcp.json` generation, `claude` subprocess, stdio MCP, disk sync, SSE fanout — is handled automatically inside the sidecar. No dev console required.
+
+### Bring your own Claude Code — no API key, no extra billing
+
+The embedded agent runs against the **`claude` CLI already on your machine**. If you use Claude Code for development, the same subscription powers design: the Platform spawns `claude -p --output-format stream-json` as a subprocess and streams NDJSON back over SSE. Nothing to configure, no OpenAI / Anthropic key to paste, no token accounting to wire up.
+
+```
+  your Claude Code subscription  ─────►  reframe Platform
+  (already installed, already paid)       (local, spawns `claude -p`)
+```
+
+Don't have Claude Code? The engine — import, audit, tokens, resize, variations, all 8 exporters — runs fully headless without it. Agent chat is the only feature that needs the CLI.
+
+**Other agents — Cursor, Codex, Gemini CLI, custom MCP clients — are on the roadmap.** The agent layer is a thin subprocess shim around stream-JSON NDJSON, so any CLI that speaks a similar protocol (or exposes MCP tools over stdio) will plug in once the adapter is generalized. In progress — for now Claude Code is the tested path.
+
+### Local-first. Your data stays on your machine.
+
+No telemetry. No analytics. No "anonymous usage stats." No cloud account, no sign-up, no dashboard watching what you design.
+
+Your scenes, brands, chat history, snapshots, and exports live in `.reframe/` next to your code. The HTTP sidecar binds to `localhost:4100` — not `0.0.0.0`, not a cloud tunnel, not anything external. Close the laptop, it's gone. Git it, it's versioned with the rest of your repo.
+
+The **only** network call reframe makes is the one you already make: `claude -p` talking to Anthropic under your own subscription — exactly the same traffic you'd see running Claude Code on any other task, nothing extra. If you cut the internet mid-design, the engine (compile, audit, tokens, resize, variations, every exporter) keeps working; only the agent chat pauses until you reconnect.
+
+Design infrastructure should be owned by the designer. We take that literally.
+
+> **Dev preview note.** npm packages (`@reframe/core`, `@reframe/mcp`, `@reframe/cli`, `@reframe/editor`) are not yet published. Install from source for now. A one-command `npx reframe` install is on the roadmap.
+
+### Known rough edges (dev preview)
+
+A few gotchas we haven't auto-handled yet. None are blockers — but knowing them upfront saves a confused 10 minutes:
+
+- **`claude` CLI missing from `$PATH`.** The agent chat will fail silently if you haven't installed Claude Code. Check with `claude --version`. If it errors, install from [claude.com/claude-code](https://claude.com/claude-code) and reopen your terminal. The engine (compile / audit / export / tokens) works fine without it — only agent chat needs the CLI. (First-run onboarding that flags this is on the roadmap.)
+- **Port 4100 already in use.** `npm start` will crash with `EADDRINUSE` if another process holds the port. Either stop the other process, or run `REFRAME_PORT=4200 npm start` and open `:4200/platform`. Automatic port fallback is on the roadmap.
+- **Build stumbles on old Node / Windows quirks.** Requires Node **>= 18** (ideally 20+). First build downloads CanvasKit WASM (~9 MB) and bundles the editor via esbuild — if either step errors, re-run `npm run build` after checking your Node version with `node --version`.
+- **`.mcp.json` auto-generated on first chat.** Expected behavior — the sidecar writes a default config pointing at the built stdio MCP. If you already have a `.mcp.json` with other servers, we leave it alone and assume you added `reframe` yourself.
+- **Top toolbar is mid-refactor.** Some actions in the canvas toolbar (export dropdown, brand picker, variant chip) are being rewired to the new agent-in-canvas flow. Functional paths: right-click context menu, `Cmd+K` prompt, bottom chat, properties panel — those are the canonical surfaces and all work. The toolbar will catch up within the next few commits.
+- **In-canvas chat is still being polished.** Streaming, tool-card rendering, and conversation replay are working end-to-end, but edge cases exist — the agent is currently **more reliable with deep-thinking mode ON** (the 🧠 toggle). Without it, the model occasionally skips ahead or picks the wrong tool on ambiguous prompts. Leave 🧠 on for now; we're hardening the fast path. If the chat freezes, hit "Новый диалог" to start a fresh Claude session — nothing is lost (history is persisted to `.reframe/chats/`).
+
+### Roadmap
+
+Soon, not tomorrow. Grouped by theme so it's clear what we're building toward, not just a flat to-do list.
+
+**🤖 Agent experience**
+
+| Item | Status |
+|---|---|
+| Conversational constructor — the agent proactively interviews the user before generating ("what's this for? who's it for? any brand I should match?") and returns a scoped brief before touching the canvas. No more guessing from a one-liner. | planned — soon |
+| Agent adapters beyond Claude Code — Cursor, Codex, Gemini CLI, OpenAI, generic MCP-stdio clients. Same UX, your CLI of choice. | in progress |
+| Skill writer — in-app UI to author custom `.claude/skills/` so you can teach the agent project-specific taste, component recipes, and brand voice without leaving the editor. | planned |
+| First-run onboarding — detects `claude` on `$PATH`, walks the user through install if missing, verifies the sidecar round-trip before handing over the canvas. | planned |
+| Chat polish — harden the non-thinking fast path (it's currently less reliable than thinking mode), smarter tool-card collapsing, inline diff previews for edits, and a "re-run with changes" affordance on any past turn. | in progress |
+
+**🛠 Dev loop — extend reframe from your IDE**
+
+reframe is MCP-first by design. That means you can open this repo in **Claude Code, Cursor, or the VS Code Claude extension**, point the agent at `.mcp.json`, and ask it to *improve the engine itself*: "test the reframe MCP tools and fix any failures," "add a new variation axis to the engine," or "write a playbook that generates a pitch deck from our product docs." The same MCP the Platform UI speaks to is available in your editor — no separate SDK, no glue code.
+
+| Item | Status |
+|---|---|
+| `mcp test` command — `reframe_inspect`-driven sanity sweep the agent can run from your IDE to dogfood every tool, surface broken ones, and propose patches. | planned — soon |
+| Playbook authoring from IDE — describe a scenario in a markdown file, agent scaffolds the tool sequence, commits it to `.reframe/playbooks/`, reusable across projects and shareable to the marketplace. | planned |
+| VS Code extension — thin wrapper around the sidecar: command palette entries for compile / audit / export, inline scene previews in editor gutters, "open in reframe" for any INode file. | planned |
+
+**🎨 Canvas & editing**
+
+| Item | Status |
+|---|---|
+| Lasso / marquee multi-select — Figma-style freeform region selection; scope an agent prompt to "everything I circled" in one gesture. | planned |
+| Inline comments & pinned annotations — Figma-like threads anchored to nodes; the agent reads unresolved comments as editable intent ("fix these 3 things"). | planned |
+| Section constructor — decompose a page into swappable sections (hero / features / pricing / footer), drag-reorder, "show 3 alternatives for this hero," assemble full sites from best-of-breed pieces. | planned — soon |
+| Variant strip with quality scores — Midjourney-style 4-up below the canvas, each thumbnail tagged with its aesthetic + brand-fidelity score so the best take is obvious at a glance. | planned |
+| Before / after comparison — split-slider on any rebrand or variation, drag to wipe between the original and the transformed design. | planned |
+| Top toolbar polish — finish rewiring export / brand / variants chips to the new agent-in-canvas flow. | in progress |
+
+**📚 Brand & design system**
+
+| Item | Status |
+|---|---|
+| Project auto-scan — point reframe at an existing codebase or website, it walks the source (HTML / CSS / JSX / Tailwind configs), extracts tokens, components, and typography, and reconstructs a full DESIGN.md without manual authoring. | planned — soon |
+| Brandbook pages — generated design-system pages (colors, type, components, spacing, do's and don'ts) rendered as real scenes you can export and share with your team, not buried in JSON. | planned — soon |
+| Live drift detection — when a scene falls out of spec (wrong color, off-grid spacing, missing OpenType feature), surface it as a comment-like finding the agent can auto-resolve. | planned |
+
+**🔌 Integrations & export**
+
+| Item | Status |
+|---|---|
+| Figma round-trip — first-class `.fig` export (we already import via `@open-pencil/core`), plus a Figma plugin so designers can pull any reframe scene straight into their Figma file and push edits back through the engine. | planned — soon |
+| Framer / Webflow / Penpot import & export — adapters that treat each tool as another renderer on top of INode, same way we treat HTML today. | planned |
+| Slack / Linear / Notion embeds — paste a scene URL, get a live-rendered preview with quality score and "open in reframe" deep-link. | planned |
+| Cloud sync & shareable links — `/s/<hash>` URLs that serve a scene read-only to anyone, with optional "request edits" handoff back to the agent. | planned |
+| Universal `adapt` / resize engine — the deterministic layout-retargeting pipeline (5 strategies: smart / contain / cover / stretch / reflow). Already shipping; hardening edge cases (asymmetric grids, overlapping z-stacks, nested HUG chains). | beta |
+| SVG generation stability — when the agent inlines SVG (icons, illustrations, decorative shapes) the importer sometimes loses `viewBox`, gradients, or path curves on round-trip. Tightening the SVG → INode pipeline + adding a preflight that repairs malformed markup before compile. | in progress |
+| Animation presets + Lottie export — maturing from the 23 current presets into a full motion library. | beta |
+| Additional render targets — SwiftUI, Flutter, Jetpack Compose, MJML for email. | open for contribution |
+
+**🚀 Distribution**
+
+| Item | Status |
+|---|---|
+| npm publish (`@reframe/core`, `/mcp`, `/cli`, `/editor`) + `npx reframe` one-liner install. | planned — soon |
+| Hosted sidecar — one-click deploy on Vercel / Fly / Render for teams that don't want a local Node process. | planned |
+
+**🌌 On the horizon**
+
+Further out, but the engine is already shaped to support this — not a pivot, just a natural extension of what INode + the 6-tool pipeline can do.
+
+| Item | Status |
+|---|---|
+| Presentation / slide-deck scenes — a scene type optimized for 16:9 + speaker notes + animated transitions, exported as HTML, PDF, or Keynote-compatible bundles. | future |
+| Custom playbooks — user-defined end-to-end flows ("pitch deck from a one-pager", "re-skin a SaaS landing for a new brand", "generate 20 OG images from one template") saved as reusable scenario files. | future |
+| Playbook marketplace — community-shared scenarios: someone publishes the "YC application deck" or "B2B pricing page" playbook, others run it against their own brand + content with one click. | future |
+| Team workspaces — shared brand library, shared snapshot history, multi-cursor editing on the same scene (CRDT layer already exists in the engine). | future |
 
 ---
 

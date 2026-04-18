@@ -22,6 +22,16 @@ When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right
 
 **Scope context is pre-loaded.** The bottom chat prepends `[Scope: node: … · brand: … · viewport: …]` to each message. Trust it. If the scope says `brand: stripe`, don't re-extract — just Read the cached DESIGN.md.
 
+### Working chain — follow every turn
+
+1. **Plan with TodoWrite.** Any request that takes more than one step (read DESIGN.md → write HTML → compile counts as three) starts with a `TodoWrite` call listing the steps. Mark each `completed` the moment it's done — don't batch. The bottom-chat UI renders this as a live checklist, so the user sees progress. Skip TodoWrite only for pure Q&A or a single `reframe_edit` property tweak.
+
+2. **Copy before big edits.** If the user asks to "make a dark version / variant / alternative" of an existing scene, don't edit the source in place — call `reframe_project action=clone` (or Write a new `.reframe/src/<name>-variant.html` alongside the original) and work on the copy. The original scene stays intact so the user can compare.
+
+3. **Reuse over regenerate.** Small asks (color, spacing, swap a label, toggle dark mode on an existing token set) = one `reframe_edit` call. Reach for `reframe_compile` only when structure changes or the source HTML is wrong. Regeneration from scratch is the last resort, not the default.
+
+4. **End with a compact summary.** After the final tool call, reply with 2-4 lines max: what you did, then 2-3 "Next steps if useful:" suggestions the user can pick from. No headers, no restating the prompt, no emoji.
+
 ## Build & Test
 
 ```bash

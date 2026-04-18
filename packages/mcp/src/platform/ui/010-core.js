@@ -47,6 +47,41 @@
     mobile:  { w: 375,  h: 812 },
   };
 
+  // ── Boot payload accessor ───────────────────────────────
+  // The editor shell inlines `window.__REFRAME_BOOT__` so clients skip
+  // the initial fetch waterfall (audit, tree, annotations, tokens,
+  // agent health, scene root). Each consumer calls `bootScene(sceneId)`
+  // to get pre-hydrated data for its section; if null, it falls back
+  // to the legacy fetch path. After the first use we MARK the payload
+  // as consumed (per-section) so subsequent SSE-driven refreshes go
+  // straight to the network — the inlined data is only ever valid at
+  // page load. `consumeBootSection` returns the value once and nulls
+  // it so stale data can't be served on the second call.
+  function bootScene(sceneId) {
+    var b = window.__REFRAME_BOOT__;
+    if (!b || !b.scenes) return null;
+    // Default to the active scene when the caller doesn't know which
+    // id it's looking at yet (early init paths).
+    var id = sceneId || b.activeSceneId;
+    if (!id) return null;
+    return b.scenes[id] || null;
+  }
+  function consumeBootSection(sceneId, section) {
+    var scene = bootScene(sceneId);
+    if (!scene) return null;
+    var v = scene[section];
+    if (v === undefined || v === null) return null;
+    // Null out so a later refresh on the same section skips the stale
+    // snapshot. We keep the scene record — other sections may still
+    // be unconsumed.
+    scene[section] = null;
+    return v;
+  }
+  function bootAgent() {
+    var b = window.__REFRAME_BOOT__;
+    return (b && b.agent) || null;
+  }
+
   // ── DOM helpers ────────────────────────────────────────
   function $(s, root) { return (root || document).querySelector(s); }
   function $$(s, root) { return Array.from((root || document).querySelectorAll(s)); }

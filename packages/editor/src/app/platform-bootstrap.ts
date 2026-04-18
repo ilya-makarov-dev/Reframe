@@ -330,7 +330,19 @@ function wirePropChangedHandler(s: ReframeEditorShell, sync: StoreSync) {
     if (sync.isPulling) return;
     const d = evt.detail || {};
     if (!d.nodeId || !s) return;
-    const nd = s.editor.getNode(d.nodeId);
+    // editNodeProp dispatches with the server's canonical (reframe) id.
+    // OP editor stores nodes under OP ids — usually identical because
+    // fromReframeGraph sets overrides.id, but the bridge is the source
+    // of truth. Resolve through reframeToOpId before lookup so prop
+    // updates land on the right OP node (otherwise getNode returns
+    // undefined and canvas silently never re-renders).
+    let lookupId: string = d.nodeId;
+    const bridge = (window as any).__reframeBridge;
+    if (bridge && bridge.reframeToOpId && bridge.reframeToOpId.get) {
+      const opId = bridge.reframeToOpId.get(d.nodeId);
+      if (opId) lookupId = opId;
+    }
+    const nd = s.editor.getNode(lookupId);
     if (!nd) return;
 
     const p = d.props || {};

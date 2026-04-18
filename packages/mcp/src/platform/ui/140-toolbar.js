@@ -72,9 +72,15 @@
     });
   }
 
+  // Find the scene id from either the baseShell iframe frame or the
+  // editor-shell CanvasKit canvas. Both carry it as data-session.
+  function currentSceneId() {
+    var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
+    return frame ? frame.getAttribute('data-session') : null;
+  }
+
   async function handleMacroAction(action, item) {
-    var frame = $('.viewport-frame');
-    var sceneId = frame ? frame.getAttribute('data-session') : null;
+    var sceneId = currentSceneId();
 
     // ── Variation (density/radius/shadows/typography/colorRotation) ──
     if (action === 'variation') {
@@ -250,11 +256,63 @@
           var format = btn.getAttribute('data-format');
           exportMenu.classList.add('hidden');
           if (!format) return;
-          var frame = $('.viewport-frame');
-          var sessionId = frame ? frame.getAttribute('data-session') : null;
+          var sessionId = currentSceneId();
           if (!sessionId) { flash('No scene to export', 'error'); return; }
           showExportPreview(sessionId, format);
         });
+      });
+    }
+
+    // Editor-shell header `#btn-detach` — applies detach-from-layout to
+    // every currently selected node. Selection comes from the OP editor
+    // (window.__reframeEditor.state.selectedIds = OP ids); we translate
+    // to reframe ids via the bridge so editNodeProp hits the right rows.
+    var detachBtn = document.getElementById('btn-detach');
+    if (detachBtn && !detachBtn.dataset.bound) {
+      detachBtn.dataset.bound = '1';
+      detachBtn.addEventListener('click', async function() {
+        var sceneId = currentSceneId();
+        if (!sceneId) { flash('No scene', 'error'); return; }
+        var ed = window.__reframeEditor;
+        if (!ed || !ed.state || !ed.state.selectedIds || ed.state.selectedIds.size === 0) {
+          flash('Select a node first', 'info'); return;
+        }
+        var bridge = window.__reframeBridge;
+        var opIds = Array.from(ed.state.selectedIds);
+        var rfIds = opIds.map(function(id) {
+          if (bridge && bridge.opToReframeId && bridge.opToReframeId.get) {
+            var mapped = bridge.opToReframeId.get(id);
+            if (mapped) return mapped;
+          }
+          return id;
+        }).filter(Boolean);
+        var ok = 0;
+        for (var i = 0; i < rfIds.length; i++) {
+          if (typeof detachNodeFromLayout === 'function') {
+            var success = await detachNodeFromLayout(sceneId, rfIds[i]);
+            if (success) ok++;
+          }
+        }
+        if (ok > 0) {
+          flash('Detached ' + ok + ' node' + (ok === 1 ? '' : 's'), 'success');
+          if (ed.requestRender) ed.requestRender();
+        } else {
+          flash('Detach failed', 'error');
+        }
+      });
+    }
+
+    // Editor-shell header has a simple `#btn-export` primary button
+    // (no menu). Wire it to the HTML export preview — the most common
+    // format and a reliable default. Users can still pick other formats
+    // via the More macro dropdown on scene pages.
+    var shellExportBtn = document.getElementById('btn-export');
+    if (shellExportBtn && !shellExportBtn.dataset.bound) {
+      shellExportBtn.dataset.bound = '1';
+      shellExportBtn.addEventListener('click', function() {
+        var sessionId = currentSceneId();
+        if (!sessionId) { flash('No scene to export', 'error'); return; }
+        showExportPreview(sessionId, 'html');
       });
     }
   }

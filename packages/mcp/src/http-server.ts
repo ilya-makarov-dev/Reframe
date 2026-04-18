@@ -270,7 +270,7 @@ function invalidatePreviewCacheForScene(sceneId: string): void {
   }
 }
 
-function buildPlatformContext(): PlatformContext {
+export function buildPlatformContext(): PlatformContext {
   const now = Date.now();
   if (platformContextCache && now - platformContextCache.builtAt < PLATFORM_CTX_TTL_MS) {
     return platformContextCache.ctx;
@@ -337,6 +337,18 @@ let sidecarPort = 4100;
 export function ensureHttpSidecar(port?: number): void {
   const skip = process.env.REFRAME_SKIP_HTTP_SIDECAR;
   if (skip === '1' || skip === 'true') return;
+  // REFRAME_HTTP_PORT=0 disables the sidecar entirely. Set by a parent
+  // sidecar when it spawns a subprocess reframe MCP (via .mcp.json in
+  // the in-app agent flow) so the subprocess does NOT try to bind port
+  // 4100 — which is already owned by the parent.
+  //
+  // Without this guard, the subprocess's storeScene → ensureHttpSidecar
+  // chain would try to listen on 4100, hit EADDRINUSE, fire the error
+  // handler that calls killPort(), and killPort's taskkill /F would
+  // terminate the PARENT sidecar (since it filters out only its own
+  // pid). That's the "platform dies right after compile" bug.
+  const envPort = process.env.REFRAME_HTTP_PORT;
+  if (envPort !== undefined && Number(envPort) <= 0) return;
   if (sidecarStarted) return;
   startHttpSidecar(port ?? sidecarPort);
 }
@@ -345,6 +357,45 @@ export function startHttpSidecar(port = 4100): void {
   if (sidecarStarted) return;
   sidecarStarted = true;
   sidecarPort = port;
+
+  // ── Crash guardrails ─────────────────────────────────────────
+  // The sidecar process hosts the Platform UI for a live browser
+  // session. If a single async operation (a runaway subprocess MCP,
+  // a rogue scene autosave race, an SSE write to a closed socket)
+  // throws and nobody catches it, Node kills the process — which
+  // takes down the UI the user is actively looking at. Installing
+  // process-level handlers lets the sidecar log and keep running.
+  // This is specifically for the "platform falls together with the
+  // agent" class of bugs where a crash in one flow shouldn't kill
+  // everything.
+  if (!(process as any).__reframeCrashGuardInstalled) {
+    (process as any).__reframeCrashGuardInstalled = true;
+    process.on('uncaughtException', (err) => {
+      process.stderr.write(`reframe HTTP: uncaughtException — ${err?.stack || err}\n`);
+    });
+    process.on('unhandledRejection', (reason) => {
+      process.stderr.write(`reframe HTTP: unhandledRejection — ${(reason as any)?.stack || reason}\n`);
+    });
+    // Diagnostics: log every exit vector so we know WHAT killed the
+    // sidecar. The "silent shutdown after compile" bug is a graceful
+    // exit code 0 — which means something is calling process.exit(0),
+    // sending a signal, or draining the event loop. These handlers
+    // print a traceable line before the process dies.
+    process.on('exit', (code) => {
+      process.stderr.write(`reframe HTTP: process.exit code=${code}\n`);
+    });
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
+      try {
+        process.on(sig, () => {
+          process.stderr.write(`reframe HTTP: received ${sig} — shutting down\n`);
+          // DON'T exit — let the sidecar stay alive. If the signal was
+          // accidental (e.g. our own killPort hitting us during a
+          // grandchild subprocess's EADDRINUSE retry), we refuse to die.
+          // The user can Ctrl+C the terminal to actually stop the sidecar.
+        });
+      } catch { /* some platforms reject some signals */ }
+    }
+  }
   const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
 
   function createSession(): { server: McpServer; transport: StreamableHTTPServerTransport } {
@@ -468,6 +519,33 @@ export function startHttpSidecar(port = 4100): void {
       const html = exportSite(sitePages, { title: 'reframe site preview', transition: 'fadeSlideUp' });
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(html);
+      return;
+    }
+
+    // ── Cover endpoint: /cover/<sceneId>.svg ──
+    // Deterministic, always-works SVG cover for dashboard project
+    // cards. Used as a layer behind the real PNG thumbnail so the grid
+    // never shows broken-image icons. Also served as the `onerror`
+    // fallback when CanvasKit rasterization fails.
+    if (url.pathname.startsWith('/cover/') && req.method === 'GET') {
+      const covTail = url.pathname.split('/cover/')[1];
+      const covDot = covTail.lastIndexOf('.');
+      const covSceneId = covDot >= 0 ? covTail.slice(0, covDot) : covTail;
+      const covStored = getScene(covSceneId);
+      const { renderCoverSvg } = await import('./platform/cover.js');
+      const svg = renderCoverSvg({
+        name: covStored?.name ?? covStored?.slug ?? covSceneId,
+        sceneId: covSceneId,
+        brand: (covStored as any)?.brand,
+        width: covStored?.width,
+        height: covStored?.height,
+        variants: Number(url.searchParams?.get('variants') ?? 0) || undefined,
+      });
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Cache-Control': 'public, max-age=300',
+      });
+      res.end(svg);
       return;
     }
 
@@ -863,6 +941,17 @@ export function startHttpSidecar(port = 4100): void {
           setToolsProjectDir(workspace);
           const n = loadProjectScenes(workspace);
           process.stderr.write(`reframe HTTP: auto-loaded ${n} scenes from .reframe/\n`);
+        } else {
+          // No .reframe/ yet. Defer project init so the first `storeScene`
+          // (e.g. the user clicking "Create Canvas" on the empty dashboard)
+          // creates project.json + scenes/ automatically in cwd. Without
+          // this, new scenes live only in memory and vanish on restart —
+          // the exact "project disappears" bug the user hit after wiping
+          // .reframe/.
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { setDeferredProjectInit } = require('./store.js');
+          setDeferredProjectInit(workspace);
+          process.stderr.write(`reframe HTTP: no .reframe/ yet — will init on first scene in ${workspace}\n`);
         }
       } catch (err: any) {
         process.stderr.write(`reframe HTTP: auto-load failed: ${err?.message || err}\n`);

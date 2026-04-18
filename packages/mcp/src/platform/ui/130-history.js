@@ -6,21 +6,33 @@
   var auditFindings = [];
 
   async function refreshAudit() {
-    var frame = $('.viewport-frame');
+    var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
     var sessionId = frame ? frame.getAttribute('data-session') : null;
     if (!sessionId) return;
+    // On first call of a page load, prefer the inlined boot payload —
+    // a fresh fetch would race against the SSR-like snapshot we already
+    // have and costs a 50-100ms audit run server-side.
+    var cached = consumeBootSection(sessionId, 'audit');
+    if (cached) {
+      auditFindings = cached.findings || [];
+      applyAuditToHeader(cached.score);
+      renderAuditBadges(sessionId);
+      return;
+    }
     try {
       var res = await api('/platform/api/audit?sceneId=' + encodeURIComponent(sessionId));
       if (!res.ok) return;
       auditFindings = res.findings || [];
-      // Update header audit badge.
-      var badge = $('.pill.success, .pill.danger');
-      if (badge) {
-        badge.className = 'pill ' + (res.score < 70 ? 'danger' : 'success');
-        badge.innerHTML = '<span class="dot"></span>AUDIT ' + res.score;
-      }
+      applyAuditToHeader(res.score);
       renderAuditBadges(sessionId);
     } catch (_) {}
+  }
+
+  function applyAuditToHeader(score) {
+    var badge = $('.pill.success, .pill.danger');
+    if (!badge) return;
+    badge.className = 'pill ' + (score < 70 ? 'danger' : 'success');
+    badge.innerHTML = '<span class="dot"></span>AUDIT ' + score;
   }
 
   function renderAuditBadges(sessionId) {

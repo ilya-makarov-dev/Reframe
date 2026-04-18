@@ -90,10 +90,15 @@ function renderOverview(data: DashboardData): string {
       ? 'single scene'
       : `${p.variantCount} variant${p.variantCount === 1 ? '' : 's'}`;
 
+    // The cover SVG is set as the thumb's background, so it shows
+    // instantly and keeps showing if the raster PNG 404/500s (CanvasKit
+    // cold-start, scene too large, etc). The PNG layers on top when it
+    // loads; on error we simply hide the <img> and the cover remains.
+    const coverUrl = `/cover/${escape(owner.id)}.svg?variants=${p.members.length}`;
     return `<div class="overview-card-wrap" data-project-slug="${escape(p.slug)}" data-scene-id="${escape(owner.id)}" data-project-name="${escape(displayName)}">
       <a class="overview-card" href="/platform/project/${escape(p.slug)}">
-        <div class="overview-thumb">
-          <img src="/thumbnail/${escape(owner.id)}.png?scale=1" loading="lazy" alt="${escape(displayName)}" style="width:100%;height:100%;object-fit:cover" onerror="this.onerror=null;this.parentNode.innerHTML='<iframe src=/preview/${escape(owner.id)} loading=lazy tabindex=-1></iframe>'">
+        <div class="overview-thumb" style="background-image:url('${coverUrl}');background-size:cover;background-position:center">
+          <img src="/thumbnail/${escape(owner.id)}.png?scale=1" loading="lazy" alt="${escape(displayName)}" style="width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity 240ms ease" onload="this.style.opacity=1" onerror="this.remove()">
           ${p.variantCount > 0 ? `<div class="overview-variant-badge">${p.members.length} scenes</div>` : ''}
         </div>
         <div class="overview-meta">

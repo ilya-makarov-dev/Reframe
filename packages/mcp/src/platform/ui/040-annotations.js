@@ -99,6 +99,17 @@
   // ── Annotation fetch ──────────────────────────────────
   async function refreshAnnotations() {
     if (!state.currentSceneSlug) return;
+    // Boot payload keys scenes by id, not slug, so we read through the
+    // active scene of the payload (it maps 1:1 to the first canvas).
+    var boot = window.__REFRAME_BOOT__;
+    var cached = (boot && boot.activeSceneId)
+      ? consumeBootSection(boot.activeSceneId, 'annotations')
+      : null;
+    if (cached) {
+      state.annotations = cached;
+      renderAllAnnotations();
+      return;
+    }
     try {
       const res = await api('/platform/api/annotations/list?status=active&sceneSlug=' +
         encodeURIComponent(state.currentSceneSlug));

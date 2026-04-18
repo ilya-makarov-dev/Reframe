@@ -104,17 +104,46 @@ export function buildAgentPreamble(opts: ContextOptions = {}): string {
   // ── Pipeline reminder ──
   if (opts.includePipelineHint !== false) {
     lines.push('');
-    lines.push('SPEED RULES — you are inside an interactive UI, the user is waiting:');
-    lines.push('  1. DO NOT call reframe_inspect first. Scene context is already above.');
-    lines.push('  2. For visual tweaks (color/spacing/text/style) — go DIRECTLY to reframe_edit with op "update".');
-    lines.push('  3. For new sections/layouts — go DIRECTLY to reframe_compile with fresh HTML.');
-    lines.push('  4. ONE tool call when possible. Two only if absolutely required.');
-    lines.push('  5. NO long explanations. One short sentence of confirmation max.');
-    lines.push('  6. NO TodoWrite for trivial single-change tasks.');
-    lines.push('  7. When the user asks for a REVIEW / critique / "how does this look" / "make it better" — route through the reframe-critic skill. It translates audit + aesthetic + brandFidelity scores into ≤3 specific fixes.');
+    lines.push('HOW TO WORK — you are inside an interactive UI, the user is waiting:');
     lines.push('');
-    lines.push('Tools (you have these via MCP):');
-    lines.push('  reframe_compile · reframe_edit · reframe_inspect · reframe_export');
+    lines.push('Plan first.');
+    lines.push('  • Any request that takes more than ONE tool call (e.g. read brand → write HTML → compile) starts with TodoWrite listing the steps. Mark each completed as you go — the UI renders this as a live checklist, so the user sees progress.');
+    lines.push('  • Skip TodoWrite ONLY for single-shot asks: one reframe_edit property tweak, a Q&A with no tools, a brand extract.');
+    lines.push('');
+    lines.push('Target the ACTIVE scene by default.');
+    lines.push('  • The "Active scene" listed above is the canvas the user is currently looking at. Your edits MUST land there unless the user explicitly asks otherwise.');
+    lines.push('  • When you call mcp__reframe__reframe_compile, pass `name` = the active scene\'s slug (e.g. if Active scene slug="imported", use `name: "imported"`). The engine treats same-slug as UPDATE, not CREATE — so the open canvas shows the result.');
+    lines.push('  • Write HTML sources to `.reframe/src/<activeSlug>.html` so re-compiles stay consistent with the active scene.');
+    lines.push('');
+    lines.push('Create a NEW scene only on an EXPLICIT signal from the user:');
+    lines.push('  • "новая страница" / "new page" / "another page" / multi-page sitemap / site-loop workflows.');
+    lines.push('  • "тёмная версия" / "dark version" / "variant" / "alternative" — write a new source file like `<activeSlug>-dark.html` and compile with a new name.');
+    lines.push('  • "копия" / "скопируй" / "clone" — use mcp__reframe__reframe_project action="clone" or compile with a new name.');
+    lines.push('  Without such a signal, assume the user means "edit THIS canvas".');
+    lines.push('');
+    lines.push('Use the fastest path.');
+    lines.push('  • Visual tweaks (color/spacing/text/style) on an existing node → mcp__reframe__reframe_edit op "update". No inspect first — scene context is already above.');
+    lines.push('  • New sections / layouts / big rewrites on the active canvas → mcp__reframe__reframe_compile with `name` = active slug.');
+    lines.push('  • Review / critique / "how does this look" → route through the reframe-critic skill.');
+    lines.push('');
+    lines.push('Finish with a compact summary. 2-4 lines max: what you did + 2-3 "Next steps if useful:" suggestions. No headers, no restating the prompt.');
+    lines.push('');
+    lines.push('ONE compile per turn. After mcp__reframe__reframe_compile returns — even with audit errors — STOP and summarize. Do NOT automatically loop into reframe_inspect → reframe_edit to fix errors. List the top 2-3 findings in your summary and let the user decide ("want me to fix those?"). Auto-fix loops feel like a hang in the UI.');
+    lines.push('');
+    lines.push('File I/O shortcut: any `.reframe/src/<slug>.html` file you overwrite needs a Read-before-Write (Claude Code safety). One Read of the existing file (it\'s small) unlocks the Write. Don\'t `ls` the directory first — just Read the path directly and swallow the error if missing.');
+    lines.push('');
+    lines.push('The 6 reframe MCP tools (callable DIRECTLY by their full prefixed name — do NOT wrap in ToolSearch, they are first-class tools):');
+    lines.push('  mcp__reframe__reframe_design   — brand load/list/extract');
+    lines.push('  mcp__reframe__reframe_compile  — HTML → INode scene + audit');
+    lines.push('  mcp__reframe__reframe_inspect  — tree + 37-rule audit + aesthetics');
+    lines.push('  mcp__reframe__reframe_edit     — ALL mutations (update/add/delete/clone/theme/vary/…)');
+    lines.push('  mcp__reframe__reframe_export   — html/react/svg/png/pdf/lottie/site');
+    lines.push('  mcp__reframe__reframe_project  — save/load/history/macros/brands');
+    lines.push('');
+    lines.push('FORBIDDEN fallbacks — if a reframe tool errors, STOP and report. Do NOT:');
+    lines.push('  • curl/fetch http://localhost:4100/* — there is no REST API, the sidecar is MCP-only.');
+    lines.push('  • run `node -e` / `require()` to load the MCP server manually — it is already running in another process.');
+    lines.push('  • invent Bash pipelines to DIY compile/edit/export. The only supported path is the mcp__reframe__* tools above.');
   }
 
   lines.push('');
