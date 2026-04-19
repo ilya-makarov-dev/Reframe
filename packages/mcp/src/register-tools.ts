@@ -31,9 +31,9 @@ import { editInputSchema, handleEdit } from './tools/edit.js';
 import { exportInputSchema, handleExport } from './tools/export.js';
 import { inspectInputSchema, handleInspect } from './tools/inspect.js';
 import { projectInputSchema, handleProject } from './tools/project.js';
-import { collabInputSchema, handleCollab } from './tools/collab.js';
+import { uiInputSchema, handleUi } from './tools/ui.js';
 
-/** 7 tools: 6 pipeline + project + collab. Self-improvement happens through the pipeline: compile → inspect → edit → inspect. */
+/** 7 tools: 6 pipeline + project + ui. Self-improvement happens through the pipeline: compile → inspect → edit → inspect. */
 export function registerReframeMcpTools(server: McpServer): void {
 
   // ── 1. DESIGN ──────────────────────────────────────────────
@@ -207,46 +207,46 @@ Scenes auto-save to disk when a project is open. Stable DOM-path ids survive re-
     handleProject,
   );
 
-  // ── 7. COLLAB (EXPERIMENTAL / TESTABLE) ────────────────────
+  // ── 7. UI ─────────────────────────────────────────────────
   //
-  // Minimal async agent-worker surface. Exists so the Platform UI
-  // gesture system (Ask / Pin / Echo / Lasso / Brush / Rule) is not
-  // a dead-letter queue — an agent can actually pull user intents
-  // that were captured via gestures and respond with generated ops.
+  // Browser automation for the Platform UI. What reframe_compile is
+  // to the engine, reframe_ui is to the interface layer — open a real
+  // Chromium page at /platform/..., click through flows, read the
+  // DOM, watch console + network errors, grab inline PNGs. The agent
+  // closes UI bugs the same way it closes engine bugs: observe,
+  // isolate, patch, re-observe.
   //
-  // Mostly dormant today. The primary reframe flow is direct
-  // (user → Claude → reframe_compile/edit/export), and no one polls
-  // the intent queue in the background. This tool exists as a
-  // testable stub so that async workflow works when it's needed,
-  // without the overhead of 3 separate tools (intent/annotate/thread).
+  // Stateful: each `open` returns a sessionId; subsequent act / probe /
+  // screenshot calls reference it. Sessions idle > 15 min get GC'd;
+  // the browser shuts down when the last session closes.
   //
-  // If you never use it, remove the import + this server.tool block.
-  // If you build an async agent around it, expand from here.
+  // Playwright is a repo-root devDependency, lazy-loaded on first use.
+  // Set REFRAME_UI_HEADED=1 to watch the browser drive itself.
   server.tool(
-    'reframe_collab',
-    `EXPERIMENTAL / TESTABLE — async agent worker surface.
+    'reframe_ui',
+    `Drive the Platform UI in a real browser. Session-scoped Playwright automation — open a page, act on it, probe the DOM, grab screenshots, read console / network errors. Use this to reproduce, isolate, and verify fixes for UI bugs; to walk a flow end-to-end and confirm it works; to sample what the human actually sees when they land on /platform/project/:slug.
 
-The Platform UI gesture layer (Ask/Pin/Echo/Lasso/Brush/Rule/Resonance/Drag) captures user interactions and writes them as Intents to the project queue (.reframe/intents/queue.jsonl). This tool is the ONE place an agent can pull that queue and respond with generated operations.
+Every mutating action (open / act / screenshot) returns an inline PNG content block + a drained log digest (console errors, page errors, failed network requests since the last call). The agent sees exactly what the browser painted — no guessing, no selector-only blindness.
 
-NOTE: This is a minimal stub. It exists so the async flow works when you want it — most of the time you'll interact with the agent directly and won't touch this tool. The more complex intent/annotate/thread subsystems are available via Platform UI HTTP endpoints; this tool only exposes the narrow slice an agent actually needs: pull pending work, respond with a proposal.
+Actions:
 
-Three actions:
+- open: launch a Chromium session and navigate to path (or absolute URL). Returns sessionId, title, url, inline PNG. Sessions live in memory until explicitly closed or GC'd after 15 min idle. Default path '/platform', default viewport 1440x900. Pass viewport={width,height} for mobile (390x844) / tablet (768x1024) / ultrawide (1920x1200) testing.
 
-- list: peek at queued intents without popping. Read-only. Returns up to 10 queued intents with their scene, part count, and a one-line summary. Use this when you want to see if there's work waiting before committing to batch-pop.
+- act: run a sequence of interaction steps against an existing session. Steps execute in order; first failure aborts the rest. Each step is one of: click (selector), type (selector+text), press (key), scroll (y delta), hover (selector), wait (selector+state), goto (url). Returns the final screenshot + per-step ok/FAIL results + drained logs.
 
-- process: batch-pop up to batchSize queued intents and transition them from 'queued' to 'processing'. Returns the full intent payload (parts, anchors, scope) so the agent has everything needed to generate ops. After calling process, the agent is expected to generate ops via reframe_edit for each intent, then call respond to close the loop.
+- probe: inspect the page without changing it. Pass selector to querySelector (returns tag/text/html/bbox/attrs, first match unless all=true), pass js to run an arbitrary expression (e.g. "document.title", "getComputedStyle(document.body).fontFamily"), or pass neither for a basic page snapshot (title + dimensions). Useful when a selector doesn't tell the whole story — computed styles, window globals, programmatic state.
 
-- respond: mark a processing intent as 'proposed' with an optional summary string and/or opIds array. Platform UI will surface the proposal for human accept/reject. Requires intentId. Summary and opIds are both optional but recommended.
+- screenshot: inline PNG of current viewport. fullPage=true captures the whole scroll height. Use when you want a pixel-level diff against a previous state without any action.
 
-Typical flow:
-  1. reframe_collab({ action: "list" }) → see if anything's queued
-  2. reframe_collab({ action: "process", batchSize: 3 }) → pop 3 intents
-  3. For each intent, read its parts and generate ops via reframe_edit
-  4. reframe_collab({ action: "respond", intentId: "...", summary: "Made button pill-shaped", opIds: [...] })
+- wait: block until a selector reaches state (visible/hidden/attached/detached). Default timeout 5000ms. Use before probing dynamic content that needs to hydrate.
 
-Intent authoring (add/commit/refine), annotations, threads, and templates are NOT exposed here — they're UI-side data structures the agent reads implicitly through intent.parts. If you need agent-side CRUD on those, request a tool expansion.`,
-    collabInputSchema,
-    handleCollab,
+- close: tear down a single session. Free when you're done with a flow so the memory + Chromium context get reclaimed.
+
+- list: enumerate active sessions with age + idle time. Use to recover a sessionId you lost, or to check whether a previous session is still warm.
+
+Local convenience: paths starting with '/' resolve against the local sidecar (default http://localhost:4100, override via REFRAME_HTTP_PORT / REFRAME_HTTP_HOST env). Absolute URLs are passed through unchanged.`,
+    uiInputSchema,
+    handleUi,
   );
 
 

@@ -74,8 +74,20 @@
       ? '<span class="layer-toggle">' + (collapsed ? '▸' : '▾') + '</span>'
       : '<span class="layer-toggle-spacer"></span>';
 
-    // Type badge — small, subtle, right-aligned.
-    var typeBadge = node.type === 'TEXT' ? '' :
+    // Type badge — small, subtle, right-aligned. Hide when it would
+    // just duplicate the name (e.g. a `<section>` auto-named after its
+    // heading text shows "New deployment" as both name AND badge, which
+    // ate half the row's horizontal space and pushed the actual name
+    // into "New depl..." truncation). A badge is only worth showing when
+    // it adds information the displayName doesn't already carry.
+    var badgeText = rawName;
+    var nameLower = displayName.toLowerCase();
+    var badgeRedundant = node.type === 'TEXT'
+      || !badgeText
+      || badgeText === nameLower
+      || nameLower.indexOf(badgeText) !== -1
+      || badgeText.indexOf(nameLower) !== -1;
+    var typeBadge = badgeRedundant ? '' :
       '<span class="layer-badge">' + escape(rawName) + '</span>';
 
     // Text preview inline (absorbed from child or own text).
@@ -282,9 +294,18 @@
         '<div class="brand-browser-grid">' + cardsHtml + '</div>' +
       '</div>';
     document.body.appendChild(overlay);
-    // Close.
-    overlay.querySelector('.close-btn').addEventListener('click', function() { overlay.remove(); });
-    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+    // Close: × button, backdrop click, Escape key. The Esc handler
+    // was missing before — users who hit Escape to dismiss found the
+    // modal still open and every other shortcut blocked (Modify/
+    // Preview/More clicks bounced off the overlay pointer-events).
+    function removeOverlay() {
+      overlay.remove();
+      document.removeEventListener('keydown', onEsc);
+    }
+    function onEsc(e) { if (e.key === 'Escape') { e.preventDefault(); removeOverlay(); } }
+    document.addEventListener('keydown', onEsc);
+    overlay.querySelector('.close-btn').addEventListener('click', removeOverlay);
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) removeOverlay(); });
     // Search.
     var searchInput = overlay.querySelector('.brand-browser-search input');
     if (searchInput) {
@@ -305,7 +326,7 @@
         try {
           await api('/platform/api/brand/switch', { slug: slug });
           flash('Brand: ' + slug, 'success');
-          overlay.remove();
+          removeOverlay();
           // Re-render preview with new brand tokens.
           refreshViewports();
           // Update sidebar brand label.

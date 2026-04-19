@@ -103,8 +103,18 @@
 
     // ── Rebrand (full DESIGN.md swap) ──
     if (action === 'rebrand') {
+      // Legacy path: some older pages still render a
+      // [data-brand-picker-btn] in the header. Platform 2.0 dropped
+      // that button — clicking Rebrand fell through to the error
+      // flash. The actual picker renderer (openBrandBrowser) is
+      // declared in 150-sidebar.js's IIFE scope, so we can call it
+      // directly from here in the concatenated bundle.
       var pickerBtn = $('[data-brand-picker-btn]');
       if (pickerBtn) { pickerBtn.click(); return; }
+      if (typeof openBrandBrowser === 'function') {
+        openBrandBrowser();
+        return;
+      }
       flash('Brand picker unavailable', 'error');
       return;
     }
@@ -152,16 +162,42 @@
     if (action === 'viewport') {
       var vp = item.getAttribute('data-vp');
       if (!vp) return;
-      // Re-use viewport switcher: find any .vp-btn[data-vp=vp] and click,
-      // otherwise apply the class swap directly.
+      // Legacy iframe viewport: click the actual button so the iframe
+      // + annotation SVG both resize. Platform 2.0 has no .vp-btn, so
+      // we fall through to the visual preview path below.
       var vpBtn = document.querySelector('.vp-btn[data-vp="' + vp + '"]');
       if (vpBtn) { vpBtn.click(); return; }
       if (state && typeof state === 'object') state.currentViewport = vp;
+      // Platform 2.0: constrain the canvas host so the user sees a
+      // narrower canvas even before running an `adapt` op. This is a
+      // preview — the actual scene graph stays at its authored width.
+      // Ask the agent (or call reframe_edit op=adapt) to generate a
+      // real mobile variant if you want the layout to reflow.
+      var VP_WIDTH = { desktop: 1440, tablet: 768, mobile: 390 };
+      var canvas = document.getElementById('reframe-viewport');
+      var host = canvas && canvas.parentElement;
+      if (host && VP_WIDTH[vp]) {
+        if (vp === 'desktop') {
+          host.style.maxWidth = '';
+          host.style.margin = '';
+        } else {
+          host.style.maxWidth = VP_WIDTH[vp] + 'px';
+          host.style.margin = '0 auto';
+        }
+      }
+      // Also repaint the chat chip immediately so the context is fresh
+      // before the user hits Enter.
+      var chipsEl = document.querySelector('[data-bc-chips]');
+      if (chipsEl && typeof window.reframeRenderBottomChips === 'function') {
+        window.reframeRenderBottomChips();
+      }
       $$('.viewport-frame').forEach(function(f) {
         f.classList.remove('original', 'desktop', 'tablet', 'mobile');
         f.classList.add(vp);
       });
-      flash('Viewport → ' + vp);
+      flash(vp === 'desktop'
+        ? 'Viewport → desktop (canvas restored)'
+        : 'Previewing at ' + vp + ' width. Run reframe_edit op=adapt to generate a real variant.');
       return;
     }
 
@@ -183,7 +219,9 @@
     // ── Pick brand — open the brand picker dropdown ──
     if (action === 'pick-brand') {
       var picker = $('[data-brand-picker-btn]');
-      if (picker) picker.click();
+      if (picker) { picker.click(); return; }
+      if (typeof openBrandBrowser === 'function') { openBrandBrowser(); return; }
+      flash('Brand picker unavailable', 'error');
       return;
     }
 

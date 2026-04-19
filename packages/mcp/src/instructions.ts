@@ -26,5 +26,7 @@ HTML rules: inline styles only, width on root (1440px), explicit colors on every
 
 SOURCE HTML: compile auto-saves your HTML to .reframe/src/<name>.html. For small fixes use reframe_edit (INode props). For big changes, edit the source file and re-compile: reframe_compile({ file: ".reframe/src/home.html", name: "home" }).
 
-Call reframe_inspect() without sceneId for design language reference, INode properties, and spacing guide.`;
+Call reframe_inspect() without sceneId for design language reference, INode properties, and spacing guide.
+
+UI DEBUGGING: reframe_ui drives the Platform UI in a real browser (Playwright). Use { action: "open", path: "/platform/project/:slug" } to launch a session, then "act" (click/type/scroll/wait), "probe" (querySelector + eval), "screenshot". Every mutating call returns an inline PNG + console/network error digest. Use for reproducing UI bugs, verifying fixes, and walking multi-step flows end-to-end — the same way compile/inspect/edit close engine bugs.`;
 }

@@ -126,6 +126,19 @@ export function renderEditorShell(options: {
       height: 100vh;
     }
 
+    /* Mobile: 220 + 1fr + 320 on a 390 px screen squeezed canvas to
+       a 0-wide sliver (CanvasKit can't init a zero-width surface, so
+       the viewport never rendered). Below 720 px, hide both asides
+       and let the main canvas use the full width. */
+    @media (max-width: 720px) {
+      #app {
+        grid-template-columns: 1fr;
+        grid-template-areas: "header" "canvas";
+      }
+      #sidebar, #panel { display: none; }
+      #header { overflow-x: auto; }
+    }
+
     /* ── Header ── */
     #header {
       grid-area: header;

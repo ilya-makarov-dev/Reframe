@@ -684,7 +684,7 @@ export function exportToHtml(
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
-    body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5; }
+    body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root)} }
     a { color: inherit; text-decoration: none; }
     img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}
   </style>${css}
@@ -1107,6 +1107,21 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
   }
 
   return s.join('; ');
+}
+
+/**
+ * Paint the body with the root node's background so the exported page
+ * looks right even in a narrow preview iframe where the (width:1440)
+ * root is auto-centered and leaves margin bars on each side. Without
+ * this, a dark scene embedded in a pale parent modal showed beige bars
+ * on both sides — the content was fine, the page chrome was wrong.
+ */
+function rootBgForBody(root: SceneNode | null | undefined): string {
+  if (!root || !root.fills || !Array.isArray(root.fills)) return '';
+  const fill = (root.fills as any[]).find(f => f && f.type === 'SOLID' && f.visible !== false && f.color);
+  if (!fill) return '';
+  const bg = colorToRgba(fill.color, typeof fill.opacity === 'number' ? fill.opacity : 1);
+  return ` background: ${bg};`;
 }
 
 function computeBackground(fills: Fill[]): string | null {

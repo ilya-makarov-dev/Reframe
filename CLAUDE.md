@@ -18,7 +18,7 @@ When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right
 | Asks for multiple pages / a full site | `reframe-site-loop` | Write SITE.md + next-prompt.md, loop one page per turn |
 | Vague one-liner ("a landing page", "something nice") | `reframe-enhance` | Rewrite into structured DESIGN SYSTEM + sections block, then hand to `reframe-design` |
 
-**The costume, not the CLI.** You have the full reframe MCP (6 core tools) plus all normal Claude Code tools. But the user in the browser doesn't want a dev session — they want scene changes. Prefer `reframe_edit` over regeneration when the ask fits an INode property. Keep tool chatter short. Show your work in the preview, not in words.
+**The costume, not the CLI.** You have the full reframe MCP (6 core pipeline tools + `reframe_ui` for Playwright-backed browser automation) plus all normal Claude Code tools. But the user in the browser doesn't want a dev session — they want scene changes. Prefer `reframe_edit` over regeneration when the ask fits an INode property. Keep tool chatter short. Show your work in the preview, not in words.
 
 **Scope context is pre-loaded.** The bottom chat prepends `[Scope: node: … · brand: … · viewport: …]` to each message. Trust it. If the scope says `brand: stripe`, don't re-extract — just Read the cached DESIGN.md.
 
@@ -63,7 +63,7 @@ node packages/editor/src/bridge/bridge.integration.test.mjs  # editor integratio
 
 ```
 packages/core      @reframe/core    — headless engine: SceneGraph, audit (37 rules), tokens, resize, variations, 8 exporters, HTML import, animation
-packages/mcp       @reframe/mcp     — MCP server (6 core tools + 1 experimental) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
+packages/mcp       @reframe/mcp     — MCP server (6 pipeline tools + reframe_ui) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
 packages/editor    @reframe/editor  — interactive editor: GraphBridge (@open-pencil/core ↔ reframe), CanvasKit viewport, panels, sync
 packages/cli       @reframe/cli     — CLI: init/build/test
 ```
@@ -77,9 +77,10 @@ reframe_inspect    tree + 37-rule audit + 8 aesthetic metrics + brand fidelity +
 reframe_edit       ALL mutations — structural + theming + variations + adapt + vary + components + multiColumn + resize
 reframe_export     8 core formats: html / react / svg / png / pdf / lottie / animated_html / site (+ theatre, transition for advanced use)
 reframe_project    persistence — save/load/history/content/macros/brands/components
+reframe_ui         Playwright-backed Platform UI automation — open/act/probe/screenshot/wait/close/list
 ```
 
-One extra experimental tool, off the happy path: `reframe_collab` — async intent queue worker stub, not part of the main flow.
+reframe_ui is the 7th tool. Stateful sessions, session-scoped Playwright Chromium, inline PNG + console/network logs returned on every mutating call. Mirrors what reframe_compile/inspect/edit do for the engine, but for the browser-side Platform UI — reproduce UI bugs, verify fixes, walk multi-step flows end-to-end.
 
 ## reframe_edit — the one place for mutations
 

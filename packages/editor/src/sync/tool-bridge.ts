@@ -140,9 +140,10 @@ export async function executeOPTool(
  * reframe_design:
  *   UNCHANGED — brand loading is reframe-specific
  *
- * reframe_collab:
- *   BEFORE: intent queue (experimental)
- *   AFTER:  + P2P real-time sync (via OP's Yjs + Trystero)
+ * reframe_ui:
+ *   NEW — Playwright-backed Platform UI automation (open session, act,
+ *   probe DOM, screenshot, read console/network errors). Replaces the
+ *   dormant reframe_collab experimental stub.
  */
 export const CAPABILITY_MAP = {
   compile: ['html', 'fig'],
@@ -150,5 +151,5 @@ export const CAPABILITY_MAP = {
   export: ['html', 'react', 'svg', 'png', 'pdf', 'lottie', 'animated_html', 'site', 'fig'],
   inspect: ['audit-37', 'aesthetic-8', 'brand-fidelity', 'op-lint'],
   project: ['scenes', 'blocks', 'content', 'macros', 'fig-save', 'fig-load'],
-  collab: ['intents', 'p2p-sync'],
+  ui: ['open', 'act', 'probe', 'screenshot', 'wait', 'close', 'list'],
 } as const;

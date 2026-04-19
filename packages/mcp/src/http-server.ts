@@ -287,8 +287,29 @@ export function buildPlatformContext(): PlatformContext {
       height: stored?.height,
     };
   });
+  // Late-bind projectDir: if the sidecar booted against an empty cwd
+  // (no .reframe/ yet), the tools/project global stays null forever.
+  // An agent or a seed script that writes .reframe/project.json AFTER
+  // boot would be invisible — the dashboard's self-heal route calls
+  // refreshScenesFromDisk(projectDir) with a null dir and quietly
+  // no-ops, so "I just saved a scene, why don't I see it?" until
+  // sidecar restart. Falling back to cwd whenever a project.json
+  // suddenly exists makes the flow reload-free.
+  let dir = getToolsProjectDir();
+  if (!dir) {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const candidate = path.join(process.cwd(), '.reframe', 'project.json');
+      if (fs.existsSync(candidate)) {
+        const { setProjectDir: setToolsProjectDir } = require('./tools/project.js');
+        setToolsProjectDir(process.cwd());
+        dir = process.cwd();
+      }
+    } catch { /* best-effort */ }
+  }
   const ctx: PlatformContext = {
-    projectDir: getToolsProjectDir(),
+    projectDir: dir,
     sessionScenes,
     getScene: (id: string) => {
       const s = getScene(id);

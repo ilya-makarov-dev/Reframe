@@ -886,6 +886,34 @@ input, textarea, select {
   grid-template-columns: 1fr;
 }
 
+/* Mobile: sidebar swallows half of a 390 px screen with no way to
+   close it, so the dashboard grid got squeezed to ~90 px and cards
+   clipped to unreadable slivers. Below 720 px, collapse the sidebar
+   and give the main surface the full width. (Right rail on scenes
+   already stacks via its own grid when present.) */
+@media (max-width: 720px) {
+  .body,
+  .body.with-right {
+    grid-template-columns: 1fr;
+  }
+  .body .sidebar,
+  .body aside,
+  .body .right-panel,
+  .body .panel-resize-sidebar,
+  .body .panel-resize-right,
+  .app > aside,
+  .app > .sidebar,
+  .app .right-panel {
+    display: none;
+  }
+  /* Editor shell uses a grid too; the layers + properties asides
+     eat the canvas. Stack the main surface full-width. */
+  .app {
+    grid-template-columns: 1fr !important;
+    grid-template-areas: "main" !important;
+  }
+}
+
 /* Drag handles — invisible 6px-wide strips along the inner edges of
    panels. The visible cursor hints at the resize affordance. On hover
    and drag we show a tinted accent line so the handle is discoverable. */

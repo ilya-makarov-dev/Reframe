@@ -191,6 +191,15 @@ function buildTreeNode(scene: any, nodeId: string, depth: number): any | null {
 
 async function buildAuditResult(ctx: PlatformContext, scene: any): Promise<BootSceneData['audit']> {
   try {
+    // Layout MUST be fresh before running rules that look at bbox
+    // positions (sibling-overlap, content-overflow, aesthetic-*). A
+    // scene loaded from disk carries pre-layout coordinates — Yoga
+    // has to recompute or every sibling looks overlapped at (0,0)
+    // and the boot payload ships 6 phantom warnings the live
+    // /api/audit (which does ensureSceneLayout) never reproduces.
+    const { ensureSceneLayout } = await import('../../../core/src/engine/layout.js');
+    try { ensureSceneLayout(scene.graph, scene.rootId); } catch { /* best-effort */ }
+
     const { StandaloneNode } = await import('../../../core/src/adapters/standalone/node.js');
     const rootNode = scene.graph.getNode(scene.rootId);
     if (!rootNode) return null;
