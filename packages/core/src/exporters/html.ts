@@ -684,7 +684,7 @@ export function exportToHtml(
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
-    body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root)} }
+    body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root, graph)} }
     a { color: inherit; text-decoration: none; }
     img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}
   </style>${css}
@@ -1115,13 +1115,27 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
  * root is auto-centered and leaves margin bars on each side. Without
  * this, a dark scene embedded in a pale parent modal showed beige bars
  * on both sides — the content was fine, the page chrome was wrong.
+ *
+ * Fallback: for session scenes where the nominal `root` is a CANVAS
+ * wrapper (no fills), walk into the first FRAME child and use ITS fill.
+ * Without this fallback the body stayed transparent even though the
+ * actual page content is dark — Export preview modal's beige showed
+ * through the export iframes on every Platform UI scene.
  */
-function rootBgForBody(root: SceneNode | null | undefined): string {
-  if (!root || !root.fills || !Array.isArray(root.fills)) return '';
-  const fill = (root.fills as any[]).find(f => f && f.type === 'SOLID' && f.visible !== false && f.color);
-  if (!fill) return '';
-  const bg = colorToRgba(fill.color, typeof fill.opacity === 'number' ? fill.opacity : 1);
-  return ` background: ${bg};`;
+function rootBgForBody(root: SceneNode | null | undefined, graph?: SceneGraph): string {
+  const pick = (node: SceneNode | null | undefined): string | null => {
+    if (!node || !node.fills || !Array.isArray(node.fills)) return null;
+    const fill = (node.fills as any[]).find(f => f && f.type === 'SOLID' && f.visible !== false && f.color);
+    if (!fill) return null;
+    return colorToRgba(fill.color, typeof fill.opacity === 'number' ? fill.opacity : 1);
+  };
+  if (!root) return '';
+  let bg = pick(root);
+  if (!bg && graph && root.childIds && root.childIds.length > 0) {
+    const firstChild = graph.getNode(root.childIds[0]);
+    bg = pick(firstChild);
+  }
+  return bg ? ` background: ${bg};` : '';
 }
 
 function computeBackground(fills: Fill[]): string | null {

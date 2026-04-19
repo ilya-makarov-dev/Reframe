@@ -36,6 +36,25 @@
       window.addEventListener('reframe:canvas-select', function(evt) {
         var detail = evt.detail || {};
         var nodeId = detail.nodeId;
+        // Mirror selection into shared state so right-panel + chat chip
+        // + persisted-reload all see the same thing. The OP canvas was
+        // the one selection source that didn't write back; clicking on
+        // canvas left LAYERS and the chip showing the *previous*
+        // selection while the right panel rendered the new node.
+        //
+        // Guard: only write ids that actually live in the scene
+        // (data-layer-node attrs). OP fires auto-selection events for
+        // layout helpers / selection handles whose ids never appear
+        // in LAYERS; without this guard those clobber a
+        // LAYERS-click-persisted selection on every reload.
+        if (nodeId && state && state.selection) {
+          var knownInLayers = !!document.querySelector('[data-layer-node="' + CSS.escape(nodeId) + '"]');
+          if (knownInLayers) {
+            state.selection.inode = nodeId;
+            state.selection.tag = state.selection.tag || '';
+            try { persistUiState(); } catch (_) {}
+          }
+        }
         var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
         var sessionId = frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
         if (!sessionId) {
@@ -128,15 +147,19 @@
       // Shorter delays miss the updated tree from the server. The SSE
       // scene:session-changed handler already triggers its own refresh
       // on server mutation, so this is belt-and-suspenders.
-      window.addEventListener('reframe:node-created', function() {
-        setTimeout(function() { refreshLayersTree(); }, 1200);
-      });
-      window.addEventListener('reframe:node-deleted', function() {
-        setTimeout(function() { refreshLayersTree(); }, 1200);
-      });
-      window.addEventListener('reframe:node-reparented', function() {
-        setTimeout(function() { refreshLayersTree(); }, 1200);
-      });
+      // refreshLayersTree is internally debounced (150-sidebar.js) so
+      // N-node rebuilds coalesce into one /platform/api/scene/tree fetch.
+      // Skip entirely while __reframeSyncing is true — the whole
+      // pull-from-MCP rebuild is one logical change, and dispatching
+      // refresh per synthesized node-created still wastes cycles on
+      // the bridge layer even with the debounce downstream.
+      function refreshTreeIfNotSyncing() {
+        if (window.__reframeSyncing) return;
+        refreshLayersTree();
+      }
+      window.addEventListener('reframe:node-created', refreshTreeIfNotSyncing);
+      window.addEventListener('reframe:node-deleted', refreshTreeIfNotSyncing);
+      window.addEventListener('reframe:node-reparented', refreshTreeIfNotSyncing);
       // Properties panel refresh on node-moved/resized — THROTTLED.
       // Every pointermove during drag fires multiple events. If we
       // refresh the panel (GET /api/node/get) on each one, the browser
@@ -185,9 +208,12 @@
       // Wait a beat for scene hydration to finish before fetching tree.
       setTimeout(function() { refreshLayersTree(); }, 800);
 
-      // Refresh layers tree on SSE scene changes.
+      // Refresh layers tree on SSE scene changes. refreshLayersTree is
+      // internally debounced (120ms) so a pull-from-MCP that dispatches
+      // graph-changed + N synthesized node-created collapses into one
+      // fetch of /platform/api/scene/tree.
       window.addEventListener('reframe:graph-changed', function() {
-        setTimeout(function() { refreshLayersTree(); }, 300);
+        refreshLayersTree();
       });
     } else {
       bindPreviewBridge();
@@ -247,6 +273,52 @@
       window.addEventListener('resize', fitOriginalViewport);
     }
     setTimeout(function() { refreshAudit(); refreshTimeline(); refreshLayersTree(); }, 600);
+
+    // ── Restore persisted UI state ──────────────────────────
+    // If the previous session left a selection + viewport pinned,
+    // re-apply them here so the user walks into the same workspace
+    // they left. Both are fire-and-forget; if the persisted node id
+    // doesn't exist in the current scene (e.g. source HTML changed
+    // between runs), showPropsForNode's own 404 path falls back to
+    // the scene dashboard — nothing breaks.
+    setTimeout(function() {
+      // Re-apply viewport macro if it was non-default. We dispatch
+      // via the existing handleMacroAction path so the same code
+      // (host width + margin) runs as a fresh user click, instead of
+      // re-implementing the flex/block centering logic inline here.
+      if (state.currentViewport && state.currentViewport !== 'desktop' && state.currentViewport !== 'original') {
+        var vpBtn = document.querySelector('[data-macro-action="viewport"][data-vp="' + state.currentViewport + '"]');
+        if (vpBtn && typeof vpBtn.click === 'function') vpBtn.click();
+      }
+      // Re-populate right panel from persisted selection. The OP
+      // bridge may still be wiring on first try (CanvasKit graph hasn't
+      // replayed yet), so we retry a handful of times over ~3s. Each
+      // attempt is cheap (one GET /api/node/get). Stops early once the
+      // props panel has contents that aren't the empty-state dashboard.
+      function tryRestoreProps(attemptsLeft) {
+        if (!state.selection || !state.selection.inode || attemptsLeft <= 0) return;
+        var frame = document.querySelector('.viewport-frame') || document.getElementById('reframe-viewport');
+        var sid = frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
+        if (!sid || typeof showPropsForNode !== 'function') {
+          setTimeout(function() { tryRestoreProps(attemptsLeft - 1); }, 500);
+          return;
+        }
+        showPropsForNode(state.selection.inode, sid);
+        // Re-check after a moment — if the panel is still the empty
+        // dashboard, the bridge probably hadn't indexed the id yet;
+        // try again.
+        setTimeout(function() {
+          var panel = document.querySelector('[data-panel="design"]');
+          var text = panel ? (panel.textContent || '') : '';
+          if (text.indexOf('Select a node to inspect') !== -1) {
+            tryRestoreProps(attemptsLeft - 1);
+          }
+        }, 400);
+      }
+      tryRestoreProps(6);
+      // Also trigger LAYERS highlight fold-in.
+      try { window.dispatchEvent(new CustomEvent('reframe:ui-state-changed')); } catch (_) {}
+    }, 900);
     // Reposition chip bar + re-render marks on window resize.
     window.addEventListener('resize', function() {
       repositionChipBar();

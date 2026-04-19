@@ -2,10 +2,74 @@
 (function() {
   'use strict';
 
+  // ── Persisted state restore ────────────────────────────
+  // Keyed by project slug so two open projects don't trample each
+  // other. Server inlines the slug at render time via data-scene on
+  // `.app`; read it once here, use it for both read + write.
+  const REFRAME_UI_STATE_KEY = (function() {
+    try {
+      var el = document.querySelector('.app[data-scene]') || document.getElementById('app');
+      var slug = el && el.getAttribute ? el.getAttribute('data-scene') : '';
+      return 'reframe.ui.state.' + (slug || '_');
+    } catch (_) { return 'reframe.ui.state._'; }
+  })();
+  function loadPersistedState() {
+    try {
+      var raw = localStorage.getItem(REFRAME_UI_STATE_KEY);
+      if (!raw) return {};
+      var parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return {};
+      // Validate the persisted id against the current scene's layers
+      // tree. Ids are session-scoped for variant scenes (OP `0:xxx`
+      // format), so a persisted id from a previous session may be a
+      // ghost. We can't reach into the scene graph this early — but
+      // the boot payload carries the active layer tree. If the id is
+      // absent there, drop it and fall back to "no selection".
+      try {
+        var boot = window.__REFRAME_BOOT__;
+        var knownIds = new Set();
+        var walk = function(n) { if (!n) return; if (n.id) knownIds.add(n.id); (n.children||[]).forEach(walk); };
+        if (boot && boot.tree) walk(boot.tree);
+        if (typeof parsed.selectionInode === 'string'
+            && knownIds.size > 0
+            && !knownIds.has(parsed.selectionInode)) {
+          parsed.selectionInode = null;
+        }
+      } catch (_) {}
+      return parsed;
+    } catch (_) {}
+    return {};
+  }
+  const _persisted = loadPersistedState();
+  // Call after any mutation of `state.selection.inode` or
+  // `state.currentViewport`. Cheap — just a JSON.stringify of two
+  // scalars. Silently no-ops in private mode / quota-exceeded browsers
+  // (the feature is a UX nicety, not a correctness primitive).
+  function persistUiState() {
+    try {
+      localStorage.setItem(REFRAME_UI_STATE_KEY, JSON.stringify({
+        currentViewport: state.currentViewport,
+        selectionInode: state.selection && state.selection.inode,
+        selectionTag: state.selection && state.selection.tag,
+      }));
+    } catch (_) {}
+    // Let the chip bar (and any other passive UI watchers) redraw
+    // without having to wire a bespoke callback into every caller. Any
+    // module that cares can subscribe to `reframe:ui-state-changed`.
+    try {
+      window.dispatchEvent(new CustomEvent('reframe:ui-state-changed'));
+    } catch (_) {}
+  }
+  // expose to other modules — the bundle runs in a single IIFE
+  // scope, so this lands as a plain reference rather than a global.
+
   // ── State ──────────────────────────────────────────────
   const state = {
     currentSceneSlug: null,
-    currentViewport: 'desktop',
+    // Viewport mode — persisted so the user doesn't drop back to
+    // desktop on every reload after setting Preview → Mobile. The chip
+    // bar + the macro toolbar both read this value to drive their UI.
+    currentViewport: _persisted.currentViewport || 'desktop',
     // Edit mode — when OFF (default), the preview is a live interactive
     // preview. Hover states, link clicks, scroll — all native iframe
     // behaviour. When ON, the gesture layer activates: hover outlines
@@ -14,7 +78,15 @@
     // annotations) remain visible + clickable in BOTH modes.
     editMode: false,
     hover: { inode: null, bbox: null },
-    selection: { inode: null, bbox: null, tag: null },
+    // Selection — inode persists across reload so the user returns to
+    // the same node they left. bbox + tag are measurement-derived and
+    // get re-hydrated by the postMessage `reframe:measurements` pump
+    // after the iframe loads, so we don't need to persist them.
+    selection: {
+      inode: _persisted.selectionInode || null,
+      bbox: null,
+      tag: _persisted.selectionTag || null,
+    },
     // Measurement cache: inode → { bbox, style, tag, className, role, text }
     // Populated via reframe:measurements message from the inject script.
     measurements: new Map(),
@@ -364,6 +436,13 @@
     state.selection.inode = data.inode;
     state.selection.bbox = data.bbox || null;
     state.selection.tag = data.tag || '';
+    // Persist any concrete id — loadPersistedState at boot validates
+    // that the id actually matches a node in the current scene before
+    // restoring. Previous version over-filtered to `h:*` + `s\d+:*`
+    // which happened to exclude the `0:*` ids the variant-scene
+    // classifier emits for nodes missing stable hash ids, so selection
+    // appeared to never persist on those scenes.
+    if (typeof data.inode === 'string' && data.inode) persistUiState();
     // Overlay + chip bar — these are tuned for single-iframe scene
     // pages. On canvas they silently no-op (no .viewport-frame
     // .annotations SVG) or float on the wrong coords, so we skip the
@@ -398,6 +477,7 @@
     state.selection.inode = data.inode;
     state.selection.bbox = data.bbox || null;
     state.selection.tag = data.tag || '';
+    if (typeof data.inode === 'string' && data.inode) persistUiState();
     drawSelectOutline();
     drawSelectionHandles();
     var frame = $('.viewport-frame');
@@ -420,6 +500,14 @@
     state.selection.inode = null;
     state.selection.bbox = null;
     state.selection.tag = null;
+    // Deliberately do NOT persist null here. clearSelection fires on
+    // canvas-blur, iframe reload, and various transient lifecycle
+    // points that are not a user intent to "forget my selection" —
+    // persisting null on those wipes the reload-restore we just did
+    // three lines earlier in boot. The user's last explicit selection
+    // should survive noise. It only gets overwritten when the user
+    // actively selects a new node (onPreviewSelect / LAYERS click /
+    // canvas-select, all of which DO persist).
     drawSelectOutline();
     hideChipBar();
     clearPropsPanel();

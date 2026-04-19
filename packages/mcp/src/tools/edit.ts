@@ -624,20 +624,47 @@ function rolesContainingText(
   return hits;
 }
 
+// Slot aliases — role names the agent commonly tries that the semantic
+// classifier doesn't actually emit. Mapping them here (rather than
+// expanding classify.ts to tag nodes both ways) keeps the taxonomy
+// tight while saving a retry cycle every time the agent asks for
+// "hero", "cta", etc. Each alias maps to the array of actual tagged
+// roles to search, in priority order — first non-empty wins.
+const ROLE_ALIASES: Record<string, string[]> = {
+  // "hero" — common brand vocabulary, but the classifier tags the
+  // top-of-page above-the-fold section as just 'section'. Honor the
+  // usual English meaning: first section is the hero. Agents routinely
+  // ask for role=hero when changing landing-page backgrounds; the
+  // retry-with-corrected-role round-trip costs an LLM call we can skip.
+  hero: ['hero', 'section'],
+  // Same for "cta" — often classifier produces 'button' + 'section'
+  // as the CTA container. Try cta first, then the bottom section.
+  cta: ['cta', 'section'],
+  banner: ['banner', 'hero', 'section'],
+};
+
 function findBySlot(
   graph: SceneGraph,
   rootId: string,
   role: string,
   filters: { index?: number; textContains?: string } = {},
 ): SceneNode[] {
+  const aliasRoles = ROLE_ALIASES[role] ?? [role];
   const matches: SceneNode[] = [];
   const walk = (id: string) => {
     const n = graph.getNode(id);
     if (!n) return;
-    if ((n as any).semanticRole === role) matches.push(n);
+    if (aliasRoles.includes((n as any).semanticRole)) matches.push(n);
     for (const cid of n.childIds) walk(cid);
   };
   walk(rootId);
+  // For 'hero' specifically: prefer the FIRST section (top-of-page),
+  // which is the semantic intent. Without this, hero→section matches
+  // every section on the page and the agent has to disambiguate by
+  // index anyway.
+  if (role === 'hero' && matches.length > 1 && !matches.some(n => (n as any).semanticRole === 'hero')) {
+    matches.length = 1;
+  }
 
   let filtered = matches;
   if (filters.textContains) {

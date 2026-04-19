@@ -106,6 +106,7 @@
         const vp = btn.getAttribute('data-vp');
         if (!vp || !VIEWPORT_DIMS[vp]) return;
         state.currentViewport = vp;
+        persistUiState();
         $$('.vp-btn').forEach(function(b) { b.classList.toggle('active', b === btn); });
         $$('.viewport-frame').forEach(function(frame) {
           frame.classList.remove('original', 'desktop', 'tablet', 'mobile');

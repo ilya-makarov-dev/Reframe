@@ -246,6 +246,19 @@ async function applyVariationToScene(
 
   ensureSceneLayout(scene.graph, scene.rootId);
   store.bumpSceneSessionRevision(sceneId);
+
+  // Persist to disk — without this the Platform UI macro buttons (Scale
+  // spacing / Corner radius / Shadows / Rotate colors / Typography /
+  // Toggle mode) only mutate the in-memory session. After a browser
+  // reload the scene.json is re-read and the macro is silently gone,
+  // which is indistinguishable from the app being broken.
+  // reframe_edit's MCP path auto-saves post-mutation (tools/edit.ts
+  // line ~2074) — this mirrors it for the Platform-UI path.
+  try {
+    const { autoSaveScene } = await import('../../tools/project.js');
+    autoSaveScene(sceneId);
+  } catch { /* best-effort */ }
+
   return { kind, value, changed };
 }
 

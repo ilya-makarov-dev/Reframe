@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/version-0.1.0-7c3aed?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/node-%3E%3D18-43853d?style=flat-square" alt="node">
-  <img src="https://img.shields.io/badge/MCP-6_tools-ff6b6b?style=flat-square" alt="MCP tools">
+  <img src="https://img.shields.io/badge/MCP-7_tools-ff6b6b?style=flat-square" alt="MCP tools">
   <img src="https://img.shields.io/badge/audit-37_rules-10b981?style=flat-square" alt="audit rules">
   <img src="https://img.shields.io/badge/exports-8_formats-f59e0b?style=flat-square" alt="export formats">
   <img src="https://img.shields.io/badge/viewport-CanvasKit_(Skia)-e11d48?style=flat-square" alt="CanvasKit viewport">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#mcp-pipeline">MCP Pipeline</a> · <a href="#inode--the-design-ast">INode AST</a> · <a href="#platform">Platform</a> · <a href="#license">License</a>
+  <a href="#try-it-in-60-seconds">Try It</a> · <a href="#ai-native-engine">AI-Native Engine</a> · <a href="#mcp-pipeline">MCP Pipeline</a> · <a href="#inode--the-design-ast">INode AST</a> · <a href="#platform">Platform</a> · <a href="#install">Install</a> · <a href="#license">License</a>
 </p>
 
 ---
@@ -28,9 +28,11 @@
 
 **🚀 v0.1.0 — developer preview**
 
-An AI-native design editor with production-quality engine. Interactive CanvasKit viewport (via [`@open-pencil/core`](https://github.com/open-pencil/open-pencil)) + 37-rule quality audit + 8 export formats. **INode is to structured content what AST is to code.**
+An AI-native design editor with a production-quality engine underneath. Interactive CanvasKit viewport (via [`@open-pencil/core`](https://github.com/open-pencil/open-pencil)) + 37-rule quality audit + 8 export formats — plus a **skill layer** that carries the taste memory the audit can't encode. **INode is to structured content what AST is to code.**
 
-Three input paths converge on one graph: **DESIGN.md** — brand spec, tokens, component recipes feed the audit and the agent. **Agent chat** integrated in the editor — AI writes HTML, refactors scenes, applies deterministic variations. **Direct editing** — Figma-like selection, drag, resize, text editing, context menu, keyboard shortcuts. Properties panel with live audit findings, bidirectional sync at `:4100/platform`. **6 MCP tools** drive external agents in Claude Code, Cursor, and any MCP-compatible client. 60+ brand design systems via [`getdesign`](https://www.npmjs.com/package/getdesign) npm. W3C DTCG token interop. .fig file import/export. Headless REST API for batch rendering and CI/CD.
+Two layers, one pipeline. The **engine** is deterministic: import → audit → transform → export, measured by 37 rules, 8 aesthetic metrics, and brand-fidelity scoring. The **skill layer** is taste: 7 role-framed skills with growing smell tables that catch genericness, fake content, brand drift, and slop signatures the engine can't measure.
+
+Three input paths converge on one graph: **DESIGN.md** — brand spec, tokens, component recipes feed the audit and the agent. **Agent chat** integrated in the editor — AI writes HTML, refactors scenes, applies deterministic variations. **Direct editing** — Figma-like selection, drag, resize, text editing, context menu, keyboard shortcuts. Properties panel with live audit findings, bidirectional sync at `:4100/platform`. **7 MCP tools** (6 pipeline + `reframe_ui` for Playwright-backed Platform QA) drive external agents in Claude Code, Cursor, and any MCP-compatible client. 60+ brand design systems via [`getdesign`](https://www.npmjs.com/package/getdesign) npm. W3C DTCG token interop. .fig file import/export. Headless REST API for batch rendering and CI/CD.
 
 </td>
 </tr>
@@ -56,6 +58,30 @@ Three input paths converge on one graph: **DESIGN.md** — brand spec, tokens, c
 | ✅ 37-Rule Audit + Quality | 🔄 Deterministic Transforms | 🧑‍🎨 Unified Platform |
 |---|---|---|
 | Contrast, accessibility, brand compliance, spacing, 8 aesthetic metrics, brand fidelity scoring. Auto-fix pipeline and per-node audit findings. | Rebrand, resize, vary — no AI. Tokens, compile, lint — deterministic. Same inputs → same outputs, always. | Editable properties, live audit, bidirectional sync between canvas and panel at `:4100/platform`. |
+
+---
+
+## Try It In 60 Seconds
+
+The fastest way to feel what reframe does — clone, build, open the Platform, type in the chat. No API key. Uses your existing [Claude Code](https://claude.com/claude-code) subscription for the in-canvas agent.
+
+```bash
+git clone https://github.com/ilya-makarov-dev/reframe.git
+cd reframe && npm install && npm run build
+npm start                                     # HTTP sidecar on :4100
+```
+
+Open **`http://localhost:4100/platform`** → click **+ Create Canvas** → type in the bottom chat:
+
+```
+landing page for a Linear-style dev tool, dark theme, one hero + 3 features
+```
+
+The agent picks the matching skill (`reframe-design`), writes HTML with brand + taste rules baked in, compiles it into an INode SceneGraph, runs the 37-rule audit, auto-fixes issues, and renders on the CanvasKit viewport. You direct from there — drag, resize, edit text, prompt again, export to HTML / React / PNG / PDF / site.
+
+**No `claude` CLI?** The engine (compile / audit / tokens / resize / variations / 8 exporters) runs fully headless — see [MCP Pipeline](#mcp-pipeline) to drive it from any MCP client, or [@reframe/ui](#reframeui--standard-library) to build scenes in TypeScript. Only the in-canvas agent needs the CLI.
+
+**Running into `EADDRINUSE` / Node < 18 / first-build issues?** Jump to [Install](#install) and [Known rough edges](#known-rough-edges-dev-preview) — everything is flagged there upfront.
 
 ---
 
@@ -190,6 +216,76 @@ Design has no compiler. Code has ESLint, Prettier, TypeScript — parse, validat
 ```
 
 > The human is the creative director. AI is the designer. The engine is QA. Nobody ships without passing 37 rules.
+
+---
+
+## AI-Native Engine
+
+The 37-rule audit + 8 aesthetic metrics + brand-fidelity score measure **structure** — contrast, spacing, alignment, token compliance — things you can compute. But structure isn't taste. A scene that scores PASS on every rule can still feel:
+
+- **generic** — the AI-slop signature: 3 equal cards horizontally, centered hero with 5 elements, gradient-on-gradient buttons
+- **fake** — invented stats ("trusted by 40k engineers"), invented testimonials, placeholder logos dressed up as real ones
+- **tone-mismatched** — Inter on an editorial brand, serif in a dashboard, pure `#000` on a premium dark theme
+- **brand-drifted** — colors swapped correctly but typography weight, letter-spacing, or component radius forgot the brand
+
+These failures don't show up in numbers. So reframe pairs the deterministic engine with a **skill layer** — structured taste memory that grows with use.
+
+### Two layers, one pipeline
+
+```
+  INPUT ──► ENGINE (deterministic)  ──► SKILL LAYER (taste)  ──► OUTPUT
+            37 audit rules                7 role-framed skills
+            8 aesthetic metrics           smell tables (grow)
+            brand fidelity scoring        anti-patterns
+            auto-fix pipeline             canonical flows
+            Yoga layout + tokens          cross-skill taste rules
+```
+
+The engine catches structural bugs and guarantees reproducibility. The skills catch taste bugs the engine can't measure. Together they close the loop that "just an audit" or "just an LLM" each miss on their own.
+
+### 7 skills, one per user intent
+
+When the agent runs inside the Platform, every request routes through exactly one skill. Each carries role frame + sensitive surfaces + smell table + canonical flows + anti-patterns — not a procedure (the engine handles procedure), but the taste memory + failure-pattern memory the engine lacks.
+
+| User intent | Skill | What it carries |
+|---|---|---|
+| "make a page / hero / form / dashboard" | [`reframe-design`](.claude/skills/reframe-design/SKILL.md) | anti-slop patterns, tension cues, "compiles clean but reads fake" smells |
+| "use Stripe's style / apply brand / rebrand" | [`reframe-brand`](.claude/skills/reframe-brand/SKILL.md) | brand-intent → token translation, where brand fidelity drops in practice |
+| "full site / sitemap / home + pricing + about + 404" | [`reframe-site-loop`](.claude/skills/reframe-site-loop/SKILL.md) | one-page-per-turn baton, brand freeze on turn 1, cross-page nav with real slugs |
+| "a landing page" (vague, ≤ 10 words) | [`reframe-enhance`](.claude/skills/reframe-enhance/SKILL.md) | short interview protocol → structured brief before generation |
+| "how does this look? / review / polish" | [`reframe-critic`](.claude/skills/reframe-critic/SKILL.md) | translates engine metrics into designer language, adds taste layer |
+| "export to React / TSX / component library" | [`reframe-to-react`](.claude/skills/reframe-to-react/SKILL.md) | stack choice (inline / CSS-modules / Tailwind / styled), byte-deterministic handoff |
+| "test the UI / QA the platform" (dev-side) | [`designer-qa`](.claude/skills/designer-qa/SKILL.md) | drives Chromium via `reframe_ui` through 11 canonical designer journeys |
+
+### Smell tables grow
+
+Every skill carries a **smell table** — failure patterns the audit can't encode, each with a detection cue and a fix. When the agent catches a new kind of failure (a novel brand drift, a new slop signature, an export-determinism gap), a row is added. The next session catches the same pattern in seconds instead of rediscovering it.
+
+> The engine is deterministic; the skills are the memory the engine lacks. Structural measurement + growing taste memory is the moat.
+
+### Cross-skill taste rules
+
+A small set of rules the audit can't fully encode but every skill enforces, every time the agent writes HTML:
+
+- Max **one** accent color above 80% saturation — a second high-sat color is noise
+- No pure `#000` — use `#111`–`#1a` even on dark themes (pure black burns holes on dark layouts)
+- **Inter banned** for premium / editorial contexts — use Geist / Outfit / Cabinet Grotesk / Söhne
+- **No serifs in dashboards** — serif is editorial only
+- **Never invent numbers, stats, logos, or testimonials** — use neutral labels ("trusted by teams", not "trusted by 40k engineers")
+- **No "3 equal cards horizontally"** — use asymmetric grid / zig-zag / bento
+- **Centered hero only when variance is low** — headline + CTA = centered OK; headline + 3 stats + image + 2 CTAs = not centered
+- **Motion via `transform` / `opacity` only** — never animate `top/left/width/height`
+
+### Why this architecture beats "just an LLM" or "just an audit"
+
+|   | Just an LLM | Just an audit | reframe (engine + skills) |
+|---|---|---|---|
+| Reproducible output | no | n/a | yes — same inputs → same output |
+| Catches contrast / accessibility | sometimes | yes | yes (37 rules, auto-fix) |
+| Catches genericness / slop | rarely | no | yes (smell tables) |
+| Catches fake content | rarely | no | yes (cross-skill rules) |
+| Scales with experience | no (context window) | no (fixed rules) | yes (smell tables grow) |
+| Testable in CI | no | partial | yes (`reframe test` + assert) |
 
 ---
 
@@ -394,7 +490,7 @@ interface INode {
 
 ## MCP Pipeline
 
-6 core tools. Continuous feedback loop — not a linear pipeline.
+7 tools: 6 for the design pipeline + `reframe_ui` for Platform UI automation. Continuous feedback loop — not a linear pipeline.
 
 ```
 compile → inspect → [edit → inspect]* → export → user reviews
@@ -404,7 +500,7 @@ compile → inspect → [edit → inspect]* → export → user reviews
             edit → inspect → export → user reviews again
 ```
 
-**6 core tools** — one per phase of the flow:
+**6 pipeline tools** — one per phase of the flow:
 
 | Tool | Purpose |
 |------|---------|
@@ -415,7 +511,7 @@ compile → inspect → [edit → inspect]* → export → user reviews
 | `reframe_export` | 8 formats: html, react, svg, png, pdf, lottie, animated_html (CSS/WAAPI), site |
 | `reframe_project` | Save/load, history, snapshots, components, macros, brand registry, DTCG token export/import, content round-trip (MD ↔ INode). |
 
-One experimental extra, off the happy path: `reframe_collab` — async agent-worker for the Platform UI gesture/intent queue (`list` / `process` / `respond` / `start_session` / `sync_status`). Safe to ignore unless you're hacking on the collaboration surface.
+**Plus one for the browser:** `reframe_ui` — Playwright-backed Platform UI automation. `open` launches a Chromium session, `act` clicks/types/scrolls/waits, `probe` runs `querySelector` + eval, `screenshot` captures state. Every mutating call returns an inline PNG + console/network error digest. Mirrors what `reframe_compile` / `inspect` / `edit` do for the engine — but for the browser-side Platform, so the agent can reproduce UI bugs, verify fixes, and walk multi-step flows end-to-end. Used by the [`designer-qa`](.claude/skills/designer-qa/SKILL.md) skill to sweep 11 canonical designer journeys.
 
 ### The agent can *see* the scene — inline PNG preview
 
@@ -440,7 +536,7 @@ Defaults:
 
 ### CLI vs MCP (quick map)
 
-| Flow | CLI (`reframe` in packages/cli) | MCP (6 tools above) |
+| Flow | CLI (`reframe` in packages/cli) | MCP (7 tools above) |
 |------|----------------------------------|----------------------|
 | Import / build | `reframe build`, configs | `reframe_compile`, `reframe_edit` |
 | Audit / tree | `reframe test`, export-svg | `reframe_inspect` |
@@ -826,7 +922,7 @@ packages/
 │               StoreSync (SSE pull + debounced PUT push, race-proof)
 │
 ├── mcp/        @reframe/mcp
-│               MCP server (6 tools + 1 experimental)
+│               MCP server (6 pipeline tools + reframe_ui for Platform QA)
 │               HTTP sidecar on port 4100 (dual-stack `::` bind)
 │               Platform UI — dashboard + canvas editor shell
 │                 (split into 16 feature-section files under platform/ui/,

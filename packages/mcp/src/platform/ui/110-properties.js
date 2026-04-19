@@ -8,21 +8,20 @@
     // Skip the fetch — the next user-initiated selection will refresh.
     if (window.__reframeSyncing) return;
     // Bridge translation: OP id → reframe id when bridge knows the
-    // mapping. If the id has NO bridge entry at all (neither direction),
-    // it's an OP-internal helper (selection handle, layout child, etc).
-    // Skip the fetch entirely — without this guard we 404 hundreds of
-    // times during a single drag (OP fires updateNode for many helper
-    // nodes per pointermove).
+    // mapping. The earlier version also silently returned whenever the
+    // id was absent from BOTH directions of the bridge — that was meant
+    // to suppress OP drag-helper spam but it ALSO killed LAYERS-sidebar
+    // clicks (reframe id from /scene/tree) whenever the bridge hadn't
+    // finished indexing yet. Drag spam is already mitigated by
+    // `queuePropsRefresh` (debounced + uses currentPropsNodeId which is
+    // always a resolved reframe id), so we no longer need the defensive
+    // bridge-miss guard here. Let the server's 404 handler (below) be
+    // the authoritative filter — an unknown id renders the scene
+    // dashboard, which is the correct fallback.
     var bridge = window.__reframeBridge;
     if (bridge) {
       var fwd = bridge.opToReframeId && bridge.opToReframeId.get && bridge.opToReframeId.get(inode);
-      if (fwd) {
-        inode = fwd;
-      } else if (bridge.reframeToOpId && bridge.reframeToOpId.has && !bridge.reframeToOpId.has(inode)) {
-        // Not in bridge in either direction — OP-only helper. Silent.
-        clearPropsPanel();
-        return;
-      }
+      if (fwd) inode = fwd;
     }
     currentPropsNodeId = inode;
     // Direct fetch (instead of api() helper) so we can handle 404

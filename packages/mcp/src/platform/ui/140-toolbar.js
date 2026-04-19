@@ -167,7 +167,10 @@
       // we fall through to the visual preview path below.
       var vpBtn = document.querySelector('.vp-btn[data-vp="' + vp + '"]');
       if (vpBtn) { vpBtn.click(); return; }
-      if (state && typeof state === 'object') state.currentViewport = vp;
+      if (state && typeof state === 'object') {
+        state.currentViewport = vp;
+        try { persistUiState(); } catch (_) {}
+      }
       // Platform 2.0: constrain the canvas host so the user sees a
       // narrower canvas even before running an `adapt` op. This is a
       // preview — the actual scene graph stays at its authored width.
@@ -180,9 +183,23 @@
         if (vp === 'desktop') {
           host.style.maxWidth = '';
           host.style.margin = '';
+          host.style.marginLeft = '';
+          host.style.marginRight = '';
+          host.style.width = '';
+          host.style.display = '';
         } else {
+          // Mobile preview shipped un-centered on Platform 2.0: the host's
+          // parent (.main) is block overflow, so `margin: 0 auto` only
+          // works if the host has a constrained width AND is a block
+          // formatting context. Setting width explicitly to the target +
+          // forcing `display: block` + explicit marginLeft/Right: auto
+          // makes the centering survive even when the host was promoted
+          // to a flex child by upstream CSS changes.
           host.style.maxWidth = VP_WIDTH[vp] + 'px';
-          host.style.margin = '0 auto';
+          host.style.width = VP_WIDTH[vp] + 'px';
+          host.style.display = 'block';
+          host.style.marginLeft = 'auto';
+          host.style.marginRight = 'auto';
         }
       }
       // Also repaint the chat chip immediately so the context is fresh

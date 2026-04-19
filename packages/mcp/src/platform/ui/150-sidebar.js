@@ -3,32 +3,56 @@
   // clickable hierarchy in the sidebar. Click a layer → selects that
   // node in the viewport + shows Properties Inspector.
 
+  // Coalesce bursts: pullFromMCP rebuilding the OP graph fires N
+  // reframe:node-created events, each of which used to queue a
+  // setTimeout(refreshLayersTree, 1200). For an N-node scene that was
+  // N parallel /platform/api/scene/tree fetches + N full innerHTML
+  // swaps at roughly the same moment — the UI "scene/tree infinite
+  // loop" smell. One trailing refresh is all we want.
+  var _refreshTreeTimer = null;
+  var _refreshTreeInFlight = false;
   async function refreshLayersTree() {
-    var container = $('[data-layers-tree]');
-    if (!container) return;
-    var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
-    var sessionId = frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
-    if (!sessionId) {
-      container.innerHTML = '<div class="sidebar-empty">No scene</div>';
+    if (_refreshTreeTimer) clearTimeout(_refreshTreeTimer);
+    _refreshTreeTimer = setTimeout(doRefreshLayersTree, 120);
+  }
+  async function doRefreshLayersTree() {
+    _refreshTreeTimer = null;
+    if (_refreshTreeInFlight) {
+      // Another refresh finished too recently; re-queue once so we
+      // still land on the latest tree.
+      _refreshTreeTimer = setTimeout(doRefreshLayersTree, 120);
       return;
     }
-    // Prefer inlined boot payload on first paint — same tree shape.
-    var cachedTree = consumeBootSection(sessionId, 'tree');
-    if (cachedTree) {
-      container.innerHTML = renderLayerNode(cachedTree, 0);
-      bindLayerClicks(sessionId);
-      return;
-    }
+    _refreshTreeInFlight = true;
     try {
-      var res = await api('/platform/api/scene/tree?sceneId=' + encodeURIComponent(sessionId));
-      if (!res.ok || !res.tree) {
-        container.innerHTML = '<div class="sidebar-empty">Failed to load</div>';
+      var container = $('[data-layers-tree]');
+      if (!container) return;
+      var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
+      var sessionId = frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;
+      if (!sessionId) {
+        container.innerHTML = '<div class="sidebar-empty">No scene</div>';
         return;
       }
-      container.innerHTML = renderLayerNode(res.tree, 0);
-      bindLayerClicks(sessionId);
-    } catch (_) {
-      container.innerHTML = '<div class="sidebar-empty">Error</div>';
+      // Prefer inlined boot payload on first paint — same tree shape.
+      var cachedTree = consumeBootSection(sessionId, 'tree');
+      if (cachedTree) {
+        container.innerHTML = renderLayerNode(cachedTree, 0);
+        bindLayerClicks(sessionId);
+        return;
+      }
+      try {
+        var res = await api('/platform/api/scene/tree?sceneId=' + encodeURIComponent(sessionId));
+        if (!res.ok || !res.tree) {
+          container.innerHTML = '<div class="sidebar-empty">Failed to load</div>';
+          return;
+        }
+        container.innerHTML = renderLayerNode(res.tree, 0);
+        bindLayerClicks(sessionId);
+      } catch (_) {
+        container.innerHTML = '<div class="sidebar-empty">Error</div>';
+      }
+    } finally {
+      _refreshTreeInFlight = false;
     }
   }
 
@@ -91,9 +115,20 @@
       '<span class="layer-badge">' + escape(rawName) + '</span>';
 
     // Text preview inline (absorbed from child or own text).
-    var textEl = absorbedText
-      ? '<span class="layer-text">“' + escape(absorbedText.slice(0, 24)) + (absorbedText.length > 24 ? '…' : '') + '”</span>'
-      : '';
+    // Suppress when the preview would just repeat the row's name —
+    // happens when an HTML import auto-names a frame after its single
+    // text child, so both name and badge spell the same word.
+    var textEl = '';
+    if (absorbedText) {
+      var nameNorm = displayName.toLowerCase().trim();
+      var textNorm = absorbedText.toLowerCase().trim();
+      var isRedundant = nameNorm === textNorm
+        || nameNorm.indexOf(textNorm) === 0
+        || textNorm.indexOf(nameNorm) === 0;
+      if (!isRedundant) {
+        textEl = '<span class="layer-text">“' + escape(absorbedText.slice(0, 24)) + (absorbedText.length > 24 ? '…' : '') + '”</span>';
+      }
+    }
 
     var html = '<div class="layer-item" data-layer-node="' + escape(node.id) + '" style="padding-left:' + (4 + indent) + 'px">' +
       toggleIcon +
@@ -112,7 +147,27 @@
     return html;
   }
 
+  // Keep LAYERS highlight in sync with state.selection.inode — fires
+  // when selection changes from ANY source (canvas click, macro-toolbar
+  // selection, persisted-state boot). Without this, clicking on the
+  // canvas highlights nothing in LAYERS because the click path never
+  // reaches bindLayerClicks' own listener (that's LAYERS-only).
+  function highlightLayerBySelection() {
+    var active = state && state.selection && state.selection.inode;
+    $$('[data-layer-node]').forEach(function(el) {
+      var match = !!active && el.getAttribute('data-layer-node') === active;
+      el.classList.toggle('selected', match);
+    });
+  }
+  if (!window.__reframeLayersSelectionBound) {
+    window.__reframeLayersSelectionBound = true;
+    window.addEventListener('reframe:ui-state-changed', highlightLayerBySelection);
+  }
+
   function bindLayerClicks(sessionId) {
+    // Highlight the current selection right after the list re-renders
+    // (the innerHTML swap wipes the .selected class).
+    highlightLayerBySelection();
     $$('[data-layer-node]').forEach(function(el) {
       el.addEventListener('click', function(e) {
         // If click was on the toggle arrow → expand/collapse, don't select.
@@ -132,6 +187,7 @@
         state.selection.inode = nodeId;
         state.selection.tag = '';
         state.selection.bbox = null;
+        try { persistUiState(); } catch (_) {}
         var m = state.measurements.get(nodeId);
         if (m) {
           state.selection.bbox = m.bbox;
@@ -276,7 +332,7 @@
     overlay.className = 'brand-browser show';
     overlay.setAttribute('data-testid', 'brand-browser');
     var cardsHtml = brands.length === 0
-      ? '<div style="padding:40px;text-align:center;color:var(--text-tertiary)">No brands registered. Use reframe_design to load one.</div>'
+      ? '<div style="grid-column:1/-1;padding:40px;text-align:center;color:var(--text-tertiary)">No brands registered. Use reframe_design to load one.</div>'
       : brands.map(function(b) {
           return '<button class="brand-card" data-brand-slug="' + escape(b.slug || b.name || '') + '">' +
             '<div class="brand-name">' + escape(b.name || b.slug || '?') + '</div>' +

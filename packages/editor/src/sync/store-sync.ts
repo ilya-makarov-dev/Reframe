@@ -94,6 +94,16 @@ export class StoreSync {
    * Called when SSE reports scene:session-changed from an external source.
    */
   async pullFromMCP(sceneId: string, revision?: number): Promise<void> {
+    // Cross-scene render hijack guard: the SSE `scene:session-changed`
+    // event fires for ANY scene touched in the project (another tab,
+    // agent editing a variant, MCP tool call on a sibling), not just
+    // the one currently displayed on this canvas. Without this gate,
+    // loadFromReframeGraph below replaces the live canvas's graph with
+    // whatever scene the SSE mentioned — the user watches their scene
+    // morph into a different one. Only pull when the event is about
+    // the scene we're actively syncing.
+    if (this.currentSceneId && sceneId !== this.currentSceneId) return;
+
     // Skip if we caused this revision (echo suppression)
     if (revision != null && this.selfCausedRevisions.has(revision)) {
       this.selfCausedRevisions.delete(revision);

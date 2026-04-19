@@ -976,6 +976,24 @@ export function deserializeScene(scene: SceneJSON): {
   // Restore timeline
   const timeline = scene.timeline ? deserializeTimeline(scene.timeline) : undefined;
 
+  // CANVAS-wrapper unwrap: scenes saved by the variant generator (and
+  // some older import paths) serialize as `CANVAS "Page 1" 100×100` →
+  // `FRAME 1440×Ntall`. The CANVAS is just a page container — it never
+  // carries meaningful dimensions — so audit/export/inspect that look
+  // at `graph.getNode(rootId)` read 100×100 and flag the child as
+  // overflowing its parent by thousands of pixels, and exporter writes
+  // no body background because CANVAS has no fills. Promote the first
+  // FRAME child to be the "logical" rootId when the declared root is a
+  // CANVAS with a single frame child. Graph topology is unchanged — we
+  // just hand the FRAME back to callers instead of the empty wrapper.
+  const rawRoot = graph.getNode(rootId);
+  if (rawRoot && rawRoot.type === 'CANVAS' && rawRoot.childIds.length === 1) {
+    const onlyChild = graph.getNode(rawRoot.childIds[0]);
+    if (onlyChild && (onlyChild.type === 'FRAME' || onlyChild.type === 'COMPONENT')) {
+      return { graph, rootId: onlyChild.id, timeline };
+    }
+  }
+
   return { graph, rootId, timeline };
 }
 
