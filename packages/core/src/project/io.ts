@@ -52,6 +52,13 @@ import { ProjectGraph } from './project-graph.js';
 // ─── Paths ───────────────────────────────────────────────────
 
 function reframeDir(projectDir: string): string {
+  // Accept either the project root (which CONTAINS .reframe/) or the
+  // .reframe/ directory itself. Callers commonly pass the latter when they
+  // navigate via cwd — appending .reframe/.reframe/ is never what they want.
+  // We also accept a path that already points directly at project.json.
+  const base = path.basename(projectDir);
+  if (base === '.reframe') return projectDir;
+  if (base === 'project.json') return path.dirname(projectDir);
   return path.join(projectDir, '.reframe');
 }
 
@@ -710,6 +717,7 @@ export async function compileHtmlIntoProject(
     width,
     height,
     stableIds: options.stableIds !== false,
+    projectDir,
   });
 
   // Decide on the slug ahead of saveScene so source HTML and scene file share

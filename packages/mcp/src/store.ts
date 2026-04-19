@@ -259,11 +259,16 @@ export function listScenes(): Array<{
     const age = ageSec < 60 ? `${ageSec}s` : `${Math.round(ageSec / 60)}m`;
     const root = s.graph.getNode(s.rootId);
     const displayName = (root?.name && root.name.trim()) ? root.name : s.name;
+    // Read live dimensions from the graph. Edits (resize, update on root)
+    // mutate the node but not the cached StoredScene.width/height — trusting
+    // the cache leaves /api/scenes reporting 100×100 long after a resize.
+    const w = Math.round(root?.width ?? s.width);
+    const h = Math.round(root?.height ?? s.height);
     return {
       id,
       slug: s.slug,
       name: displayName,
-      size: `${s.width}×${s.height}`,
+      size: `${w}×${h}`,
       nodes: s.nodeCount,
       age,
     };

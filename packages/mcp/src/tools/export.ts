@@ -400,11 +400,31 @@ export async function handleExport(input: {
           const pngPath = join(pngExportDir, `${pngSlug}.png`);
           writeFileSync(pngPath, pngBytes);
 
+          const w = Math.ceil(graph.getNode(rootId)!.width * (input.scale ?? 1));
+          const h = Math.ceil(graph.getNode(rootId)!.height * (input.scale ?? 1));
+          const text = `PNG exported → ${pngPath} (${pngBytes.length} bytes, ${w}×${h}px)`;
+
+          // Return the rendered image inline as an MCP image content block
+          // when it's small enough. This lets multimodal agents SEE the
+          // result of their design pass in the tool response, without a
+          // separate Read call. We cap at 1.5 MB — larger payloads are left
+          // as a file-path reference the caller can open itself.
+          const INLINE_LIMIT = 1_500_000;
+          if (pngBytes.length <= INLINE_LIMIT) {
+            // Convert Uint8Array → base64 without blowing the node stack
+            // on large buffers. Buffer.from is zero-copy over the same
+            // underlying memory; toString('base64') streams the encoding.
+            const base64 = Buffer.from(pngBytes.buffer, pngBytes.byteOffset, pngBytes.byteLength).toString('base64');
+            return {
+              content: [
+                { type: 'image' as const, data: base64, mimeType: 'image/png' },
+                { type: 'text' as const, text },
+              ],
+            };
+          }
+
           return {
-            content: [{
-              type: 'text' as const,
-              text: `PNG exported → ${pngPath} (${pngBytes.length} bytes, ${Math.ceil(graph.getNode(rootId)!.width * (input.scale ?? 1))}×${Math.ceil(graph.getNode(rootId)!.height * (input.scale ?? 1))}px)`,
-            }],
+            content: [{ type: 'text' as const, text: `${text}\n(image omitted — ${pngBytes.length} bytes exceeds ${INLINE_LIMIT} inline limit)` }],
           };
         } catch (pngErr: any) {
           return makeToolJsonErrorResult(

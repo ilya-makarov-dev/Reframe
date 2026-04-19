@@ -641,6 +641,29 @@ function computeGridLayout(graph: SceneGraph, frame: SceneNode): void {
     : Array.from({ length: numRows }, () => ({ type: 'FR' as const, value: 1 }));
   const rowSizes = resolveGridTracks(defaultRowTracks, contentH, rowGap, children.length);
 
+  // Grow the container to fit its grid tracks when the tracks demand more
+  // height than the container currently has. Without this, FIXED row
+  // tracks like `grid-template-rows: 200px 240px 200px` would compute
+  // their full sizes but a pre-grid HUG pass may have pinned the frame
+  // height at something smaller (Yoga computed from a single child
+  // before the grid routed them into multiple rows). The grid's
+  // intrinsic height is the authoritative size once FIXED tracks exist;
+  // we only ever grow, never shrink, so a caller that explicitly
+  // oversized the container keeps its extra space.
+  const rowsTotal = rowSizes.reduce((s, v) => s + v, 0);
+  const intrinsicH = rowsTotal + rowGap * Math.max(rowSizes.length - 1, 0) + padT + padB;
+  if (intrinsicH > frame.height + 0.5) {
+    graph.updateNode(frame.id, {
+      height: intrinsicH,
+      // Pin sizing so a post-layout Yoga pass on an ancestor doesn't
+      // try to shrink us back to the stale HUG value.
+      primaryAxisSizing: 'FIXED',
+    });
+    // The field reads below use the same frame object; refresh its
+    // height so subsequent `padT + rowOffsets[]` math is consistent.
+    (frame as any).height = intrinsicH;
+  }
+
   // Compute x offsets for each column
   const colOffsets: number[] = [0];
   for (let i = 0; i < colSizes.length - 1; i++) {
@@ -703,6 +726,25 @@ function computeGridLayout(graph: SceneGraph, frame: SceneNode): void {
     // pre-grid estimates). Walk each cell's descendants and update any child
     // whose width exceeds its now-resized parent.
     propagateGridCellWidths(graph, child, w, h);
+
+    // Re-run the cell's own layout so its children get positioned inside
+    // the freshly resolved cell rectangle. Without this, every cell's
+    // VERTICAL/HORIZONTAL flex children kept the (0,0) positions baked
+    // in by the pre-grid Yoga pass — a 4-cell bento with 3 stacked items
+    // per cell rendered as one big pile at the top-left of each cell.
+    // We pin FIXED sizing on the cell first because Yoga would otherwise
+    // HUG the cell back to its content height and undo the grid's track
+    // allocation (a 200px row hosting a 48px button would collapse back
+    // to 48px, breaking row alignment across the grid).
+    if (child.layoutMode && child.layoutMode !== 'NONE') {
+      graph.updateNode(child.id, {
+        primaryAxisSizing: 'FIXED',
+        counterAxisSizing: 'FIXED',
+      });
+      // Re-fetch after updates so computeLayout sees final dims.
+      const finalCell = graph.getNode(child.id);
+      if (finalCell) computeLayout(graph, finalCell.id);
+    }
   }
 }
 

@@ -414,6 +414,19 @@ export function colorInPalette(tolerance = 0.05): AuditRule {
       if (!match) {
         const current = `rgb(${r255(c.r)},${r255(c.g)},${r255(c.b)})`;
         const closest = findClosestPaletteColor(c, ctx.designSystem!.colors!.roles);
+        // Only recommend a palette replacement when the off-palette color
+        // is visually NEAR an existing token. Semantic signals (red
+        // #ea4444 for "urgent", orange #f2994a for "high priority") that
+        // sit far from every palette entry shouldn't be silently
+        // rewritten to the closest gray — that destroys intent. We cap
+        // the suggestable distance at 3× the match threshold; beyond
+        // that we still flag the color but omit `fix` so auto-fix
+        // leaves it alone. Authors can expand the palette explicitly.
+        let suggestFix = false;
+        if (closest?.color) {
+          const d = deltaE(closest.color, c);
+          suggestFix = d <= deltaEThreshold * 3;
+        }
         issues.push({
           rule: 'color-in-palette',
           severity: 'info',
@@ -421,7 +434,9 @@ export function colorInPalette(tolerance = 0.05): AuditRule {
           nodeId: node.id,
           nodeName: node.name,
           path: ctx.path,
-          fix: closest ? { property: 'color', current, suggested: `${closest.hex} (${closest.role})`, css: `color: ${closest.hex}` } : undefined,
+          fix: closest && suggestFix
+            ? { property: 'color', current, suggested: `${closest.hex} (${closest.role})`, css: `color: ${closest.hex}` }
+            : undefined,
         });
       }
     }
@@ -468,22 +483,55 @@ export function contrastMinimum(minRatio = 4.5): AuditRule {
   });
 }
 
-/** Walk up all ancestors to find nearest solid background fill. */
+/**
+ * Walk up all ancestors and composite every semi-transparent layer onto
+ * the next opaque background we find. A very common design pattern is a
+ * card drawn with `rgba(255,255,255,0.03)` sitting on a `#0a0a0f` page —
+ * treating the card's fill as solid white gave a 1:1 contrast ratio
+ * against white-ish text and flooded the audit with bogus warnings even
+ * though the text visually reads against the near-black root.
+ */
 function findNearestBackground(node: INode, ctx: AuditContext): { r: number; g: number; b: number } | null {
-  // Walk ancestors from nearest (parent) to farthest (root)
+  const getOpaqueSolid = (n: INode): ISolidPaint | null => {
+    const fills = n.fills;
+    if (!fills || fills === MIXED) return null;
+    return ((fills as IPaint[]).find(f => f.type === 'SOLID' && f.visible !== false) as ISolidPaint | undefined) ?? null;
+  };
+
+  const over = (fg: ISolidPaint, bgColor: { r: number; g: number; b: number }) => {
+    const a = typeof fg.opacity === 'number' ? fg.opacity : 1;
+    return {
+      r: Math.round(fg.color.r * a + bgColor.r * (1 - a)),
+      g: Math.round(fg.color.g * a + bgColor.g * (1 - a)),
+      b: Math.round(fg.color.b * a + bgColor.b * (1 - a)),
+    };
+  };
+
+  const stack: ISolidPaint[] = [];
   for (let i = ctx.ancestors.length - 1; i >= 0; i--) {
-    const ancestor = ctx.ancestors[i];
-    const fills = ancestor.fills;
-    if (fills && fills !== MIXED) {
-      const bg = (fills as IPaint[]).find(f => f.type === 'SOLID' && f.visible !== false) as ISolidPaint | undefined;
-      if (bg?.color) return bg.color;
+    const s = getOpaqueSolid(ctx.ancestors[i]);
+    if (!s) continue;
+    const a = typeof s.opacity === 'number' ? s.opacity : 1;
+    stack.push(s);
+    if (a >= 0.999) break;   // opaque — we can stop walking
+  }
+  // Anchor — either the last (opaque) fill or the root's bg.
+  let base: { r: number; g: number; b: number } | null = null;
+  if (stack.length && (typeof stack[stack.length - 1].opacity !== 'number' || stack[stack.length - 1].opacity! >= 0.999)) {
+    base = stack.pop()!.color;
+  } else {
+    const rootBg = getOpaqueSolid(ctx.root);
+    if (rootBg) {
+      base = rootBg.color;
     }
   }
-  // Fall back to root background
-  const rootFills = ctx.root.fills;
-  if (!rootFills || rootFills === MIXED) return null;
-  const rootBg = (rootFills as IPaint[]).find(f => f.type === 'SOLID' && f.visible !== false) as ISolidPaint | undefined;
-  return rootBg?.color ?? null;
+  if (!base) return null;
+
+  // Composite remaining semi-transparent layers from far → near over base.
+  while (stack.length) {
+    base = over(stack.pop()!, base);
+  }
+  return base;
 }
 
 // ── Hidden Nodes ──
@@ -667,6 +715,14 @@ export function containerUnderflow(): AuditRule {
       // Skip absolute-positioned and zero-size children.
       if ((c as any).layoutPositioning === 'ABSOLUTE') return false;
       if (cw <= 0 && ch <= 0) return false;
+      // TEXT children that overflow a fixed-width container are almost
+      // always author intent (monogram badge, clipped glyph in an avatar
+      // circle). The parent sets its own width explicitly; the text
+      // centers and overflows on purpose — usually with overflow:hidden
+      // implied by the visual design. Cascade-failure parents collapse
+      // around FRAMES that should have stretched; they don't typically
+      // contain a lone text glyph. Skip TEXT children from this signal.
+      if ((c as any).type === 'TEXT') return false;
       // A child wider than its parent in the relevant axis is the
       // unmistakable signature of cascade failure.
       return cw > w + tolerance;
@@ -1786,14 +1842,34 @@ export function semanticCtaContrast(minRatio = 4.5): AuditRule {
     ) as ISolidPaint | undefined;
     if (!labelFill?.color) return [];
 
-    // Button's own background (preferred) or nearest ancestor with fill
+    // Button's own background (preferred) or nearest ancestor with fill.
+    // If the own fill is semi-transparent (e.g. `rgba(255,255,255,0.03)`
+    // ghost buttons), composite it onto the ancestor background so the
+    // ratio reflects what the eye actually sees — otherwise the audit
+    // sees "white on white" and falsely flags well-contrasted ghost CTAs.
     let bgColor: { r: number; g: number; b: number } | null = null;
     const ownFills = node.fills;
     if (ownFills && ownFills !== MIXED) {
       const own = (ownFills as IPaint[]).find(
         f => f.type === 'SOLID' && f.visible !== false,
       ) as ISolidPaint | undefined;
-      if (own?.color) bgColor = own.color;
+      if (own?.color) {
+        const a = typeof own.opacity === 'number' ? own.opacity : 1;
+        if (a < 0.999) {
+          const ancestor = findNearestBackground(node, ctx);
+          if (ancestor) {
+            bgColor = {
+              r: Math.round(own.color.r * a + ancestor.r * (1 - a)),
+              g: Math.round(own.color.g * a + ancestor.g * (1 - a)),
+              b: Math.round(own.color.b * a + ancestor.b * (1 - a)),
+            };
+          } else {
+            bgColor = own.color;
+          }
+        } else {
+          bgColor = own.color;
+        }
+      }
     }
     if (!bgColor) {
       bgColor = findNearestBackground(node, ctx);
@@ -2155,12 +2231,12 @@ function styleToWeight(style: string): number {
   return 400;
 }
 
-/** Find the closest palette color to a given RGB color. Returns role name + hex. */
+/** Find the closest palette color to a given RGB color. Returns role name + hex + parsed RGB. */
 function findClosestPaletteColor(
   c: { r: number; g: number; b: number },
   roles: Map<string, string>,
-): { role: string; hex: string } | null {
-  let best: { role: string; hex: string } | null = null;
+): { role: string; hex: string; color: { r: number; g: number; b: number } } | null {
+  let best: { role: string; hex: string; color: { r: number; g: number; b: number } } | null = null;
   let bestDist = Infinity;
 
   for (const [role, hex] of roles) {
@@ -2173,7 +2249,7 @@ function findClosestPaletteColor(
     const dist = Math.sqrt((c.r - pr) ** 2 + (c.g - pg) ** 2 + (c.b - pb) ** 2);
     if (dist < bestDist) {
       bestDist = dist;
-      best = { role, hex };
+      best = { role, hex, color: { r: pr, g: pg, b: pb } };
     }
   }
   return best;

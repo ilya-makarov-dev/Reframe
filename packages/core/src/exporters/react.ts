@@ -794,6 +794,39 @@ function toPascalCase(s: string): string {
 
 // ─── Node Rendering ───────────────────────────────────────────
 
+/**
+ * Decide the HTML tag for a node. The importer stamps `meta.sourceTag`
+ * and `semanticRole` on every imported element, and honoring those here
+ * turns `<button>Deploy</button>` into a real React `<button>` instead
+ * of a styled `<div>`. Accessibility audits, screen readers, keyboard
+ * focus, and form submission all depend on this being right.
+ */
+function tagForNode(node: INode): { tag: string; attrs: string } {
+  const role = (node as any).semanticRole as string | undefined;
+  const sourceTag = ((node as any).meta?.sourceTag as string | undefined) ?? '';
+  const href = (node as any).href as string | undefined;
+
+  // Interactive / semantic leaf tags first — they carry attributes too.
+  if (role === 'link' || sourceTag === 'a') {
+    const hrefAttr = href ? ` href="${href.replace(/"/g, '&quot;')}"` : '';
+    return { tag: 'a', attrs: hrefAttr };
+  }
+  if (role === 'button' || sourceTag === 'button') {
+    return { tag: 'button', attrs: ' type="button"' };
+  }
+
+  // Sectioning / landmark tags from raw source.
+  const passthrough = new Set([
+    'nav', 'header', 'footer', 'main', 'section', 'article', 'aside',
+    'figure', 'figcaption', 'blockquote', 'ul', 'ol', 'li',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'p', 'label', 'pre', 'code',
+  ]);
+  if (passthrough.has(sourceTag)) return { tag: sourceTag, attrs: '' };
+
+  return { tag: '', attrs: '' };
+}
+
 function renderNode(
   node: INode, isRoot: boolean, indentSize: number, depth: number,
   useCssModules: boolean, cssClasses: Map<string, Record<string, string | number>>,
@@ -849,32 +882,47 @@ function renderNode(
     return `${pad}<img src="${src}" alt="${escapeJsx(alt)}" ${styleAttr} />`;
   }
 
-  // Text node
+  // VECTOR with preserved raw SVG — emit via dangerouslySetInnerHTML so
+  // the original `<linearGradient>` / `<path>` / attribute casing makes
+  // it to the DOM intact. JSX doesn't accept kebab-cased SVG attrs
+  // directly, so string passthrough is the pragmatic fidelity win.
+  const rawSvg = (node as any).meta?.svgMarkup as string | undefined;
+  if (node.type === NodeType.Vector && rawSvg) {
+    const escaped = rawSvg.replace(/`/g, '\\`').replace(/\$/g, '\\$');
+    return `${pad}<div ${styleAttr} dangerouslySetInnerHTML={{ __html: \`${escaped}\` }} />`;
+  }
+
+  const semantic = tagForNode(node);
+
+  // Text node — keep as leaf but honor headings/paragraphs/labels.
   if (node.type === NodeType.Text) {
     const text = escapeJsx(node.characters ?? '');
+    const textTag = semantic.tag && /^(h[1-6]|p|label|a|button|code|li|blockquote)$/.test(semantic.tag)
+      ? semantic.tag
+      : 'span';
+    const attrs = textTag === semantic.tag ? semantic.attrs : '';
     if (text.includes('\n')) {
       const lines = text.split('\n');
       const content = lines.map((l, i) => i < lines.length - 1 ? `${l}<br />` : l).join(`\n${pad}  `);
-      return `${pad}<span ${styleAttr}>\n${pad}  ${content}\n${pad}</span>`;
+      return `${pad}<${textTag} ${styleAttr}${attrs}>\n${pad}  ${content}\n${pad}</${textTag}>`;
     }
-    return `${pad}<span ${styleAttr}>${text}</span>`;
+    return `${pad}<${textTag} ${styleAttr}${attrs}>${text}</${textTag}>`;
   }
 
-  // Ellipse → rounded div
-  // Vector/other leaf → empty div
-
-  // Container / shape
+  // Container / shape — pick a semantic tag when the importer recorded one.
+  const containerTag = semantic.tag || 'div';
+  const containerAttrs = semantic.tag ? semantic.attrs : '';
   const children = (node.children ?? []).filter(c => !c.removed && c.visible !== false);
 
   if (children.length === 0) {
-    return `${pad}<div ${styleAttr} />`;
+    return `${pad}<${containerTag} ${styleAttr}${containerAttrs} />`;
   }
 
   const childJsx = children
     .map(c => renderNode(c, false, indentSize, depth + 1, useCssModules, cssClasses, genClassName, useImages, behaviorClassMap, phase3ByNode))
     .join('\n');
 
-  return `${pad}<div ${styleAttr}>\n${childJsx}\n${pad}</div>`;
+  return `${pad}<${containerTag} ${styleAttr}${containerAttrs}>\n${childJsx}\n${pad}</${containerTag}>`;
 }
 
 // ─── Style Computation ────────────────────────────────────────

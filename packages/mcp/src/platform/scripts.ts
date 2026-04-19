@@ -18,10 +18,25 @@
  * shipped npm package keeps working.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 // `__dirname` is a CommonJS built-in — the package compiles to CJS, so
 // this resolves to the directory containing the compiled scripts.js,
 // which is also where copy-platform-assets.mjs drops platform-ui.js.
-export const PLATFORM_JS = readFileSync(join(__dirname, 'platform-ui.js'), 'utf-8');
+// When running under tsx (dev / tests), __dirname points at the .ts
+// source dir where the bundle hasn't been written yet; fall back to
+// the dist-side copy so tests don't need a full npm build first.
+function loadPlatformJs(): string {
+  const candidates = [
+    join(__dirname, 'platform-ui.js'),
+    // tsx — from packages/mcp/src/platform/ back to dist/mcp/src/platform/
+    resolve(__dirname, '../../dist/mcp/src/platform/platform-ui.js'),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return readFileSync(p, 'utf-8');
+  }
+  throw new Error(`platform-ui.js not found. Searched: ${candidates.join(', ')}. Run \`npm run build\` in packages/mcp first.`);
+}
+
+export const PLATFORM_JS = loadPlatformJs();

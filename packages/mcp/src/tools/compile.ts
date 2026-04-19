@@ -34,6 +34,7 @@ import { buildInspectAuditRules } from '../../../core/src/inspect-audit-rules.js
 import { runAutoFixLoop } from './_auto-fix.js';
 import { exportSvgFromGraph } from '../engine.js';
 import { storeScene, getScene, resaveScene, getExportsBaseDir, getWorkspaceRoot, getReframeDir } from '../store.js';
+import { renderPreview } from './_preview.js';
 import { autoSaveScene } from './project.js';
 import { getSession } from '../session.js';
 import { MCP_LIMITS } from '../limits.js';
@@ -108,6 +109,11 @@ export const compileInputSchema = {
   aiClassify: z.boolean().optional().default(false).describe('Use AI (LLM) for semantic role classification. Falls back to heuristic if unavailable.'),
 
   layoutBackend: z.enum(['yoga', 'taffy']).optional().default('yoga').describe('Layout engine: yoga (default, mature flexbox) or taffy (Rust, spec-faithful CSS Grid). Taffy requires yoga-layout-taffy npm package.'),
+
+  preview: z.boolean().optional().default(true).describe(
+    'Return an inline PNG preview of the primary compiled scene alongside the text report. '
+    + 'Set false for multi-size / batch compiles where the preview payload is not worth the bytes.',
+  ),
 };
 
 // ─── Types ────────────────────────────────────────────────────
@@ -150,6 +156,7 @@ interface CompileInput {
   exports?: Array<'html' | 'svg' | 'react' | 'png' | 'pdf'>;
   aiClassify?: boolean;
   layoutBackend?: 'yoga' | 'taffy';
+  preview?: boolean;
 }
 
 // ─── Handler ──────────────────────────────────────────────────
@@ -502,17 +509,22 @@ export async function handleCompile(input: CompileInput) {
         }
       } else {
         // ── HTML PATH ──────────────────────────────────────
-        // When the caller explicitly passed sizes[] (multi-size compile), we
-        // treat the per-size width/height as a hard override on the root —
-        // otherwise inline `style="width:1440px"` on the source div wins and
-        // every size collapses to 1440. forceRootSize off means HTML import
-        // controls dimensions naturally for single-size calls.
+        // When the caller explicitly passed sizes[] (multi-size compile),
+        // OR passed top-level width/height on the compile call, we treat
+        // those as a HARD override on the root node. Without this the
+        // HTML's inline `style="width:1440px"` ALWAYS wins — so a user
+        // who calls `reframe_compile({ width: 1920 })` expecting a
+        // 1920-wide render gets a 1440 scene with the HTML's own
+        // wrapper dimensions. Explicit intent from the caller is the
+        // stronger signal; the inline width is a default that the
+        // caller overrides by asking for a different viewport.
         const isMultiSize = Array.isArray(input.sizes) && input.sizes.length > 0;
+        const hasExplicitViewport = typeof input.width === 'number' || typeof input.height === 'number';
         const importResult = await importFromHtml(input.html!, {
           name: input.name,
           width: size.width || undefined,
           height: size.height || undefined,
-          forceRootSize: isMultiSize,
+          forceRootSize: isMultiSize || hasExplicitViewport,
           // Phase 1 round-trip: deterministic h:<hash> ids derived from DOM path.
           // Re-compiling the same source HTML yields the same node ids, so
           // reframe_edit operations survive source edits — the whole point of
@@ -857,7 +869,24 @@ export async function handleCompile(input: CompileInput) {
   sections.push('');
   sections.push(`Next: reframe_inspect({ sceneId: "${sceneIds[0]}" })`);
 
-  return { content: [{ type: 'text' as const, text: sections.join('\n') }] };
+  const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: 'image/png' }> =
+    [{ type: 'text', text: sections.join('\n') }];
+
+  // Inline PNG of the primary compiled scene so multimodal agents can see
+  // what they just imported without an extra reframe_export round-trip.
+  // Multi-size compiles preview the first size only to keep payloads small.
+  if (input.preview !== false && sceneIds.length > 0) {
+    const primaryId = sceneIds[0];
+    const primary = getScene(primaryId);
+    if (primary) {
+      try {
+        const image = await renderPreview(primary.graph, primary.rootId);
+        if (image) content.push(image);
+      } catch { /* additive — never block compile on preview failure */ }
+    }
+  }
+
+  return { content };
 }
 
 // ─── Brand DESIGN.md loader ──────────────────────────────────
@@ -870,20 +899,40 @@ const BRAND_ALIASES: Record<string, string> = {
 /** Fetch DESIGN.md by brand slug via npx getdesign. Caches in project .reframe/brands/. */
 export async function loadBrandDesignMd(brand: string): Promise<string | null> {
   const brandKey = BRAND_ALIASES[brand.toLowerCase()] ?? brand.toLowerCase();
+
+  // Check cache at BOTH possible locations:
+  //   - workspace-rooted (compile time has resolved cwd)
+  //   - getReframeDir-rooted (MCP sidecar may have a different cwd than the
+  //     workspace root, in which case these diverge — previously the cache
+  //     miss would force an npx fetch even though the file was on disk)
+  const candidates = [
+    join(getWorkspaceRoot(), '.reframe', 'brands', brandKey, 'DESIGN.md'),
+    join(getReframeDir(), 'brands', brandKey, 'DESIGN.md'),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      const content = readFileSync(p, 'utf-8');
+      // Guard: a 0-byte or whitespace-only file is treated as a corrupted
+      // cache entry — fall through to re-fetch rather than returning empty
+      // content that confuses downstream parsers.
+      if (content.trim().length > 0) return content;
+    }
+  }
+
+  // Fetch via npm. Writes to workspace-rooted cache (authoritative).
   const outDir = join(getWorkspaceRoot(), '.reframe', 'brands', brandKey);
   const outFile = join(outDir, 'DESIGN.md');
-
-  // Cached locally in project
-  if (existsSync(outFile)) return readFileSync(outFile, 'utf-8');
-
-  // Fetch via npm
   try {
     mkdirSync(outDir, { recursive: true });
     execSync(`npx getdesign add ${brandKey} --out "${outFile}"`, {
       timeout: 30000,
       stdio: 'pipe',
+      shell: process.platform === 'win32' ? true : undefined as any,
     });
-    if (existsSync(outFile)) return readFileSync(outFile, 'utf-8');
+    if (existsSync(outFile)) {
+      const content = readFileSync(outFile, 'utf-8');
+      if (content.trim().length > 0) return content;
+    }
   } catch {}
 
   return null;

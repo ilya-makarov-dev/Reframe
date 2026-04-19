@@ -74,33 +74,99 @@ export async function handleDesign(input: {
 // ─── List ─────────────────────────────────────────────────────
 
 async function handleList(search?: string) {
+  // Always collect locally-cached brands first. On Windows the `npx
+  // getdesign list` subprocess regularly hangs in the cmd.exe shim
+  // (spawnSync ETIMEDOUT), and even when it works, the user's own
+  // previously-extracted brands are the ones they're most likely to
+  // reference next — listing them is the actually-valuable answer.
+  const cachedBrands = readCachedBrandList();
+
+  let remoteLines: string[] = [];
+  let remoteError: string | null = null;
   try {
-    const raw = execSync('npx getdesign list', { timeout: 30000, stdio: 'pipe' }).toString();
-    let lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0 && !l.startsWith('npm'));
-
-    const allLines = [...lines];
-
-    if (search) {
-      const q = search.toLowerCase();
-      lines = lines.filter(l => l.toLowerCase().includes(q));
-    }
-
-    if (lines.length === 0 && search) {
-      // No match — show all brands so agent can pick
-      const slugs = allLines.map(l => l.split(' ')[0]).filter(Boolean);
-      return { content: [{ type: 'text' as const, text:
-        `No brands matching "${search}". Pick from all ${allLines.length} available:\n\n` +
-        allLines.join('\n') +
-        '\n\nUsage: reframe_design({ action: "extract", brand: "<slug>" })',
-      }] };
-    }
-
-    const header = `Available brands (${lines.length}${search ? ` matching "${search}"` : ''}):\n`;
-    const hint = '\n\nUsage: reframe_design({ action: "extract", brand: "<slug>" })';
-
-    return { content: [{ type: 'text' as const, text: header + lines.join('\n') + hint }] };
+    // shell: true is the difference between "works everywhere" and
+    // "hangs on Windows for 30 s" — npx resolves to npx.cmd there and
+    // needs the shell wrapper to locate it. Keep the timeout short so a
+    // network stall doesn't block the whole tool call.
+    const raw = execSync('npx getdesign list', {
+      timeout: 15000,
+      stdio: 'pipe',
+      shell: process.platform === 'win32' ? true : undefined as any,
+    }).toString();
+    remoteLines = raw.split(/\r?\n/).filter(l => l.trim().length > 0 && !l.startsWith('npm'));
   } catch (err: any) {
-    return makeToolJsonErrorResult(`Failed to list brands: ${err.message}`, 'BRAND_LIST_FAILED');
+    remoteError = err?.message ?? String(err);
+  }
+
+  // Merge cached + remote, deduping by slug (first token on each line).
+  const byKey = new Map<string, string>();
+  for (const line of cachedBrands) byKey.set(slugOf(line), line);
+  for (const line of remoteLines) {
+    const k = slugOf(line);
+    if (!byKey.has(k)) byKey.set(k, line);
+  }
+  let lines = [...byKey.values()];
+
+  const allLines = [...lines];
+
+  if (search) {
+    const q = search.toLowerCase();
+    lines = lines.filter(l => l.toLowerCase().includes(q));
+  }
+
+  if (allLines.length === 0) {
+    // Both sources empty. Only now is this a hard failure.
+    return makeToolJsonErrorResult(
+      `Failed to list brands${remoteError ? `: ${remoteError}` : ''}. No cached brands in .reframe/brands/ either.`,
+      'BRAND_LIST_FAILED',
+    );
+  }
+
+  if (lines.length === 0 && search) {
+    return { content: [{ type: 'text' as const, text:
+      `No brands matching "${search}". Pick from all ${allLines.length} available:\n\n` +
+      allLines.join('\n') +
+      '\n\nUsage: reframe_design({ action: "extract", brand: "<slug>" })',
+    }] };
+  }
+
+  const sourceNote = remoteError
+    ? ` (npx getdesign unavailable — listing cached brands only)`
+    : cachedBrands.length > 0
+      ? ` (${cachedBrands.length} cached + registry)`
+      : '';
+  const header = `Available brands (${lines.length}${search ? ` matching "${search}"` : ''}${sourceNote}):\n`;
+  const hint = '\n\nUsage: reframe_design({ action: "extract", brand: "<slug>" })';
+
+  return { content: [{ type: 'text' as const, text: header + lines.join('\n') + hint }] };
+}
+
+function slugOf(line: string): string {
+  return (line.split(/\s+/)[0] ?? line).toLowerCase();
+}
+
+/**
+ * Enumerate `.reframe/brands/<slug>/DESIGN.md` entries so list never fails
+ * on a machine where `npx getdesign` is flaky — the user's already-loaded
+ * brands are always available.
+ */
+function readCachedBrandList(): string[] {
+  try {
+    const brandsDir = join(getReframeDir(), 'brands');
+    if (!existsSync(brandsDir)) return [];
+    const { readdirSync, statSync } = require('fs') as typeof import('fs');
+    const out: string[] = [];
+    for (const slug of readdirSync(brandsDir)) {
+      const sub = join(brandsDir, slug);
+      try {
+        if (!statSync(sub).isDirectory()) continue;
+        if (!existsSync(join(sub, 'DESIGN.md'))) continue;
+        out.push(slug);
+      } catch { /* skip unreadable entries */ }
+    }
+    return out.sort();
+  } catch {
+    return [];
   }
 }
 

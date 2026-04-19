@@ -533,6 +533,17 @@ export function exportToHtml(
     // failure in the SVG generator doesn't take down the whole
     // export — graceful fallback is important for first-run stability.
     if (svgDecorations && !isRoot) {
+      // Raw SVG passthrough — the importer preserved the exact SVG
+      // markup on VECTOR nodes that came from `<svg>` sources, so we
+      // can emit it back 1:1. This is the only path that correctly
+      // renders complex icons with `<linearGradient>`, `<path>`, and
+      // gradient-by-id fill references — everything else falls back to
+      // primitives that can't express those.
+      const rawSvg = (node.meta as any)?.svgMarkup as string | undefined;
+      if (node.type === 'VECTOR' && rawSvg) {
+        return `<${tag} ${attrStr}>${rawSvg}</${tag}>`;
+      }
+
       try {
         // Resolve fill/stroke token vars up-front so the SVG primitive
         // can reference them instead of hard-coded colors.

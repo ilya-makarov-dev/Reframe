@@ -204,19 +204,22 @@ export function tokenizeDesignSystem(
   }
 
   // ── Radius tokens ──────────────────────────────────────────
+  // A brand that only declares colors + typography (no radius scale)
+  // should still tokenize cleanly — a missing scale isn't an error, it
+  // just skips the radius tokens.
   const scale = ds.layout.borderRadiusScale;
-  for (let i = 0; i < scale.length; i++) {
-    addToken(`radius.${i}`, 'FLOAT', scale[i]);
+  if (Array.isArray(scale) && scale.length > 0) {
+    for (let i = 0; i < scale.length; i++) {
+      addToken(`radius.${i}`, 'FLOAT', scale[i]);
+    }
+    if (scale.length >= 3) {
+      addToken('radius.sm', 'FLOAT', scale[Math.min(1, scale.length - 1)]);
+      addToken('radius.md', 'FLOAT', scale[Math.min(2, scale.length - 1)]);
+      addToken('radius.lg', 'FLOAT', scale[Math.min(Math.floor(scale.length * 0.7), scale.length - 1)]);
+    }
+    const fullRadius = scale.find(r => r >= 9999) ?? 9999;
+    addToken('radius.full', 'FLOAT', fullRadius);
   }
-  // Semantic aliases based on scale size
-  if (scale.length >= 3) {
-    addToken('radius.sm', 'FLOAT', scale[Math.min(1, scale.length - 1)]);
-    addToken('radius.md', 'FLOAT', scale[Math.min(2, scale.length - 1)]);
-    addToken('radius.lg', 'FLOAT', scale[Math.min(Math.floor(scale.length * 0.7), scale.length - 1)]);
-  }
-  // Pill/full
-  const fullRadius = scale.find(r => r >= 9999) ?? 9999;
-  addToken('radius.full', 'FLOAT', fullRadius);
 
   // ── Spacing scale tokens ────────────────────────────────────
   if (ds.layout.spacingScale && ds.layout.spacingScale.length > 0) {
@@ -230,6 +233,11 @@ export function tokenizeDesignSystem(
   if (ds.layout.maxWidth) {
     addToken('layout.maxWidth', 'FLOAT', ds.layout.maxWidth);
   }
+
+  // Downstream `ds.components.*` lookups need a stable base. A brand
+  // that only declares color + typography skips every component block,
+  // but used to crash the whole tokenize call at `ds.components.button`.
+  if (!ds.components) ds.components = {} as any;
 
   // ── Button tokens ──────────────────────────────────────────
   if (ds.components.button) {

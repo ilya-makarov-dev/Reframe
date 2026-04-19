@@ -321,7 +321,7 @@ function computeStaticStyles(node: SceneNode, isRoot: boolean): string {
 
   if (node.type === 'TEXT') {
     s.push(`font-size: ${px(node.fontSize || 16)}`);
-    if (node.fontFamily) s.push(`font-family: "${node.fontFamily}", sans-serif`);
+    if (node.fontFamily) s.push(`font-family: '${node.fontFamily}', sans-serif`);
     if (node.fontWeight && node.fontWeight !== 400) s.push(`font-weight: ${node.fontWeight}`);
     if (node.italic) s.push('font-style: italic');
     if (node.letterSpacing) s.push(`letter-spacing: ${px(node.letterSpacing)}`);

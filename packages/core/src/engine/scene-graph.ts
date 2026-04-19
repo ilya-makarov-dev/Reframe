@@ -116,6 +116,7 @@ export function createDefaultNode(type: NodeType, id: string): SceneNode {
 
     gridTemplateColumns: [],
     gridTemplateRows: [],
+    gridTemplateAreas: [],
     gridColumnGap: 0,
     gridRowGap: 0,
     gridPosition: null,

@@ -51,7 +51,7 @@ Three input paths converge on one graph: **DESIGN.md** — brand spec, tokens, c
 
 | 🎨 Interactive Canvas | 🤖 AI-Native Pipeline | ⚡ 8 Export Formats |
 |---|---|---|
-| CanvasKit (Skia WASM) viewport via @open-pencil/core. Select, drag, resize, text edit, context menu, keyboard shortcuts, zoom and pan. | 6 MCP tools for external agents. Integrated agent chat inside the editor — AI writes HTML, engine compiles, audits, exports. | One graph → HTML, React, SVG, PNG, PDF, Lottie, Animated HTML, Site. Plus W3C DTCG tokens. |
+| CanvasKit (Skia WASM) viewport via @open-pencil/core. Select, drag, resize, text edit, context menu, keyboard shortcuts, zoom and pan. | 6 MCP tools for external agents. Every compile, inspect, and edit returns an inline PNG preview — multimodal agents **see** what they just built, no file round-trip. Integrated agent chat inside the editor — AI writes HTML, engine compiles, audits, exports. | One graph → HTML, React, SVG, PNG, PDF, Lottie, Animated HTML, Site. Plus W3C DTCG tokens. |
 
 | ✅ 37-Rule Audit + Quality | 🔄 Deterministic Transforms | 🧑‍🎨 Unified Platform |
 |---|---|---|
@@ -293,6 +293,8 @@ Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline). Point at t
 
 AI writes creative HTML using brand values from DESIGN.md. Reframe validates against 37 audit rules (colors, typography, font features, component specs, spacing, aesthetic quality), auto-fixes issues, and exports to 8 formats.
 
+Each of those four tools — `compile`, `inspect`, `edit`, and `export format:"png"` — returns an inline PNG preview in the MCP response, so multimodal agents can critique their own output visually on every step. Details under _MCP Pipeline_ below.
+
 ### For Developers — @reframe/ui
 
 120 composable TypeScript functions that build INode trees. The programmatic API to the same AST that MCP and Platform use.
@@ -414,6 +416,27 @@ compile → inspect → [edit → inspect]* → export → user reviews
 | `reframe_project` | Save/load, history, snapshots, components, macros, brand registry, DTCG token export/import, content round-trip (MD ↔ INode). |
 
 One experimental extra, off the happy path: `reframe_collab` — async agent-worker for the Platform UI gesture/intent queue (`list` / `process` / `respond` / `start_session` / `sync_status`). Safe to ignore unless you're hacking on the collaboration surface.
+
+### The agent can *see* the scene — inline PNG preview
+
+`compile`, `inspect`, `edit`, and `export format:"png"` now return a rendered PNG of the current scene as an MCP `image` content block, alongside the usual text report. Multimodal agents (Claude, GPT-4o, Gemini) see the design inline on every iteration — no separate `Read` or file round-trip.
+
+```
+reframe_compile({ html }) →  content: [
+                               { type: "text", text: "PASS · 74% Good · 593 nodes" },
+                               { type: "image", mimeType: "image/png", data: "<base64>" }  ← auto
+                             ]
+```
+
+Why this matters:
+- **Fixes come faster.** The agent spots "the CTA is invisible on a dark hero" visually instead of inferring it from contrast numbers.
+- **Taste not just metrics.** The audit surfaces contrast, spacing, brand fidelity; the image surfaces ugly. Both feed the next `reframe_edit`.
+- **Works with any text-only wrapper too.** The text report still ships — agents without a vision lane just ignore the image block.
+
+Defaults:
+- Auto-downscaled to fit ≤1200 px wide; skipped entirely if the rendered PNG would bust the MCP payload cap (fails gracefully — the text report still ships).
+- Opt-out with `preview: false` on any of the four tools when you're running batch/CI pipelines and just want the numbers.
+- PNG text rendering uses a system TTF (Segoe UI on Windows, Helvetica on macOS, DejaVu on Linux) loaded once per process. If no font is found, glyphs fall back to boxes — a warning you'll spot instantly in the preview.
 
 ### CLI vs MCP (quick map)
 

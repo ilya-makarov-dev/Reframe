@@ -56,6 +56,16 @@ export interface HtmlImportOptions {
    * (reframe_compile, MCP session) should opt in.
    */
   stableIds?: boolean;
+  /**
+   * Project directory on disk — when provided, the auto-register
+   * component-master pass checks whether a master already exists there
+   * for each `data-reframe-component` name. If it does, NO occurrence in
+   * the freshly imported HTML is promoted to a COMPONENT; both stay as
+   * INSTANCE nodes and hydrate from disk at expand time. Without this,
+   * authoring the same component twice on a page collapsed one copy to
+   * the master and left only N-1 instances in the scene.
+   */
+  projectDir?: string;
 }
 
 export interface HtmlImportResult {
@@ -157,6 +167,22 @@ export async function importFromHtml(
     graph.updateNode(rootId, updates);
   }
 
+  // The PAGE canvas was created at the default 100×100 before we knew the
+  // content's size. Now that convertElement has written the imported root's
+  // real width/height, hoist those onto the page so downstream consumers
+  // (storeScene width/height, audit rootFrame checks, /api/scenes,
+  // project.save) don't see a 100×100 page with a 1440×2156 child hanging
+  // off it. Without this, `reframe_edit resize` had to be called twice —
+  // once for the wrapper, once for the page — which is what triggered the
+  // session-vs-disk 100×100 reports in the first place.
+  const imported = graph.getNode(rootId);
+  if (imported) {
+    graph.updateNode(page.id, {
+      width: imported.width,
+      height: imported.height,
+    });
+  }
+
   // Top-down width propagation. convertElement runs depth-first so child
   // post-processes see parents whose own width hasn't been finalized yet;
   // that landed cards and inner wrappers at stale widths (80 px, 0 px)
@@ -179,7 +205,9 @@ export async function importFromHtml(
   //      and point `componentId` at the master.
   // Single-occurrence components also get promoted so the registry has
   // a master for downstream `op:component instantiate` flows.
-  autoRegisterComponentMasters(graph, rootId);
+  // When projectDir is known, names that already have a disk master are
+  // skipped — both siblings stay as plain INSTANCEs and hydrate later.
+  autoRegisterComponentMasters(graph, rootId, options.projectDir);
 
   return { graph, rootId, stats };
 }
@@ -191,7 +219,7 @@ export async function importFromHtml(
  * exist but no master backs them — `op:component list` returns empty
  * even on scenes with 10 marked instances.
  */
-function autoRegisterComponentMasters(graph: SceneGraph, rootId: string): void {
+function autoRegisterComponentMasters(graph: SceneGraph, rootId: string, projectDir?: string): void {
   const byName = new Map<string, string[]>(); // componentName → nodeIds in DFS order
   const walk = (nodeId: string): void => {
     const node = graph.getNode(nodeId);
@@ -208,7 +236,25 @@ function autoRegisterComponentMasters(graph: SceneGraph, rootId: string): void {
 
   if (byName.size === 0) return;
 
+  // Check which names already have a disk master. If one does, we must
+  // NOT promote the first in-page occurrence — both siblings stay as
+  // INSTANCE placeholders and get hydrated from disk during expand.
+  const diskMasters = new Set<string>();
+  if (projectDir) {
+    try {
+      // Lazy require to avoid circular import at module load.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { loadComponentMaster } = require('../project/components.js');
+      for (const name of byName.keys()) {
+        try {
+          if (loadComponentMaster(projectDir, name)) diskMasters.add(name);
+        } catch { /* best-effort */ }
+      }
+    } catch { /* require failure — treat as no disk masters */ }
+  }
+
   for (const [name, ids] of byName) {
+    if (diskMasters.has(name)) continue;
     const masterId = ids[0];
     const masterNode = graph.getNode(masterId);
     if (!masterNode) continue;
@@ -395,8 +441,24 @@ type HtmlChild = HtmlElement | HtmlText;
 /** Convert a linkedom DOM node to our HtmlElement/HtmlText format */
 function domNodeToHtml(node: any, idx: { i: number }): HtmlChild | null {
   if (node.nodeType === 3 /* TEXT_NODE */) {
-    const text = (node.textContent || '').trim();
-    return text ? { kind: 'text', value: text } : null;
+    const raw = node.textContent ?? '';
+    if (!raw) return null;
+    // CSS whitespace normalization: collapse runs of whitespace to a
+    // single space, but DO preserve a lone space between inline
+    // siblings. Trimming unconditionally (the old behavior) dropped
+    // the space between `<span>foo</span> <span>bar</span>`, which
+    // made inline-collapsed syntax-highlighted text read as
+    // "foobar" instead of "foo bar".
+    const collapsed = raw.replace(/\s+/g, ' ');
+    if (!collapsed.trim()) {
+      // Pure whitespace — keep it as a single space token so inline
+      // collapse produces the right word boundaries. Block-context
+      // consumers that don't care about inline whitespace will still
+      // skip these because the rendered TEXT child would have empty
+      // visible content.
+      return { kind: 'text', value: ' ' };
+    }
+    return { kind: 'text', value: collapsed };
   }
   if (node.nodeType !== 1 /* ELEMENT_NODE */) return null;
 
@@ -847,30 +909,180 @@ function parseUnit(value: string): number {
 }
 
 /**
+ * Tokenize a grid track list respecting nested parens, so a function call
+ * like `minmax(0, 1fr)` stays a single token instead of getting split on
+ * its comma. Splits on whitespace only at paren-depth 0.
+ *
+ * "repeat(4, minmax(0, 1fr)) 200px"
+ *   → ["repeat(4, minmax(0, 1fr))", "200px"]
+ */
+function tokenizeGridTracks(s: string): string[] {
+  const tokens: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of s) {
+    if (ch === '(') { depth++; current += ch; continue; }
+    if (ch === ')') { depth = Math.max(0, depth - 1); current += ch; continue; }
+    if (depth === 0 && /\s/.test(ch)) {
+      if (current) { tokens.push(current); current = ''; }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+/**
+ * Resolve one grid-track token into a typed track. Handles:
+ *   "1fr"        → { type: 'FR',    value: 1 }
+ *   "200px"      → { type: 'FIXED', value: 200 }
+ *   "auto"       → { type: 'AUTO',  value: 0 }
+ *   "minmax(MIN, MAX)" → takes MAX (or MIN if MAX is auto). `minmax(0, 1fr)`
+ *                       is a FR track; `minmax(100px, 1fr)` is too — the
+ *                       `fr` unit dominates. For `minmax(100px, 300px)`
+ *                       we take MAX as a FIXED hint.
+ *   "fit-content(N)" → AUTO; treated as content-sized.
+ *
+ * Falls back to FR 1 when nothing parses — safer than a hard FIXED 0 that
+ * would zero-width the track.
+ */
+function resolveGridTrackToken(tok: string): { type: 'FIXED' | 'FR' | 'AUTO'; value: number } {
+  const t = tok.trim().toLowerCase();
+  if (!t) return { type: 'FR', value: 1 };
+  if (t === 'auto' || t === 'min-content' || t === 'max-content') {
+    return { type: 'AUTO', value: 0 };
+  }
+  const minmax = t.match(/^minmax\(\s*([^,]+?)\s*,\s*(.+)\s*\)$/i);
+  if (minmax) {
+    const max = minmax[2].trim();
+    // If the max is an fr unit, the track behaves as an FR track.
+    if (max.endsWith('fr')) return { type: 'FR', value: parseFloat(max) || 1 };
+    if (max === 'auto' || max === 'max-content' || max === 'min-content') {
+      return { type: 'AUTO', value: 0 };
+    }
+    const maxPx = parseUnit(max);
+    if (maxPx > 0) return { type: 'FIXED', value: maxPx };
+    // max was something unparseable — fall back to min.
+    return resolveGridTrackToken(minmax[1]);
+  }
+  if (t.startsWith('fit-content(')) return { type: 'AUTO', value: 0 };
+  if (t.endsWith('fr')) return { type: 'FR', value: parseFloat(t) || 1 };
+  const px = parseUnit(t);
+  if (px > 0) return { type: 'FIXED', value: px };
+  return { type: 'FR', value: 1 };
+}
+
+/**
  * Parse CSS grid-template-columns/rows into track definitions.
- * Supports: px values, fr units, repeat(N, ...), auto.
- * E.g. "repeat(4, 1fr)" → [{type:'FR',value:1}, ...×4]
- *      "200px 1fr 1fr" → [{type:'FIXED',value:200}, {type:'FR',value:1}, {type:'FR',value:1}]
+ *
+ * Supports: px/em/rem lengths, fr units, auto / min-content / max-content,
+ * `minmax(min, max)`, `fit-content(N)`, and nested `repeat(N, tracks...)`
+ * where the inner tracks may themselves use `minmax()` etc.
+ *
+ * Examples:
+ *   "repeat(4, 1fr)"               → 4 × FR(1)
+ *   "repeat(4, minmax(0, 1fr))"    → 4 × FR(1)  // bug before: got 7 FR + garbage FIXED
+ *   "200px 1fr 1fr"                → FIXED(200), FR(1), FR(1)
+ *   "repeat(3, 100px 1fr)"         → FIXED(100), FR(1), FIXED(100), FR(1), FIXED(100), FR(1)
+ *
+ * The old regex-based implementation matched `[^)]+` which truncated at
+ * the first `)` inside `minmax(...)` and produced gibberish — one real
+ * bento dashboard parsed as 7 FR + 1 stray FIXED instead of 4 FR tracks.
+ * The paren-balanced tokenizer + explicit minmax handling fixes that.
  */
 function parseGridTemplate(template: string): Array<{ type: 'FIXED' | 'FR' | 'AUTO'; value: number }> {
   const tracks: Array<{ type: 'FIXED' | 'FR' | 'AUTO'; value: number }> = [];
-  // Expand repeat(N, ...) first
-  const expanded = template.replace(/repeat\(\s*(\d+)\s*,\s*([^)]+)\)/gi, (_, count, inner) => {
-    const n = parseInt(count);
-    return Array(n).fill(inner.trim()).join(' ');
-  });
-  for (const tok of expanded.split(/\s+/).filter(Boolean)) {
-    if (tok.endsWith('fr')) {
-      tracks.push({ type: 'FR', value: parseFloat(tok) || 1 });
-    } else if (tok === 'auto' || tok === 'min-content' || tok === 'max-content') {
-      tracks.push({ type: 'AUTO', value: 0 });
-    } else {
-      const px = parseUnit(tok);
-      if (px > 0) tracks.push({ type: 'FIXED', value: px });
-      else tracks.push({ type: 'FR', value: 1 }); // fallback
+
+  // Paren-aware tokenizer: splits on top-level whitespace only, so
+  // `minmax(0, 1fr)` stays one token instead of splitting into three.
+  const topTokens = tokenizeGridTracks(template);
+
+  for (const tok of topTokens) {
+    // Handle repeat(N, tracks...) — N can be an integer or `auto-fill` /
+    // `auto-fit` (treated as 1 here; we don't know the container width at
+    // parse time). Inner tracks are re-tokenized + resolved recursively
+    // so nested minmax() / fr / px all work.
+    const repeat = tok.match(/^repeat\(\s*([^,]+?)\s*,\s*(.+)\s*\)$/i);
+    if (repeat) {
+      const rawCount = repeat[1].trim().toLowerCase();
+      const count = rawCount === 'auto-fill' || rawCount === 'auto-fit'
+        ? 1  // best-effort: one copy without container width
+        : Math.max(1, parseInt(rawCount, 10) || 1);
+      const innerTokens = tokenizeGridTracks(repeat[2]);
+      for (let i = 0; i < count; i++) {
+        for (const inner of innerTokens) {
+          tracks.push(resolveGridTrackToken(inner));
+        }
+      }
+      continue;
+    }
+    tracks.push(resolveGridTrackToken(tok));
+  }
+
+  return tracks;
+}
+
+/**
+ * Parse CSS grid-template-areas into a matrix. Each row of the CSS value
+ * becomes an array of cell names, with `.` (or empty) preserved as "."
+ * to mark empty cells.
+ *
+ * Input:
+ *   `
+ *    'hero hero stats'
+ *    'chart chart stats'
+ *   `
+ * Output:
+ *   [["hero","hero","stats"], ["chart","chart","stats"]]
+ *
+ * linkedom returns the computed value with quotes intact; this handles
+ * both quoted rows (`'a a b'`) and whitespace-separated rows that a CSS
+ * engine may have already flattened.
+ */
+function parseGridTemplateAreas(value: string): string[][] {
+  if (!value) return [];
+  // First try quoted-row form: 'row1' 'row2' ...
+  const quoted = [...value.matchAll(/"([^"]*)"|'([^']*)'/g)].map(m => m[1] ?? m[2]);
+  const rows = quoted.length > 0 ? quoted : value.split(/\n+/);
+  return rows
+    .map(r => r.trim())
+    .filter(Boolean)
+    .map(r => r.split(/\s+/).map(cell => cell || '.'));
+}
+
+/**
+ * Resolve a named grid area to a 1-indexed {column, row, columnSpan,
+ * rowSpan} rectangle within the parent's gridTemplateAreas matrix.
+ * Returns null when the name isn't found.
+ *
+ * grid-template-areas build a rectangle — every occurrence of <name> must
+ * form a contiguous box. We trust the author's CSS here and just bound
+ * the min/max coordinates of any cell with that name.
+ */
+function resolveGridAreaByName(
+  name: string,
+  areas: string[][],
+): { column: number; row: number; columnSpan: number; rowSpan: number } | null {
+  if (!name || areas.length === 0) return null;
+  let minC = Infinity, minR = Infinity, maxC = -1, maxR = -1;
+  for (let r = 0; r < areas.length; r++) {
+    for (let c = 0; c < areas[r].length; c++) {
+      if (areas[r][c] === name) {
+        if (c < minC) minC = c;
+        if (r < minR) minR = r;
+        if (c > maxC) maxC = c;
+        if (r > maxR) maxR = r;
+      }
     }
   }
-  return tracks;
+  if (maxC < 0) return null;
+  return {
+    column: minC + 1,
+    row: minR + 1,
+    columnSpan: maxC - minC + 1,
+    rowSpan: maxR - minR + 1,
+  };
 }
 
 /** Length shorthand (e.g. "0", "0 0 0 0", "none") that parses to all-zero? */
@@ -1200,6 +1412,165 @@ const TEXT_TAGS = new Set([
   'code', 'pre', 'blockquote', 'cite', 'q', 'abbr', 'time',
 ]);
 
+/**
+ * CSS inline-level elements. A parent block with only children from this
+ * set + interleaved text nodes is logically a single text run — in a
+ * browser those spans flow horizontally on the same line. Our importer
+ * still creates individual TEXT nodes per inline element so that per-span
+ * styles survive, but the parent must become a HORIZONTAL wrap container
+ * rather than the default VERTICAL block-flow stack (which would put
+ * every word on its own line — the actual bug that made syntax-
+ * highlighted code appear as one token per row).
+ */
+const INLINE_ELEMENT_TAGS = new Set([
+  'span', 'strong', 'em', 'b', 'i', 'u', 's', 'small', 'mark',
+  'code', 'cite', 'q', 'abbr', 'time', 'a', 'sub', 'sup',
+  'kbd', 'samp', 'var', 'dfn',
+]);
+
+function allInlineChildren(el: HtmlElement): boolean {
+  let hasAny = false;
+  let elementCount = 0;
+  let hasTextSibling = false;
+  for (const c of el.children) {
+    if (c.kind === 'text' && c.value.trim()) hasTextSibling = true;
+    if (c.kind !== 'element') continue;
+    if (c.tag === 'style' || c.tag === 'script') continue;
+    hasAny = true;
+    elementCount++;
+    if (!INLINE_ELEMENT_TAGS.has(c.tag)) return false;
+  }
+  // A single inline child without surrounding text is a standalone
+  // element (e.g. `<nav><a href="/pricing">Pricing</a></nav>` or
+  // `<footer><small>© 2026</small></footer>`), not a mixed inline
+  // text run. Collapsing it would erase the child's tag/role/href;
+  // keep it as a distinct node so semantic audit + export stay honest.
+  if (elementCount === 1 && !hasTextSibling) return false;
+  return hasAny;
+}
+
+/**
+ * Collapse a container's inline children into a single text string plus a
+ * list of {start, length, style} runs that describe per-range style
+ * overrides. This is the correct way to represent inline formatting in
+ * our INode model — and it's what makes long paragraphs with inline
+ * emphasis word-wrap properly instead of splitting only between
+ * sibling span nodes (the stopgap HORIZONTAL+WRAP approach).
+ *
+ * The returned `runs` only record properties that DIFFER from `base` —
+ * the parent container's own style. TEXT nodes then render the base
+ * style for all unmarked ranges and overlay per-run deltas.
+ */
+function buildInlineRuns(
+  el: HtmlElement,
+  ctx: ConvertContext,
+  base: Record<string, string>,
+): { text: string; runs: Array<{ start: number; length: number; style: Record<string, unknown> }> } {
+  const parts: string[] = [];
+  const runs: Array<{ start: number; length: number; style: Record<string, unknown> }> = [];
+  let cursor = 0;
+
+  function textLen(s: string): number { return s.length; }
+
+  function walk(node: any, inheritedStyles: Record<string, string>): void {
+    if (node.kind === 'text') {
+      // Preserve whitespace; the TEXT renderer / Yoga text measurer
+      // respect the space between words. Collapsing to one space is
+      // also fine since HTML does that in browser normalization, but
+      // preserving what the source had keeps behavior predictable.
+      const text = node.value ?? '';
+      if (!text) return;
+      parts.push(text);
+      cursor += textLen(text);
+      return;
+    }
+    if (node.kind !== 'element') return;
+    if (node.tag === 'style' || node.tag === 'script' || node.tag === 'wbr') return;
+    if (node.tag === 'br') {
+      parts.push('\n');
+      cursor += 1;
+      return;
+    }
+
+    // Compute this element's styles; inherited comes from the parent
+    // walk context (not the document root) so `<strong><em>x</em></strong>`
+    // picks up BOTH the bold and italic — each level contributes.
+    const ownStyles = resolveStyles(node, ctx.cssVars, ctx.linkedomStyles);
+    const merged: Record<string, string> = { ...inheritedStyles };
+    for (const k of Object.keys(ownStyles)) {
+      if (ownStyles[k] !== undefined && ownStyles[k] !== '') merged[k] = ownStyles[k];
+    }
+
+    const runStart = cursor;
+    for (const c of node.children ?? []) {
+      walk(c, merged);
+    }
+    const runLength = cursor - runStart;
+    if (runLength <= 0) return;
+
+    // Only record fields that differ from the BASE (the top-level
+    // container). Everything identical to base is redundant — the
+    // TEXT node's own style already covers it.
+    const override: Record<string, unknown> = {};
+
+    if (merged.color && merged.color !== base.color) {
+      const c = parseColor(merged.color);
+      if (c) override.fillColor = c;
+    }
+
+    const baseWeight = weightOf(base['font-weight']);
+    const runWeight = weightOf(merged['font-weight']) ??
+      (node.tag === 'strong' || node.tag === 'b' ? 700 : undefined) ??
+      (TAG_FONT_DEFAULTS[node.tag]?.fontWeight);
+    if (runWeight !== undefined && runWeight !== (baseWeight ?? 400)) {
+      override.fontWeight = runWeight;
+    }
+
+    if ((merged['font-style'] === 'italic' || merged['font-style'] === 'oblique' ||
+         node.tag === 'em' || node.tag === 'i') && base['font-style'] !== merged['font-style']) {
+      override.italic = true;
+    }
+
+    if (merged['font-family'] && merged['font-family'] !== base['font-family']) {
+      override.fontFamily = merged['font-family'].split(',')[0].trim().replace(/^['"]|['"]$/g, '');
+    }
+
+    if (merged['font-size'] && merged['font-size'] !== base['font-size']) {
+      override.fontSize = parseUnit(merged['font-size']);
+    }
+
+    const td = merged['text-decoration'];
+    if (td && td !== base['text-decoration']) {
+      if (td.includes('underline')) override.textDecoration = 'UNDERLINE';
+      else if (td.includes('line-through')) override.textDecoration = 'STRIKETHROUGH';
+    }
+
+    if (Object.keys(override).length > 0) {
+      runs.push({ start: runStart, length: runLength, style: override });
+    }
+  }
+
+  function weightOf(s: string | undefined): number | undefined {
+    if (!s) return undefined;
+    if (s === 'bold') return 700;
+    if (s === 'normal') return 400;
+    if (s === 'lighter') return 300;
+    if (s === 'bolder') return 800;
+    const n = parseInt(s);
+    return isNaN(n) ? undefined : n;
+  }
+
+  for (const c of el.children) {
+    walk(c, base);
+  }
+
+  // Normalize leading/trailing whitespace runs so a "  Hi  " source
+  // doesn't render with weird indents. But DON'T strip internal spaces
+  // — they're meaningful.
+  const full = parts.join('');
+  return { text: full, runs };
+}
+
 const TAG_FONT_DEFAULTS: Record<string, { fontSize: number; fontWeight: number }> = {
   h1: { fontSize: 48, fontWeight: 700 },
   h2: { fontSize: 36, fontWeight: 700 },
@@ -1339,8 +1710,52 @@ function inferVariant(el: HtmlElement): string | undefined {
  * raw data-* attributes (except internal reframe bookkeeping) so downstream
  * consumers can reason about the original HTML source.
  */
+/**
+ * Serialize an HtmlElement subtree back into a markup string. Used only
+ * for preserving raw SVG so exporters can round-trip it. Handles element
+ * tags + attrs + text children; skips internal reframe bookkeeping.
+ */
+function serializeHtmlElement(el: HtmlElement): string {
+  const parts: string[] = [];
+  const renderAttrs = (attrs: Record<string, string>) => {
+    const out: string[] = [];
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k.startsWith('data-reframe-')) continue;
+      out.push(`${k}="${String(v).replace(/"/g, '&quot;')}"`);
+    }
+    return out.length ? ' ' + out.join(' ') : '';
+  };
+  const VOID = new Set(['br', 'hr', 'img', 'input', 'meta', 'link', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr',
+    'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'rect', 'stop', 'use']);
+  const walk = (n: HtmlChild) => {
+    if (n.kind === 'text') {
+      parts.push(n.value.replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+      return;
+    }
+    const tag = n.tag;
+    const attrs = renderAttrs(n.attrs);
+    if (VOID.has(tag) && n.children.length === 0) {
+      parts.push(`<${tag}${attrs} />`);
+      return;
+    }
+    parts.push(`<${tag}${attrs}>`);
+    for (const c of n.children) walk(c);
+    parts.push(`</${tag}>`);
+  };
+  walk(el);
+  return parts.join('');
+}
+
 function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
   const meta: NodeMeta = { sourceTag: el.tag, sourcePath: path };
+
+  // Preserve raw SVG markup so HTML/React exporters can round-trip icons.
+  // CanvasKit's raster only knows `<path d>`, so complex SVGs (gradient
+  // fills, groups, transforms) still fall back to a bbox there — but the
+  // web-facing exports stay pixel-perfect.
+  if (el.tag === 'svg') {
+    meta.svgMarkup = serializeHtmlElement(el);
+  }
 
   const cls = el.attrs.class;
   if (cls) {
@@ -1529,6 +1944,13 @@ function convertElement(
   // Determine node type
   let nodeType: NodeType;
   let isTextNode = false;
+  // Inline-only containers collapse their span/strong/em subtree into ONE
+  // TEXT node with styleRuns so that browser-style word wrapping happens
+  // inside the text instead of between sibling nodes. Without this a
+  // paragraph like "They're committing <span>$28M</span>, with strong
+  // follow-on…" broke mid-comma because HORIZONTAL+WRAP can only split
+  // between TEXT children.
+  let isInlineContainer = false;
 
   if (el.tag === 'img') {
     nodeType = 'RECTANGLE';
@@ -1539,10 +1961,37 @@ function convertElement(
     // Leaf text element → TEXT node
     nodeType = 'TEXT';
     isTextNode = true;
+  } else if (el.tag === 'input' || el.tag === 'textarea' || el.tag === 'select') {
+    // Form text controls carry their display text on value/placeholder
+    // (input) or as text content (textarea). Treat them as TEXT-bearing
+    // leaves so they get the needsWrapper promotion to FRAME+TEXT and
+    // render with readable copy instead of empty boxes. A native <select>
+    // paints as a single-line box showing the current option, so we
+    // collapse it to the selected (or first) option's label.
+    // Checkbox/radio inputs have no text content — keep them as a solid
+    // shape so they render as a visible control instead of an empty TEXT.
+    const inputType = (el.attrs.type || 'text').toLowerCase();
+    const isShapeControl = el.tag === 'input' && (inputType === 'checkbox' || inputType === 'radio');
+    if (isShapeControl) {
+      nodeType = 'RECTANGLE';
+      isTextNode = false;
+    } else {
+      nodeType = 'TEXT';
+      isTextNode = true;
+    }
   } else if (!hasElementChildren(el) && el.children.some(c => c.kind === 'text')) {
     // Container with only text children → TEXT node
     nodeType = 'TEXT';
     isTextNode = true;
+  } else if (hasElementChildren(el) && allInlineChildren(el)
+      && styles.display !== 'flex' && styles.display !== 'grid'
+      && styles.display !== 'inline-flex' && styles.display !== 'inline-grid') {
+    // Mixed text + inline elements (span/strong/em/code/…) with no
+    // explicit flex/grid declaration → treat as a single text run with
+    // per-range style overrides.
+    nodeType = 'TEXT';
+    isTextNode = true;
+    isInlineContainer = true;
   } else {
     nodeType = 'FRAME';
   }
@@ -1559,7 +2008,7 @@ function convertElement(
   const parentResolvedH = parentNode && (parentNode.height ?? 0) > 100
     ? parentNode.height
     : undefined;
-  const overrides = cssToOverrides(styles, el, nodeType, ctx, parentStyles, parentResolvedW, parentResolvedH);
+  const overrides = cssToOverrides(styles, el, nodeType, ctx, parentStyles, parentResolvedW, parentResolvedH, parentNode?.gridTemplateAreas);
 
   // clip-path: circle/ellipse → change node type to ELLIPSE
   if ((overrides as any)._clipShape === 'ellipse' && nodeType !== 'TEXT') {
@@ -1569,7 +2018,28 @@ function convertElement(
 
   // Handle text content
   if (isTextNode) {
-    const textContent = getTextContent(el);
+    // Build text + styleRuns for inline containers, or fall back to the
+    // flat text content for leaf / single-text-child nodes.
+    let textContent: string;
+    let inlineStyleRuns: Array<{ start: number; length: number; style: Record<string, unknown> }> | null = null;
+    if (isInlineContainer) {
+      const built = buildInlineRuns(el, ctx, styles);
+      textContent = built.text;
+      inlineStyleRuns = built.runs;
+    } else if (el.tag === 'input') {
+      // input has no text content; display uses value or placeholder
+      textContent = el.attrs.value || el.attrs.placeholder || '';
+    } else if (el.tag === 'textarea') {
+      // textarea display text = attribute value OR the original text content
+      textContent = el.attrs.value || getTextContent(el);
+    } else if (el.tag === 'select') {
+      // Pick the selected option, or fall back to the first one.
+      const options = el.children.filter(c => c.kind === 'element' && c.tag === 'option') as any[];
+      const selected = options.find(o => 'selected' in o.attrs) || options[0];
+      textContent = selected ? getTextContent(selected) : '';
+    } else {
+      textContent = getTextContent(el);
+    }
     ctx.stats.textNodes++;
 
     // If this text node has visual container styling (background, border, padding),
@@ -1618,22 +2088,112 @@ function convertElement(
       delete overrides.text;
     } else {
       overrides.text = textContent;
+      if (inlineStyleRuns && inlineStyleRuns.length > 0) {
+        overrides.styleRuns = inlineStyleRuns;
+      }
+      // Inline-container collapse produced a TEXT node, so the
+      // HORIZONTAL+WRAP we set in cssToOverrides is now the wrong
+      // layoutMode — TEXT nodes have layoutMode:NONE. Scrub those flags
+      // so the final node is a clean text leaf.
+      if (isInlineContainer) {
+        delete (overrides as any).layoutMode;
+        delete (overrides as any).layoutWrap;
+        if ((overrides as any).counterAxisAlign === 'BASELINE') {
+          delete (overrides as any).counterAxisAlign;
+        }
+      }
 
-      // Estimate text node size when no explicit width/height (flex children)
-      if (!overrides.width || !overrides.height) {
-        const fontSize = overrides.fontSize ?? 16;
-        const fontWeight = overrides.fontWeight ?? 400;
-        const ls = typeof overrides.letterSpacing === 'number' ? overrides.letterSpacing : 0;
-        const avgCharWidth = fontSize * (0.55 + (fontWeight >= 600 ? 0.04 : 0)) + ls;
-        const textLines = textContent.split('\n');
-        const longestLine = Math.max(...textLines.map(l => l.length));
-        if (!overrides.width) {
-          overrides.width = Math.max(20, Math.ceil(longestLine * avgCharWidth));
+      // Estimate text node size when no explicit width/height (flex children).
+      //
+      // Wrappable text — any paragraph whose single-line width would blow
+      // past the parent's inner width — must NOT be pinned at its measured
+      // width or it bleeds out of the container and gets clipped (see the
+      // mobile Twitter feed: 340 px cells with 60-char tweet bodies
+      // produced a 900 px TEXT node that Yoga couldn't wrap). For those
+      // cases we let the width default to FILL so Yoga hands us the
+      // parent inner width, and we compute height from the wrapped line
+      // count using the same avgChar heuristic.
+      const fontSize = overrides.fontSize ?? 16;
+      const fontWeight = overrides.fontWeight ?? 400;
+      const ls = typeof overrides.letterSpacing === 'number' ? overrides.letterSpacing : 0;
+      const avgCharWidth = fontSize * (0.55 + (fontWeight >= 600 ? 0.04 : 0)) + ls;
+      const textLines = textContent.split('\n');
+      const longestLine = Math.max(...textLines.map(l => l.length));
+      const lineHeight = overrides.lineHeight ?? fontSize * 1.4;
+
+      // Decide between HUG-width (text gets its natural rendered width)
+      // and FILL-width (text stretches to fill parent and wraps when
+      // content overflows). The call is axis-dependent: setting
+      // counterAxisSizing='FILL' stretches along the parent's cross
+      // axis, so it only widens the text in VERTICAL (column) parents.
+      // In a HORIZONTAL row, counter-axis FILL makes the text TALL, not
+      // wide, and any wrap logic then sees a still-narrow node and
+      // word-breaks even short labels ("PRODUCTION · READY" split
+      // across two lines inside a flex row was the most visible
+      // regression from a naive always-FILL policy).
+      const parentFrame = ctx.graph.getNode(parentId);
+      const parentLayoutMode = parentFrame?.layoutMode;
+      // Only trust parent width when it's been finalized past the
+      // default 100. Pre-layout defaults give nonsense overflow
+      // decisions.
+      const parentWidthResolved = parentFrame && (parentFrame.width ?? 0) > 100;
+      const parentInner = parentWidthResolved
+        ? Math.max(0, (parentFrame!.width ?? 0)
+            - ((parentFrame as any).paddingLeft ?? 0)
+            - ((parentFrame as any).paddingRight ?? 0))
+        : undefined;
+      const naturalWidth = Math.max(20, Math.ceil(longestLine * avgCharWidth));
+      const willOverflow = parentInner !== undefined && naturalWidth > parentInner;
+      // FILL is only useful when the parent's cross axis is horizontal —
+      // i.e. a VERTICAL column or the scene root. HORIZONTAL rows don't
+      // wrap their text children; instead we keep HUG width and let
+      // clipping do its job when the author over-stuffed a row.
+      const canFillForWrap = parentLayoutMode === 'VERTICAL' || parentLayoutMode === 'NONE';
+
+      if (!overrides.width) {
+        if (canFillForWrap) {
+          // CSS block-flow: a text-bearing div in a vertical column
+          // takes its parent's inner width. The glyph run is measured
+          // at its natural width, but the node box fills — so the
+          // raster wrap budget is the parent's width, not the text's
+          // tight HUG. Without this, tabular-numeral runs ("−8ms wow",
+          // "38ms · healthy") whose rendered width is 10-15% wider
+          // than our 0.55×fontSize heuristic got wrapped onto two
+          // lines inside 300-px-wide cells where they'd trivially fit.
+          //
+          // We pin this unconditionally for VERTICAL parents — we
+          // don't wait for parentInner to resolve, because at
+          // convertElement time the parent's width is still the 100-
+          // default (depth-first traversal sizes children before Yoga
+          // finalizes parent dimensions). Yoga will propagate the
+          // real parent width at layout time.
+          overrides.counterAxisSizing = 'FILL';
+          // counterAxisSizing alone isn't enough when the parent has
+          // `align-items: flex-start` (counterAxisAlign === 'MIN'):
+          // Yoga treats align-start as "don't stretch", so children
+          // HUG their content even with FILL set on themselves. An
+          // explicit per-child STRETCH override wins. This mirrors
+          // CSS `align-self: stretch` on a child inside a flex column
+          // whose parent has `align-items: flex-start`.
+          overrides.layoutAlignSelf = 'STRETCH';
+          const estLines = willOverflow
+            ? Math.max(textLines.length, Math.ceil(naturalWidth / Math.max(1, parentInner!)))
+            : textLines.length;
+          if (!overrides.height) {
+            overrides.height = Math.max(fontSize, Math.ceil(estLines * lineHeight));
+          }
+        } else {
+          // Parent is HORIZONTAL — HUG at natural width. Any overflow
+          // here is the author's business (over-stuffed row); we don't
+          // try to wrap because counterAxisSizing FILL in a HORIZONTAL
+          // parent stretches VERTICALLY, which doesn't help wrap.
+          overrides.width = naturalWidth;
+          if (!overrides.height) {
+            overrides.height = Math.max(fontSize, Math.ceil(textLines.length * lineHeight));
+          }
         }
-        if (!overrides.height) {
-          const lineHeight = overrides.lineHeight ?? fontSize * 1.4;
-          overrides.height = Math.max(fontSize, Math.ceil(textLines.length * lineHeight));
-        }
+      } else if (!overrides.height) {
+        overrides.height = Math.max(fontSize, Math.ceil(textLines.length * lineHeight));
       }
     }
   }
@@ -1685,7 +2245,24 @@ function convertElement(
   const hasPadding2 = isNonZeroLength(styles.padding) || isNonZeroLength(styles['padding-top'])
     || isNonZeroLength(styles['padding-right']) || isNonZeroLength(styles['padding-bottom'])
     || isNonZeroLength(styles['padding-left']);
-  const wasPromotedToFrame = nodeType === 'FRAME' && (hasBackground2 || hasBorder2 || hasPadding2) && !hasElementChildren(el) && el.children.some(c => c.kind === 'text');
+  // A "promoted frame" is a node that would have been a leaf TEXT but
+  // gained visual chrome (background/border/padding), so we wrap the
+  // text in a FRAME. The original rule required `!hasElementChildren`
+  // because true leaf text nodes don't have element children.
+  //
+  // Inline-container collapse extends this: a div with padding that
+  // contains only span/strong/em children is semantically a single
+  // text run with style deltas, so it ALSO needs the wrapper pattern
+  // (FRAME with synthetic TEXT child carrying styleRuns). Without this
+  // second branch, the importer kept each span as its own TEXT node
+  // and the parent's styleRuns dropped on the floor — making
+  // padded syntax-highlighted code rows render as three stacked token
+  // cells instead of one line.
+  const isFormControl = el.tag === 'input' || el.tag === 'textarea' || el.tag === 'select';
+  const wasPromotedToFrame =
+    (nodeType === 'FRAME' && (hasBackground2 || hasBorder2 || hasPadding2) && !hasElementChildren(el) && el.children.some(c => c.kind === 'text'))
+    || (isInlineContainer && nodeType === 'FRAME')
+    || (isFormControl && nodeType === 'FRAME');
 
   if (wasPromotedToFrame && !overrides.layoutMode) {
     // Set up flex layout so text child is centered
@@ -1803,8 +2380,28 @@ function convertElement(
 
   // For promoted frames, create the TEXT child with inherited text styles
   if (wasPromotedToFrame) {
-    const textContent = getTextContent(el);
+    // If the source was an inline-container (mixed text + spans) we need
+    // to carry the styleRuns into the synthetic TEXT child instead of
+    // flattening to getTextContent which drops per-run styling.
+    const inlineBuild = isInlineContainer ? buildInlineRuns(el, ctx, styles) : null;
+    let textContent: string;
+    if (inlineBuild) {
+      textContent = inlineBuild.text;
+    } else if (el.tag === 'input') {
+      textContent = el.attrs.value || el.attrs.placeholder || '';
+    } else if (el.tag === 'textarea') {
+      textContent = el.attrs.value || getTextContent(el);
+    } else if (el.tag === 'select') {
+      const options = el.children.filter(c => c.kind === 'element' && c.tag === 'option') as any[];
+      const selected = options.find(o => 'selected' in o.attrs) || options[0];
+      textContent = selected ? getTextContent(selected) : '';
+    } else {
+      textContent = getTextContent(el);
+    }
     const textOverrides: any = { text: textContent, name: overrides.name ? overrides.name + '-text' : 'text' };
+    if (inlineBuild && inlineBuild.runs.length > 0) {
+      textOverrides.styleRuns = inlineBuild.runs;
+    }
     applyTextStyles(textOverrides, styles, el.tag);
     if (styles.color) {
       const c = parseColor(styles.color);
@@ -1831,9 +2428,14 @@ function convertElement(
     ctx.graph.createNode('TEXT', node.id, textOverrides);
   }
 
-  // Convert children (only for non-text nodes and non-promoted frames)
+  // Convert children (only for non-text nodes and non-promoted frames).
+  // SVG descendants (<defs>, <linearGradient>, <stop>, <path>, <g>, <line>,
+  // <circle>…) are not layout-participating elements — they exist inside
+  // the SVG coordinate system and must not be imported as FRAME children,
+  // or Yoga treats them as overlapping auto-layout siblings and the audit
+  // flags real-looking (but meaningless) sibling-overlap warnings.
   // Sort element children by z-index to preserve stacking order
-  if (!isTextNode && !wasPromotedToFrame) {
+  if (!isTextNode && !wasPromotedToFrame && el.tag !== 'svg') {
     // ── Phase 5b Bug #1 fix: content-aware sibling keys ──
     //
     // Old behavior used positional index (`section[2]`) which meant
@@ -2122,19 +2724,69 @@ function convertElement(
       }
     }
 
+    // Explicit CSS width/height must pin the matching axis to FIXED, or
+    // the HUG/FILL heuristic above wins and Yoga shrinks the node to
+    // content. E.g. a `<button style="height:44px">` in a column parent
+    // landed with counterAxisSizing=HUG and shrank to the 19-px text
+    // height, blowing the 44-px WCAG touch target across the board.
+    const intrinsic = /^(fit-content|min-content|max-content|auto)$/;
+    if (createdNode.layoutMode === 'HORIZONTAL' || createdNode.layoutMode === 'VERTICAL') {
+      const widthIsFixed = styles.width && !intrinsic.test(styles.width.trim());
+      const heightIsFixed = styles.height && !intrinsic.test(styles.height.trim());
+      if (widthIsFixed) {
+        if (createdNode.layoutMode === 'HORIZONTAL') updates.primaryAxisSizing = 'FIXED';
+        else updates.counterAxisSizing = 'FIXED';
+      }
+      if (heightIsFixed) {
+        if (createdNode.layoutMode === 'HORIZONTAL') updates.counterAxisSizing = 'FIXED';
+        else updates.primaryAxisSizing = 'FIXED';
+      }
+    }
+
     if (Object.keys(updates).length > 0) {
       ctx.graph.updateNode(node.id, updates);
     }
 
-    // Convert child margins to itemSpacing (scan child element CSS for margins)
+    // Convert child margins to itemSpacing when the parent has no explicit
+    // gap. Axis-correct: HORIZONTAL rows care about margin-left/right on
+    // their children, VERTICAL stacks care about margin-top/bottom.
+    //
+    // The previous implementation only looked at mt/mb regardless of
+    // axis, which silently dropped `margin-right: 22px` on tabs — the
+    // nav rendered as "OverviewIntegrationsDeployments" run-on because
+    // every child abutted the next. We now use the axial margins and
+    // pick the max across children as a uniform gap (the common case:
+    // all children share the same margin value).
     if (createdNode.layoutMode && createdNode.layoutMode !== 'NONE' && !createdNode.itemSpacing) {
+      const horizontal = createdNode.layoutMode === 'HORIZONTAL';
       let maxMargin = 0;
       for (const child of el.children) {
         if (child.kind !== 'element' || child.tag === 'style' || child.tag === 'script') continue;
         const childStyles = resolveStyles(child, ctx.cssVars, ctx.linkedomStyles);
-        const mb = parseUnit(childStyles['margin-bottom'] ?? '0');
-        const mt = parseUnit(childStyles['margin-top'] ?? '0');
-        maxMargin = Math.max(maxMargin, mb, mt);
+        if (horizontal) {
+          const ml = parseUnit(childStyles['margin-left'] ?? '0');
+          const mr = parseUnit(childStyles['margin-right'] ?? '0');
+          maxMargin = Math.max(maxMargin, ml, mr);
+        } else {
+          const mt = parseUnit(childStyles['margin-top'] ?? '0');
+          const mb = parseUnit(childStyles['margin-bottom'] ?? '0');
+          maxMargin = Math.max(maxMargin, mt, mb);
+        }
+        // Also pick up the `margin` shorthand. `margin: 0 22px` would set
+        // left/right to 22 but linkedom computed styles return it as a
+        // single `margin` string that doesn't split into margin-right.
+        const marginShort = childStyles.margin;
+        if (marginShort) {
+          const parts = marginShort.trim().split(/\s+/).map(parseUnit);
+          // CSS order: top right bottom left (1/2/3/4 values)
+          let top = 0, right = 0, bottom = 0, left = 0;
+          if (parts.length === 1) top = right = bottom = left = parts[0];
+          else if (parts.length === 2) { top = bottom = parts[0]; right = left = parts[1]; }
+          else if (parts.length === 3) { top = parts[0]; right = left = parts[1]; bottom = parts[2]; }
+          else if (parts.length >= 4) { [top, right, bottom, left] = parts as [number, number, number, number]; }
+          if (horizontal) maxMargin = Math.max(maxMargin, left, right);
+          else maxMargin = Math.max(maxMargin, top, bottom);
+        }
       }
       if (maxMargin > 0) {
         ctx.graph.updateNode(node.id, { itemSpacing: maxMargin });
@@ -2188,6 +2840,13 @@ function cssToOverrides(
    * `width:100%`, which parseUnit would truncate to the literal 100. */
   parentResolvedW?: number,
   parentResolvedH?: number,
+  /**
+   * Parent's parsed gridTemplateAreas matrix, passed through so that a
+   * child with `grid-area: <name>` can resolve the name → {col,row,span}
+   * without re-parsing the parent's CSS. Empty/undefined when the parent
+   * isn't a grid with named areas.
+   */
+  parentGridAreas?: string[][],
 ): Partial<SceneNode> & { name?: string } {
   const o: any = {};
 
@@ -2523,8 +3182,17 @@ function cssToOverrides(
       o.layoutMode = 'GRID';
       const cols = styles['grid-template-columns'] ?? '';
       const rows = styles['grid-template-rows'] ?? '';
+      const areas = styles['grid-template-areas'] ?? '';
       if (cols) o.gridTemplateColumns = parseGridTemplate(cols);
       if (rows) o.gridTemplateRows = parseGridTemplate(rows);
+      if (areas) o.gridTemplateAreas = parseGridTemplateAreas(areas);
+      // A single `gap:<value>` shorthand fills both column and row gaps —
+      // linkedom's computed-style gives it back under the unified `gap`
+      // key while keeping `column-gap`/`row-gap` as explicit overrides.
+      if (styles.gap) {
+        const g = parseUnit(styles.gap);
+        if (g > 0) { o.gridColumnGap = g; o.gridRowGap = g; }
+      }
       if (styles['column-gap']) o.gridColumnGap = parseUnit(styles['column-gap']);
       if (styles['row-gap']) o.gridRowGap = parseUnit(styles['row-gap']);
       dir = 'grid'; // sentinel — not used for GRID
@@ -2564,8 +3232,22 @@ function cssToOverrides(
     // flex-wrap
     if (styles['flex-wrap'] === 'wrap') o.layoutWrap = 'WRAP';
   } else if (hasChildElements && nodeType === 'FRAME' && position !== 'absolute' && position !== 'fixed') {
-    // Block-level container with element children → VERTICAL (normal document flow)
-    o.layoutMode = 'VERTICAL';
+    // When every element child is INLINE (span / strong / em / code / a /
+    // …), the parent is a single text run — not a vertical stack. Pick
+    // HORIZONTAL with WRAP so interleaved TEXT nodes flow side-by-side
+    // like a browser's inline formatting context. Without this, syntax-
+    // highlighted code rendered one token per line because each <span>
+    // became its own VERTICAL stack child.
+    if (allInlineChildren(el)) {
+      o.layoutMode = 'HORIZONTAL';
+      o.layoutWrap = 'WRAP';
+      // Baseline align keeps ascender/descender glyphs aligned across
+      // different font sizes/weights in the same run.
+      if (o.counterAxisAlign === undefined) o.counterAxisAlign = 'BASELINE';
+    } else {
+      // Block-level container with element children → VERTICAL (normal document flow)
+      o.layoutMode = 'VERTICAL';
+    }
   }
 
   // In normal CSS block flow, text-align on a parent centers inline content
@@ -2621,8 +3303,40 @@ function cssToOverrides(
     else if (as === 'stretch') o.layoutAlign = 'STRETCH';
   }
 
-  // ── Grid child positioning (grid-column / grid-row) ──
-  if (styles['grid-column'] || styles['grid-row']) {
+  // ── Grid child positioning (grid-area / grid-column / grid-row) ──
+  // Precedence matches CSS: `grid-area` (when it names an area) resolves
+  // via the parent's gridTemplateAreas and wins over explicit grid-column /
+  // grid-row because it's the integrated shorthand. When grid-area is the
+  // numeric 4-value form (row-start / col-start / row-end / col-end) we
+  // fall through to the classic path below.
+  let resolvedFromArea = false;
+  const gridAreaStyle = styles['grid-area']?.trim();
+  if (gridAreaStyle) {
+    const hasSlashes = gridAreaStyle.includes('/');
+    // A single identifier (no slash, non-numeric, not a CSS keyword) is a
+    // reference to a named area on the parent grid. Look it up.
+    if (!hasSlashes && !/^\d+$/.test(gridAreaStyle) && gridAreaStyle !== 'auto') {
+      const areas = parentGridAreas ?? [];
+      const box = resolveGridAreaByName(gridAreaStyle, areas);
+      if (box) {
+        o.gridPosition = box;
+        resolvedFromArea = true;
+      }
+    } else if (hasSlashes) {
+      // Numeric 4-value form: row-start / col-start / row-end / col-end.
+      // Rewrite into grid-column / grid-row so the existing parser picks
+      // it up without duplicating logic.
+      const parts = gridAreaStyle.split('/').map(s => s.trim());
+      // CSS ordering: row-start / column-start / row-end / column-end
+      const [rs, cs, re, ce] = [parts[0], parts[1], parts[2], parts[3]];
+      if (cs && ce) styles['grid-column'] = `${cs} / ${ce}`;
+      else if (cs) styles['grid-column'] = cs;
+      if (rs && re) styles['grid-row'] = `${rs} / ${re}`;
+      else if (rs) styles['grid-row'] = rs;
+    }
+  }
+
+  if (!resolvedFromArea && (styles['grid-column'] || styles['grid-row'])) {
     const gp: any = {};
     if (styles['grid-column']) {
       const gc = styles['grid-column'].trim();

@@ -23,6 +23,7 @@ import { VERSION } from '../version.js';
 import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
 import { classifyScene, readSemanticSkeleton, SEMANTIC_TO_BANNER } from '../../../core/src/semantic/index.js';
 import { MCP_LIMITS } from '../limits.js';
+import { renderPreview } from './_preview.js';
 
 // ─── Schema ────────────────────────────────────────────────────
 
@@ -99,6 +100,12 @@ export const inspectInputSchema = {
 
   brandFidelity: z.boolean().optional().default(false)
     .describe('Include Brand Fidelity Score (0-100): color/typography/spacing/radius/component compliance + palette usage. Requires designMd.'),
+
+  preview: z.boolean().optional().default(true).describe(
+    'Return an inline PNG preview of the current scene alongside the textual report. '
+    + 'Auto-downscaled to fit within 1200 px wide; omitted if the render busts MCP payload limits. '
+    + 'Set false on batch / CI calls to save bytes.',
+  ),
 };
 
 // ─── Handler ───────────────────────────────────────────────────
@@ -117,6 +124,7 @@ export async function handleInspect(input: {
   treeMaxDepth?: number;
   treeMaxLines?: number;
   aesthetic?: boolean;
+  preview?: boolean;
 }) {
   const session = getSession();
   session.recordToolCall('inspect');
@@ -546,9 +554,18 @@ export async function handleInspect(input: {
     sections.push(`Fix issues with reframe_edit, then re-inspect.`);
   }
 
-  const content: Array<{ type: 'text'; text: string }> = [{ type: 'text', text: sections.join('\n') }];
+  const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: 'image/png' }> =
+    [{ type: 'text', text: sections.join('\n') }];
   if (structuredDiffJson !== null) {
     content.push({ type: 'text', text: structuredDiffJson });
+  }
+
+  // Inline PNG preview so multimodal callers can see the current scene
+  // alongside the textual report. Skipped on explicit opt-out or when the
+  // render fails / exceeds the inline payload cap.
+  if (input.preview !== false) {
+    const image = await renderPreview(graph, rootId);
+    if (image) content.push(image);
   }
 
   return { content };

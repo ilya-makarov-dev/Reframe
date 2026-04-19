@@ -17,6 +17,7 @@ import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
 import { setHost } from '../../../core/src/host/context.js';
 import { storeScene, getScene, resolveScene, setTokenIndex, getTokenIndex, findSessionId, bumpSceneSessionRevision, getWorkspaceRoot } from '../store.js';
+import { renderPreview } from './_preview.js';
 import { coreProjectIo } from '../project-io.js';
 import { autoSaveScene, getProjectDir } from './project.js';
 import { loadBrandDesignMd } from './compile.js';
@@ -338,6 +339,13 @@ const operationSchema = z.discriminatedUnion('op', [
     sceneId: z.string().optional().describe('Target scene (default: last created)'),
     designMd: z.string().optional().describe('DESIGN.md to generate tokens from'),
     darkMode: z.boolean().optional().describe('Create a dark mode variant (default: false)'),
+    rebrand: z.boolean().optional().describe(
+      'If true, ALSO rewrite every off-palette color in the scene to its closest brand token + apply component recipes '
+      + '(buttons/cards/badges/inputs/nav). Default: false — tokens get created and any node values that already '
+      + 'match are bound, but the scene\'s literal colors are left alone. Opt in when you want a one-click brand '
+      + 'makeover; leave off when the scene already uses the brand palette or when non-palette colors carry '
+      + 'semantic meaning (status greens, priority reds) that a rebrand would destroy.',
+    ),
   }),
 
   // Switch token mode (light/dark)
@@ -496,6 +504,11 @@ export const editInputSchema = {
       minContrast: z.number().optional().default(3),
     }),
   ]).optional().default(true).describe('Auto-audit after operations. true = audit+fix, false = skip.'),
+
+  preview: z.boolean().optional().default(true).describe(
+    'Return an inline PNG preview of the last-touched scene after the edit batch runs. '
+    + 'Set false for long macros where only the final state matters.',
+  ),
 };
 
 // ─── Node resolution ─────────────────────────────────────────
@@ -1008,6 +1021,7 @@ export async function handleEdit(input: {
   operations: any[];
   designMd?: string;
   audit?: boolean | { autoFix?: boolean; maxPasses?: number; minFontSize?: number; minContrast?: number };
+  preview?: boolean;
 }) {
   const session = getSession();
   session.recordToolCall('edit');
@@ -1568,25 +1582,31 @@ export async function handleEdit(input: {
         // "0 properties updated" — defeating the entire token system.
         const boundCount = autoBindTokensFromGraph(stored.graph, stored.rootId, tokenIndex);
 
-        // Semantic rebrand: map node roles → brand color tokens.
-        // autoBindTokensFromGraph only binds when node values match token
-        // values exactly. rebrandColorsFromTokens overwrites fills/text
-        // based on semanticRole, enabling "change brand with one click".
-        const rebrandCount = rebrandColorsFromTokens(stored.graph, stored.rootId, tokenIndex);
-
-        // Full brand inheritance: apply component recipes (button/card/badge/
-        // input/nav specs) + typography hierarchy from the parsed DesignSystem.
-        // This is what turns a "color swap" into an actual brand makeover —
-        // buttons get pill shapes, cards get brand shadows, headings get the
-        // brand's font hierarchy with proper weights and letter-spacing.
-        const inheritanceResult = applyBrandInheritance(stored.graph, stored.rootId, parsedDs);
-
-        // Second contrast-aware text pass: applyBrandInheritance may have
-        // changed card/nav backgrounds to brand-specific surface values that
-        // don't match the token-level color.surface the first rebrand pass
-        // used. Re-run text-only rebrand so text contrast is computed against
-        // the FINAL rendered fills (fixes dark-brand-on-light-scene collapse).
-        rebrandColorsFromTokens(stored.graph, stored.rootId, tokenIndex, { textOnly: true });
+        // Aggressive rebrand is OPT-IN. It overwrites every off-palette
+        // color in the scene with the closest brand token and applies
+        // component recipes (buttons/cards/badges/nav), which is what you
+        // want when asking "rebrand this to Stripe" but is destructive
+        // when the scene carries meaningful non-palette colors — status
+        // greens, priority reds, chart accents. Previously `defineTokens`
+        // ran both paths unconditionally; the side effect was that a
+        // Vercel-style dashboard lost its teal/orange/red status palette
+        // because every off-palette color was rounded to the closest
+        // brand match, which for dark-first brands like Linear collapses
+        // onto the success green.
+        const rebrand = op.rebrand === true;
+        let rebrandCount = 0;
+        let inheritanceResult = { typography: 0, buttons: 0, cards: 0, badges: 0, inputs: 0, navs: 0 };
+        if (rebrand) {
+          rebrandCount = rebrandColorsFromTokens(stored.graph, stored.rootId, tokenIndex);
+          inheritanceResult = applyBrandInheritance(stored.graph, stored.rootId, parsedDs);
+          // Second contrast-aware text pass: applyBrandInheritance may
+          // have changed card/nav backgrounds to brand-specific surface
+          // values that don't match the token-level color.surface the
+          // first rebrand pass used. Re-run text-only rebrand so text
+          // contrast is computed against the FINAL rendered fills
+          // (fixes dark-brand-on-light-scene collapse).
+          rebrandColorsFromTokens(stored.graph, stored.rootId, tokenIndex, { textOnly: true });
+        }
 
         // Re-run Yoga layout: applyBrandInheritance mutated padding / radius /
         // font-size / card heights and those changes cascade through every
@@ -2084,7 +2104,23 @@ export async function handleEdit(input: {
     lines.push(`Next: reframe_inspect({ sceneId: "${lastSceneId}" })`);
   }
 
-  return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: 'image/png' }> =
+    [{ type: 'text', text: lines.join('\n') }];
+
+  // Inline PNG of the last-edited scene. `lastSceneId` is tracked by the
+  // op loop and points at whichever scene the final mutation landed on,
+  // which is the one the user most likely cares to see.
+  if (input.preview !== false && lastSceneId) {
+    const stored = getScene(lastSceneId);
+    if (stored) {
+      try {
+        const image = await renderPreview(stored.graph, stored.rootId);
+        if (image) content.push(image);
+      } catch { /* preview is additive */ }
+    }
+  }
+
+  return { content };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────

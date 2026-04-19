@@ -335,6 +335,15 @@ export interface SceneNode {
   // Grid
   gridTemplateColumns: GridTrack[];
   gridTemplateRows: GridTrack[];
+  /**
+   * Parsed CSS grid-template-areas matrix — each row is an array of
+   * area-name cells, with `.` marking an empty cell. The importer fills
+   * this on the PARENT when it sees `grid-template-areas`; children that
+   * specify `grid-area: <name>` then look up the bounding box of that
+   * name in this matrix to derive their gridPosition (col/row/span).
+   * Empty array when the grid uses only track counts (no named areas).
+   */
+  gridTemplateAreas: string[][];
   gridColumnGap: number;
   gridRowGap: number;
   gridPosition: GridPosition | null;
@@ -444,6 +453,14 @@ export interface NodeMeta {
   brandLabel?: string;
   /** ISO date for registry entries. */
   registeredAt?: string;
+  /**
+   * Raw SVG markup preserved from the HTML importer. Set on VECTOR nodes
+   * imported from `<svg>` elements so HTML/React exporters can emit the
+   * real icon instead of a fallback rect. Rasterizers that don't know
+   * how to render full SVG (CanvasKit only understands path `d` strings)
+   * still fall back to the bbox.
+   */
+  svgMarkup?: string;
 }
 
 export interface TokenBindings {

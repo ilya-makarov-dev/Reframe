@@ -128,3 +128,16 @@ phase*-report.md
 # scripts/test-*.ts (those are permanent runners whitelisted above).
 /test-*.ts
 /test-*.js
+
+# ─── Ad-hoc export output in repo root ──────────────────
+# Probe scripts under scripts/ write exports (pdf/tsx/lottie/site)
+# to repo root for manual inspection. Disposable, regenerated
+# every run — nothing here belongs in version control.
+/*.pdf
+/*.tsx
+/*.lottie.json
+/*.module.css
+/*-animated.html
+/*.export.html
+/*.export.tsx
+/stress-site.html

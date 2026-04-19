@@ -937,10 +937,20 @@ export function startHttpSidecar(port = 4100): void {
           // tokens/audit/gesture/intent endpoints check it. Without
           // this call those endpoints all 400 with "No project open".
           // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const { setProjectDir: setToolsProjectDir } = require('./tools/project.js');
-          setToolsProjectDir(workspace);
-          const n = loadProjectScenes(workspace);
-          process.stderr.write(`reframe HTTP: auto-loaded ${n} scenes from .reframe/\n`);
+          const { setProjectDir: setToolsProjectDir, getProjectDir: getToolsProjectDir } = require('./tools/project.js');
+          // Respect an already-set project dir — a test harness or
+          // explicit caller (phase7-platform-http, an embedding app)
+          // may have pointed the tools/store at a tmp dir before boot.
+          // Overwriting that here silently hijacked their reads/writes
+          // back to cwd's .reframe/, leaking real-project intents into
+          // tests and leaving the tmp dir half-wired.
+          if (!getToolsProjectDir()) {
+            setToolsProjectDir(workspace);
+            const n = loadProjectScenes(workspace);
+            process.stderr.write(`reframe HTTP: auto-loaded ${n} scenes from .reframe/\n`);
+          } else {
+            process.stderr.write(`reframe HTTP: project dir pre-set to ${getToolsProjectDir()}, skipping cwd auto-load\n`);
+          }
         } else {
           // No .reframe/ yet. Defer project init so the first `storeScene`
           // (e.g. the user clicking "Create Canvas" on the empty dashboard)
