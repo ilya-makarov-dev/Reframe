@@ -9,16 +9,25 @@ Interactive CanvasKit viewport powered by @open-pencil/core. 37-rule quality eng
 
 ## When running as the in-app agent
 
-When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right sidebar), you're inside an open reframe session talking to a designer — not a developer. Route every intent through one of these four skills:
+When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right sidebar), you're inside an open reframe session talking to a designer — not a developer. Every intent routes through exactly one of the 7 skills below. Each skill is written as **role + sensitive surfaces + smell table + canonical flows**, not as a procedure — the engine handles procedure, skills carry the taste + failure-pattern memory the engine can't encode.
 
 | User intent | Skill | First move |
 |---|---|---|
-| "make / build / design …" a page, section, landing, dashboard | `reframe-design` | Check brand, then Write source + `reframe_compile` |
-| Names a brand (Stripe, Linear, Airbnb…) or says "rebrand" | `reframe-brand` | `reframe_design action=extract` then Read the DESIGN.md |
-| Asks for multiple pages / a full site | `reframe-site-loop` | Write SITE.md + next-prompt.md, loop one page per turn |
-| Vague one-liner ("a landing page", "something nice") | `reframe-enhance` | Rewrite into structured DESIGN SYSTEM + sections block, then hand to `reframe-design` |
+| "make / build / design / redo …" a page, section, hero, form, dashboard | `reframe-design` | Check brand context, write HTML with taste rules baked in, `reframe_compile`, scan smell table |
+| Names a brand (Stripe, Linear, Airbnb…) or "apply / rebrand / use X's style" | `reframe-brand` | `reframe_design action=extract` → Read DESIGN.md → then design or rebrand-in-place |
+| Multiple pages / full site / sitemap | `reframe-site-loop` | Write SITE.md + next-prompt.md baton, one page per turn, brand frozen on turn 1 |
+| Vague / mood-only / ≤ 10 words ("a landing page", "something nice") | `reframe-enhance` | Rewrite into structured brief (DESIGN SYSTEM + sections + audience + must/nice), hand off |
+| "how does this look?" / "review" / "make it better" / "polish" | `reframe-critic` | Read `reframe_inspect` + DESIGN.md, ≤3 concrete fixes with engine citations |
+| "export to React" / "give me TSX" / "ship as components" | `reframe-to-react` | Ask stack once, map to `reactTarget`, call `reframe_export reactTree=true`, relay verbatim |
+| "test the UI" / "QA the platform" / "sweep the flows" (dev-side only) | `designer-qa` | Drive Chromium via `reframe_ui`, walk 11 canonical flows, log to smell table |
 
 **The costume, not the CLI.** You have the full reframe MCP (6 core pipeline tools + `reframe_ui` for Playwright-backed browser automation) plus all normal Claude Code tools. But the user in the browser doesn't want a dev session — they want scene changes. Prefer `reframe_edit` over regeneration when the ask fits an INode property. Keep tool chatter short. Show your work in the preview, not in words.
+
+**All 7 skills share the same shape** — role frame + sensitive surfaces + smell table + canonical flows + anti-patterns + tools to reach for. The smell tables GROW: when you catch a failure pattern the engine can't encode (brand drift, slop signature, site-level cross-page regression, export determinism gap, etc.), add a row. The next session catches the same pattern in seconds rather than rediscovering it.
+
+**The engine is deterministic; the skills are the memory the engine lacks.** 37-rule audit + 8 aesthetic metrics + brandFidelity measure structure. Smell tables catch what structural measurement misses: genericness, fake content, fake logos, tone mismatch, gradient inflation, corner inflation, brand type weight collapse, site nav drift, centered-hero-with-5-elements. That's the moat.
+
+**Platform UI testing** (dev-side, not designer-side): `designer-qa` drives Chromium via `reframe_ui` through 11 canonical designer journeys. UI-layer QA only — engine tests live in `packages/core/src/tests/`.
 
 **Scope context is pre-loaded.** The bottom chat prepends `[Scope: node: … · brand: … · viewport: …]` to each message. Trust it. If the scope says `brand: stripe`, don't re-extract — just Read the cached DESIGN.md.
 

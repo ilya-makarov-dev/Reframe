@@ -1,127 +1,112 @@
 ---
 name: reframe-to-react
-description: Use when the user wants to convert a reframe scene into production-ready React code — "export to React", "make this a component library", "refactor this into components", "give me the React code I can ship". This skill is a GUIDE layer over the deterministic engine-side exporter `reframe_export format=react reactTree=true` — it elicits the user's stack preference (shadcn / vanilla / styled / inline) and translates that into the right engine call. No LLM-rewriting of JSX; the engine does the transformation byte-deterministically.
+description: Use when the user wants to ship a compiled reframe scene as React code — "export to React", "give me the code", "make this a component library", "refactor into sections", "TSX please". You orchestrate the stack choice (inline / css-modules / tailwind / styled-components) and hand off to the deterministic engine exporter. You never hand-rewrite the emitted JSX — that would break byte-determinism, which is reframe's moat.
 allowed-tools:
   - "mcp__reframe__reframe_export"
   - "mcp__reframe__reframe_inspect"
   - "Read"
 ---
 
-# reframe → React guide
+# reframe-to-react
 
-**This skill does NOT transform code.** The engine does, deterministically. Your role is to (a) ask the user which stack they want, (b) call `reframe_export` with the right parameters, (c) help them navigate the output tree.
+**You are a stack translator, not a transpiler.** The engine already knows how to turn an INode tree into deterministic React — same scene + same options → byte-identical output. What the engine doesn't know is which stack the user is shipping to: inline styles? CSS modules? Tailwind + shadcn? Styled-components?
 
-Why: visual fidelity is reframe's moat. LLM-rewriting of exported JSX would break determinism — same scene, different output, subtle style drift. Instead, the engine's `exportToReactTree` emits a multi-file tree deterministically (semantic-role → section files, tokens → CSS vars, entry page that composes everything). You orchestrate; the engine delivers.
+Your job: ask that once, map to `reactTarget`, call `reframe_export` with `reactTree: true`, relay the tree back verbatim. **Never rewrite the emitted JSX.** If the tree doesn't match what the user wants, fix the *source scene* (set semanticRoles, rename nodes) and re-export.
 
-## How it works
+## Sensitive surfaces
 
-The MCP tool `reframe_export` supports a `reactTree: true` flag plus tree-mode options:
+Where React export trips:
 
-```ts
-reframe_export({
-  sceneId: "<id>",
-  format: "react",
-  reactTree: true,
-  reactTarget: "inline" | "css-modules" | "tailwind" | "styled-components",
-  reactExtractSections: true,     // default — split children with semanticRole
-  reactExtractPrimitives: false,  // Phase 2 (scaffolded, no-op currently)
-  reactExtractHooks: false,       // Phase 3 (scaffolded, no-op currently)
-  reactOutputBase: "src",         // default
-  reactPageSlug: "pricing",       // default: derived from scene name
-  typescript: true                // default
-})
-```
+- **Sections extraction missed a region** — the engine splits children that have `semanticRole`. If the scene's top-level sections don't carry roles, extraction cascades to a "no-role fallback" (≥3 descendants) which may over- or under-split. Fix in the source scene, not the output.
+- **Stack mismatch** — user says "shadcn" but scene has handwritten buttons; engine emits `<button>`, not `<Button>` from `@/components/ui`. Phase 2 roadmap; surface the gap.
+- **Token drift on re-export** — scene tokens changed between exports; regenerated `tokens.css` / `tailwind.config.ts` diverge from a previously committed version. Diff before merging.
+- **TypeScript prop types missing** — engine emits JSX with typed props only if the source scene has `semanticRole` + text slots on the extracted sections. Untyped output needs source-level role annotation.
+- **Accessibility leak on regeneration** — if the user edits emitted JSX to add `aria-*` and re-exports, the edits get clobbered. Attributes must live on the source scene or in a wrapper, not in the emitted file.
 
-Output: materialized to `.reframe/exports/<slug>-react/` with `src/components/sections/`, `src/pages/`, `src/styles/tokens.css`, and optional `tailwind.config.ts` sketch.
+## Smell table
 
-See [references/engine-options.md](references/engine-options.md) for every parameter with examples.
+| Smell | Why it's a problem | Fix |
+|---|---|---|
+| User asks "wrap buttons in shadcn Button" | Can't hand-rewrite emitted JSX | Tell them: Phase 2 roadmap; currently emits raw `<button>`; they can wrap in their own layer |
+| Emitted tree has 1 giant section file instead of 3 | Source scene lacks `semanticRole` on top children | Set roles in source (via `reframe-design` or direct `reframe_edit`), re-export |
+| `tokens.css` has hex literals instead of var() refs | Design system wasn't loaded at export time | Ensure `designSystem` param is on at export; or pre-call `reframe_inspect` to confirm brand is active |
+| Same export twice gives different files | Would be an engine bug (determinism broken) | Not a skill fix — file an engine bug. Don't work around it here. |
+| User says "just give me one file" | Tree mode produces 5+ files | Drop `reactTree: true`, use plain `format: "react"` — single-file dump |
+| User wants to edit the output directly | That's a dead end on re-export | Push them to edit the source scene; re-export produces clean tree |
 
-## Workflow
+## Canonical flow
 
-### 1. Ask the user once (the only judgment call)
+One shape, every time:
 
-```
-Which React stack?
-  1. Inline styles, just split to files (fastest, zero deps)
-  2. Vanilla JSX + CSS modules (framework-agnostic, no runtime deps)
-  3. Tailwind + shadcn/ui (best match for modern projects)
-  4. Styled-components / Emotion (CSS-in-JS)
-```
+1. **Scene must be compiled.** If not, route to `reframe-design` first.
+2. **Ask the stack once.** Four options (inline / css-modules / tailwind / styled-components). Default to css-modules if user doesn't care.
+3. **Surface implementation status** honestly: inline + css-modules are Phase 1 (fully implemented); tailwind emits a config sketch but falls back to inline for now; styled-components scaffolded, same fallback.
+4. **Call the engine.**
+5. **Relay the tree verbatim** — paths matter.
+6. **Answer follow-up navigation questions** about the output; refuse requests that would require hand-editing the emitted JSX.
 
-If the user doesn't care → default to option 2 (CSS modules) as the safest neutral.
+## The stack mapping
 
-**Current implementation status** (always surface to user):
-- Options 1 + 2 fully implemented
-- Options 3 + 4 scaffolded: currently fall back to inline styles, but emit the `tailwind.config.ts` sketch when target=tailwind (for Phase 2 when full Tailwind-class rendering lands)
+| User says | `reactTarget` | Phase | Output shape |
+|---|---|---|---|
+| "inline styles" / "just split to files" / "no CSS-in-JS" | `"inline"` | 1 (working) | `<div style={{}}>` in each section file |
+| "CSS modules" / "vanilla CSS" / no preference | `"css-modules"` | 1 (working) | `styles.module.css` per section + CSS-var tokens |
+| "Tailwind" / "tailwind + shadcn" / "utility classes" | `"tailwind"` | 2 (scaffold) | Emits `tailwind.config.ts` sketch, falls back to inline for now |
+| "styled-components" / "emotion" / "CSS-in-JS" | `"styled-components"` | 2 (scaffold) | Scaffolded, falls back to inline for now |
 
-### 2. Call the engine
-
-Map user choice → `reactTarget`:
-
-| Choice | `reactTarget` |
-|---|---|
-| 1. Inline-split | `"inline"` |
-| 2. Vanilla + CSS modules | `"css-modules"` |
-| 3. Tailwind + shadcn | `"tailwind"` |
-| 4. Styled-components | `"styled-components"` |
-
-Call:
+## The engine call
 
 ```ts
 reframe_export({
   sceneId: "<id>",
   format: "react",
   reactTree: true,
-  reactTarget: "<chosen>",
-  typescript: true,
+  reactTarget: "<inline | css-modules | tailwind | styled-components>",
+  reactExtractSections: true,    // default — split children with semanticRole
+  reactOutputBase: "src",        // default
+  reactPageSlug: "<slug>",       // default: derived from scene name
+  typescript: true,              // default
 })
 ```
 
-### 3. Report the tree to the user
+Output materializes to `.reframe/exports/<slug>-react/`. Engine returns a text summary with entry file, section list, tokens path, and any scaffolded-feature notes. Relay verbatim.
 
-The engine returns a text summary with:
-- Export path (e.g. `.reframe/exports/pricing-react/`)
-- Entry file (e.g. `src/pages/pricing.tsx`)
-- Section list (each with name, semanticRole, path)
-- Tokens path (if designSystem was active)
-- Notes (any scaffolded-but-unimplemented features the user requested)
+## Anti-patterns
 
-Relay this verbatim. Don't paraphrase — paths matter.
+- **Hand-rewriting the emitted JSX.** Kills determinism. If the tree is wrong, fix the source scene.
+- **Promising Phase 2/3 features as working now.** Primitives extraction, hook extraction, tailwind fully-rendered classes — all scaffolded, not implemented. Surface the limitation.
+- **Feature-adding during export.** "Also add a newsletter signup" — that's `reframe-design`, not export.
+- **Opening files for the user.** Give them the path; they open it.
+- **Reformatting output.** Engine is the source of truth. Prettier disagreement is not yours to resolve.
 
-### 4. Answer follow-up questions
+## Tools to reach for
 
-User may ask:
-- **"Can you open it?"** → don't; just give them the path, they open it themselves
-- **"Can you add a shadcn Button wrapper?"** → NOT THIS SKILL. You don't edit the engine's output. Point to Phase 2 roadmap (see [references/roadmap.md](references/roadmap.md))
-- **"The extraction missed a section"** → check if the source scene has `semanticRole` on the intended node. If not, the extraction cascaded to "no-role fallback" (≥3 descendants). Suggest setting semanticRole in reframe-design and re-exporting.
-- **"Can you merge everything back into one file?"** → drop `reactTree: true`, use `reframe_export format=react` without tree flag (existing single-file exporter)
+- `reframe_export format=react reactTree=true ...` — the main call
+- `reframe_export format=react` (no reactTree) — single-file fallback when user asks
+- `reframe_inspect sceneId=X includeSemantic=true` — verify source scene has semanticRoles before asking about sections
+- `Read` — navigate the emitted tree when the user asks to preview a specific file
 
-## Hard rules
+## Gotchas
 
-1. **Never hand-rewrite the engine's output.** If the tree isn't what the user wants, fix the **source scene** (set semanticRole, change structure) and re-export. Don't edit the emitted .tsx files — that's a dead end.
-2. **Never promise Phase 2/3 features as working now.** Primitives extraction and hook extraction are scaffolded but not implemented. Surface the limitation honestly; point to [references/roadmap.md](references/roadmap.md).
-3. **Respect determinism.** Same scene + same options → same file tree, byte-equal. If a user reports non-determinism, it's an engine bug to file, not something to work around in the skill.
-4. **No feature additions beyond export.** "Add a newsletter signup" is a reframe-design task, not a to-react task.
+- **Scene must be compiled.** Tree extraction reads the in-memory graph; uncompiled scene = nothing to export.
+- **Determinism is a feature.** Same input → same output. If the user reports drift, file an engine bug; don't compensate in the skill.
+- **First export writes to `.reframe/exports/<slug>-react/`**; subsequent exports overwrite. Tell the user if they have uncommitted edits in there — they'll lose them.
+- **Google Fonts are emitted as `<link>` preconnects**, not self-hosted. If the user needs self-hosting, that's a post-export step outside this skill.
 
 ## When NOT to use this skill
 
-- User says "just give me the React code, I'll refactor it myself" → call `reframe_export format=react` WITHOUT `reactTree`, give them the single-file dump
-- User asks for HTML export (not React) → that's the plain `reframe_export format=html` path
-- Scene hasn't been compiled yet → route to [reframe-design](../reframe-design/SKILL.md) first
+- User wants HTML export → `reframe_export format=html` directly (not this skill)
+- User wants to design a NEW scene, not export an existing one → `reframe-design`
+- User wants to tweak emitted JSX after seeing it → point back to source scene; don't edit the output
+- User wants SVG / PNG / PDF / Lottie → `reframe_export` with the matching format; not this skill
 
-## References
+## Growing the smell table
 
-- [references/engine-options.md](references/engine-options.md) — every parameter with examples + defaults
-- [references/output-tree.md](references/output-tree.md) — what the emitted file tree looks like, per target
-- [references/roadmap.md](references/roadmap.md) — what's Phase 1 (now), Phase 2/3 (planned)
+When export produces an unexpected shape that a future session would miss:
 
-## Examples
+1. Name the signature ("single giant section file", "tokens as literals not vars", "type preset missing")
+2. Why (usually traces to a missing annotation in the source scene)
+3. Fix pointer (which op on the source, or which `reactTarget` flag)
+4. Add the row
 
-- [examples/css-modules-export.md](examples/css-modules-export.md) — typical CSS-modules export, full trace
-- [examples/tailwind-sketch.md](examples/tailwind-sketch.md) — tailwind target with Phase-2 scaffold behavior
-
-## Related
-
-- [reframe-design](../reframe-design/SKILL.md) — generates the scene. Tree quality depends on good semanticRoles on top-level sections.
-- [reframe-brand](../reframe-brand/SKILL.md) — DESIGN.md drives the emitted tokens.css / tailwind.config.ts sketch
-- [reframe-critic](../reframe-critic/SKILL.md) — optional pre-export pass to ensure the source scene is worth productionizing
+Each smell caught = the next export either produces the right shape or catches the failure in 10 seconds.

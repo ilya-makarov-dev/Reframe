@@ -164,6 +164,10 @@
       showLog();
       var b = document.createElement('div');
       b.className = 'bc-bubble bc-' + role;
+      // Stable testid so designer-qa probes can grab the last reply
+      // without knowing the class-name combo. role is 'user' or
+      // 'assistant'; third-party bubbles get their own.
+      b.setAttribute('data-testid', 'chat-bubble-' + role);
       b.textContent = content;
       logEl.appendChild(b);
       logEl.scrollTop = logEl.scrollHeight;

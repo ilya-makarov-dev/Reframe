@@ -274,6 +274,7 @@
     // Build overlay.
     var overlay = document.createElement('div');
     overlay.className = 'brand-browser show';
+    overlay.setAttribute('data-testid', 'brand-browser');
     var cardsHtml = brands.length === 0
       ? '<div style="padding:40px;text-align:center;color:var(--text-tertiary)">No brands registered. Use reframe_design to load one.</div>'
       : brands.map(function(b) {

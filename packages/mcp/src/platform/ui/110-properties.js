@@ -132,7 +132,7 @@
         '<div class="props-section">' +
           '<div class="props-section-header">Audit</div>' +
           '<div class="props-section-body">' +
-            '<div class="scene-dash-audit-score">' +
+            '<div class="scene-dash-audit-score" data-testid="audit-score">' +
               (errors > 0 ? '<span class="score-bad">' + errors + ' error' + (errors > 1 ? 's' : '') + '</span>' : '') +
               (warnings > 0 ? '<span class="score-warn">' + warnings + ' warning' + (warnings > 1 ? 's' : '') + '</span>' : '') +
               (errors === 0 && warnings === 0 ? '<span class="score-ok">All clean</span>' : '') +

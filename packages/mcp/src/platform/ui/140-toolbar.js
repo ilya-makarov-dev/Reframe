@@ -424,6 +424,7 @@
 
     var overlay = document.createElement('div');
     overlay.className = 'export-preview show';
+    overlay.setAttribute('data-testid', 'export-modal');
     overlay.innerHTML =
       '<div class="export-preview-panel">' +
         '<div class="export-preview-head">' +

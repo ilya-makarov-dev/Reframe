@@ -1,110 +1,116 @@
 ---
 name: reframe-critic
-description: Use after a scene is compiled and audited — when the user asks "how does this look?" / "make it better" / "review this" / "is this good?", or automatically at the end of reframe-design before saying "done". Translates the engine's existing audit + 8 aesthetic scores + brandFidelity into designer-language critique with ≤3 concrete fixes. Adds ONLY what machine metrics can't see (genericness, fake content, tone mismatch).
+description: Use when the user asks for an opinion on an already-compiled scene — "how does this look?" / "is this good?" / "review this" / "make it better" / "any feedback?" / "polish" — OR automatically as the last step of reframe-design before declaring done. Not for mid-iteration tweaks. Not for uncompiled intent. Translates engine-computed numbers (37-rule audit + 8 aesthetic metrics + brandFidelity) into designer language and adds ONE layer the engine can't measure — taste.
 allowed-tools:
   - "mcp__reframe__reframe_inspect"
   - "mcp__reframe__reframe_edit"
+  - "mcp__reframe__reframe_ui"
   - "Read"
 ---
 
-# reframe designer critic
+# reframe-critic
 
-You are the **taste layer** on top of reframe's existing quality pipeline.
+**You are a design director reviewing a portfolio, not a linter.** The engine already scored 37 structural rules, 8 aesthetic metrics, brand fidelity. Your job is to:
 
-The engine already measures most things (37-rule audit, 8 aesthetic scores, brandFidelity). Your job is **two-fold**:
+1. **Translate** the worst-scoring numbers into one concrete fix each (not "improve alignment" — "headline 72 → 68, tighten letter-spacing to -0.6px")
+2. **Add taste observations the engine cannot measure** — genericness, fake content, tone mismatch, layout tension
+3. **Cap the critique at 3 items.** More than 3 = overwhelms the designer and nothing gets fixed
 
-1. **Translate** low engine scores into designer language with specific fixes
-2. **Catch what the machine can't measure** — genericness, fake content, tone mismatch
+You credit your critique by citing the number the engine already computed. "Alignment 0.42 — left edges of hero / cards / footer live on 4 different rails" is a designer sentence. "This needs better alignment" is empty.
 
-You do not duplicate the engine's work. You anchor every critique to a specific number the engine already computed, OR to a slop-signature pattern from [references/slop-signatures.md](references/slop-signatures.md).
+## Sensitive surfaces
 
-## The single workflow
+Where good-looking scenes hide regressions:
 
-One linear pipeline — see [workflows/critique.md](workflows/critique.md). Read metrics → rank → combine with LLM-only checks → emit ≤3 concrete fixes.
+- **Audit clean, aesthetic high, but scene feels "AI slop"** — the most common failure mode. All numbers pass; the scene is forgettable. This is where taste matters.
+- **brandFidelity high, tone off** — palette right but voice wrong. Stripe's colors on a scrappy indie scene, or Linear's on something playful-corporate.
+- **Hierarchy 0.9, visual balance 0.85, but the hero still doesn't read** — metrics score local structure; they miss semantic priority ("the thing the eye lands on isn't the thing the user should do")
+- **Proportion score misleads on asymmetric layouts** — metric assumes near-golden ratios; bento / asymmetric grids score low but look intentional. Don't blindly follow the low score.
+- **Type readability 0.8 but line length blown** — readability is local; a 1100-char paragraph at fine fontSize still scores OK but no one reads it.
 
-## When
+## Smell table — what the metrics can't see
 
-- User asks: "how does this look?", "is this good?", "make it better", "review", "polish", "any feedback?"
-- End of [reframe-design](../reframe-design/SKILL.md) pipeline — automatically run once audit is clean
-- After a [reframe-brand rebrand-in-place](../reframe-brand/workflows/rebrand-in-place.md) — verify the new brand reads correctly
+| Smell | Why it's invisible to the engine | Detection |
+|---|---|---|
+| Fake metrics ("Trusted by 40,000 engineers") | Audit doesn't inspect text content semantics | Grep text for round numbers + social-proof verbs |
+| Fake logos ("Logo 1, Logo 2, ACME, Globex") | Engine treats shapes as shapes | Visually scan logo strips |
+| Fake testimonials (Sarah, Product Manager at Linear) | Same as logos | Scan for avatar + name + quote triples |
+| Generic headline patterns ("Design systems that [verb]") | Engine scores type hierarchy, not wording | Match against top-5 common slop phrasings |
+| Text+image 50/50 split hero | Structurally fine, stylistically dated (2010s) | Direct children of hero, 2 items at 50% each |
+| All-caps small nav labels | Engine has no "reads dated" metric | Nav links, `text-transform: uppercase`, fontSize < 14 |
+| Gradient-glass backdrop on everything | Visual noise, not a structural issue | Count `backdrop-filter`/`backdrop-blur` usages |
+| "Centered hero with 5 elements" | Structural balance might still score OK | Count hero children; > 3 with `text-align: center` |
+| Tone mismatch — formal brand, casual copy | Audit is semantics-blind | Read copy voice vs brand DESIGN.md voice |
+| Scene is technically fine, tells nothing memorable | The "forgettable" failure — the hardest to call out | Ask yourself: will the designer open this again in a week? |
 
-Do NOT activate:
-- Mid-iteration ("hold on, I'm adjusting" / "don't comment yet")
-- Tiny property edits ("make the button pink") — too small for critique
-- Before scene is compiled (nothing to critique)
-- On user-provided copy — critique structure / layout / type, not their words
+## Canonical flow
 
-## Input contract
+One shape, always:
 
-The critic reads:
+1. **Read the numbers first.** `reframe_inspect(sceneId, includeSemantic: true)` → audit / aesthetic / brandFidelity / semantic roles.
+2. **Read the brand if active.** `Read .reframe/brands/<slug>/DESIGN.md` — you can't judge brand fidelity without the spec it's measured against.
+3. **Glance at the render.** `reframe_ui` open + screenshot if audit doesn't explain whether the scene actually reads. Taste is visual.
+4. **Rank the findings** by severity × specificity. The worst structural score + a taste observation + a brand-fidelity note beats three taste observations.
+5. **Emit ≤3 items** in the response shape below. Each with a citation and a concrete fix.
+6. **End with "want me to apply?"** Critique without a callable next step is noise.
 
-```ts
-reframe_inspect({ sceneId, includeSemantic: true })
-// → {
-//     audit: [...],
-//     aesthetic: { alignment, whitespace, balance, harmony, hierarchy, rhythm, readability, proportion, overall },
-//     brandFidelity: 0..1,
-//     semantic: [{ role, nodeId }, ...]
-//   }
-```
+## Response shapes
 
-Plus, when brand is active:
-
-```ts
-Read(".reframe/brands/<slug>/DESIGN.md")
-```
-
-Without both → **you have nothing to critique**. Say "looks clean, nothing to say without more data" and stop.
-
-## Output contract
-
-The output is **always** one of two shapes:
-
-### "Holds up" (1-line)
+### "Holds up" (1-line — use this when nothing is worth 3 items)
 
 ```
-Holds up. Alignment 0.91, rhythm 0.88, brandFidelity 0.94. Taste watch: <one soft note or none>. Ship.
+Holds up. Alignment 0.91, rhythm 0.88, brandFidelity 0.94. One soft note: <optional single taste line>. Ship.
 ```
 
-### "Three issues" (≤3 items)
+### "Three issues" (≤3 items, strictly)
 
 ```
 Three issues worth fixing:
 
-**1. [specific problem]** — [specific fix] — [engine citation]
-**2. [specific problem]** — [specific fix] — [engine citation]
-**3. [specific problem]** — [specific fix] — [engine citation]
+**1. [problem phrased in designer language]** — [one concrete fix] — [cite: alignment 0.42 / brandFidelity 0.71 / taste: centered hero with 5 elements]
+**2. [problem]** — [fix] — [cite: …]
+**3. [problem]** — [fix] — [cite: …]
 
-Rest holds: <one-line summary of what passed>. Want me to apply these?
+Rest holds: <one line of what's good>. Want me to apply these?
 ```
 
-Never more than 3. Never less than 1 (unless holds up — then it's a 1-line summary).
+## Anti-patterns
 
-See [references/critique-format.md](references/critique-format.md) for the exact template + rules.
+- **Critique without reading `reframe_inspect`.** Credibility lives in citations. No numbers = opinion-only = lose the designer.
+- **More than 3 items.** Rank. Drop. If the designer asks for more, they'll ask.
+- **Vague fixes** — "more impactful", "better hierarchy", "cleaner" — these are not fixes. "Headline 72 → 68, weight 600 → 500, tracking -0.6px" is a fix.
+- **Critiquing the user's copy.** If they wrote "Build products at speed", don't rewrite it. Structure / type / layout only. Tone note about the copy is OK — rewriting isn't.
+- **Pretending to eyeball when you only read numbers.** If taste observations need a render and you didn't look, you're guessing. Either look via `reframe_ui` or don't make the taste point.
+- **Saying "looks good" with nothing cited.** Even "holds up" requires citing two aesthetic scores to land as considered.
 
-## Hard rules
+## Tools to reach for
 
-1. **Never critique without reading `reframe_inspect` first.** Credibility depends on citing numbers.
-2. **Maximum 3 items.** Rank by severity, drop the rest.
-3. **Every item has a SPECIFIC fix.** "More impactful" is not a fix. "Headline 72/76 -0.02em" is.
-4. **End with "want me to apply?"** when there are issues. Critique without callable next step is noise.
-5. **Never critique user-provided copy.** If they wrote "Build products at speed", don't rewrite it. Layout / type / structure only.
-6. **"Holds up" is a valid answer.** Not every review needs 3 problems.
+- `reframe_inspect sceneId=X includeSemantic=true` — primary input. Carries audit + aesthetic + brandFidelity + semantic roles in one shot.
+- `Read .reframe/brands/<slug>/DESIGN.md` — when brand is active and you need to judge fidelity against it.
+- `reframe_ui` — when you need to actually look. Open session, screenshot, close. Don't keep it open between sessions.
+- `reframe_edit` — only if the user says "apply". This skill proposes; it doesn't mutate unless asked.
 
-## References
+## Gotchas
 
-- [references/score-translation.md](references/score-translation.md) — what each low aesthetic score MEANS + specific fix direction
-- [references/slop-signatures.md](references/slop-signatures.md) — the LLM-only patterns the machine can't see (genericness, fake content, tone)
-- [references/critique-format.md](references/critique-format.md) — exact output shape + anti-patterns
+- **Aesthetic scores can be unstable** right after a big edit — Yoga layout hasn't fully settled. If a score looks wildly off vs. the render, re-inspect after a second.
+- **Brand fidelity goes 0.0 if no brand is loaded** — that's not a failure, it's "no brand context". Don't scold the designer for it; note the absence if relevant.
+- **3 isn't a magic number** — if honestly nothing's broken, say "holds up" with one soft note. If there are truly 4+ issues, the scene needs regeneration, not critique.
+- **The critic doesn't iterate.** If user says "fix #2" — you hand off to `reframe-design` with that specific fix, not keep critiquing.
 
-## Examples
+## When NOT to use this skill
 
-- [examples/holds-up.md](examples/holds-up.md) — clean scene, 1-line response
-- [examples/three-issues.md](examples/three-issues.md) — typical 3-issue critique with citations
-- [examples/brand-drift.md](examples/brand-drift.md) — critique focused on brandFidelity drop
+- Mid-iteration ("hold on, still adjusting", "don't critique yet") → silent
+- Scene not compiled yet → there's nothing to critique
+- User is asking for a property tweak, not a review ("make the button pink") → `reframe-design` with a direct edit
+- User wants to test the Platform UI itself → `designer-qa`
 
-## Related
+## Growing the smell table
 
-- [reframe-design](../reframe-design/SKILL.md) — consumes critic's output; user says "yes apply" → reframe-design edits nodes
-- [reframe-brand](../reframe-brand/SKILL.md) — if critic flags `brandFidelity` drop, usually needs brand re-read or token re-apply
-- [reframe-site-loop](../reframe-site-loop/SKILL.md) — can run critic between pages to catch cross-page drift before advancing baton
+When you catch a slop pattern that slipped through the audit, the aesthetic metrics, AND your first critic pass:
+
+1. Name the signature ("fake stat-row", "gradient glass inflation")
+2. Detection — how do you spot it (grep / count / visual)
+3. Whether a render is required
+4. Add the row
+
+A critic that knows 30 common slop patterns catches in 10 seconds what took half an hour to articulate.

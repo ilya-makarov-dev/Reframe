@@ -95,8 +95,8 @@ function renderOverview(data: DashboardData): string {
     // cold-start, scene too large, etc). The PNG layers on top when it
     // loads; on error we simply hide the <img> and the cover remains.
     const coverUrl = `/cover/${escape(owner.id)}.svg?variants=${p.members.length}`;
-    return `<div class="overview-card-wrap" data-project-slug="${escape(p.slug)}" data-scene-id="${escape(owner.id)}" data-project-name="${escape(displayName)}">
-      <a class="overview-card" href="/platform/project/${escape(p.slug)}">
+    return `<div class="overview-card-wrap" data-project-slug="${escape(p.slug)}" data-scene-id="${escape(owner.id)}" data-project-name="${escape(displayName)}" data-testid="project-card">
+      <a class="overview-card" data-testid="project-card-link" href="/platform/project/${escape(p.slug)}">
         <div class="overview-thumb" style="background-image:url('${coverUrl}');background-size:cover;background-position:center">
           <img src="/thumbnail/${escape(owner.id)}.png?scale=1" loading="lazy" alt="${escape(displayName)}" style="width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity 240ms ease" onload="this.style.opacity=1" onerror="this.remove()">
           ${p.variantCount > 0 ? `<div class="overview-variant-badge">${p.members.length} scenes</div>` : ''}
