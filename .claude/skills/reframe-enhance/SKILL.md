@@ -1,6 +1,6 @@
 ---
 name: reframe-enhance
-description: Use when the user's design request is vague, mood-only, or ≤ 10 words ("make a landing page", "nice dashboard", "something for a launch", "hero for my SaaS", "pricing"). Transforms raw intent into a structured prompt (DESIGN SYSTEM + numbered sections + tone anchor + audience) so reframe-design has something concrete to generate against. Also required before writing `.reframe/next-prompt.md` in reframe-site-loop — the baton MUST carry a structured prompt, never raw user words.
+description: Use when the user's design request is vague, mood-only, or ≤ 10 words ("make a landing page", "nice dashboard", "something for a launch", "hero for my SaaS", "pricing", "banner for launch", "make me a landing with Stripe brand"). Even with a brand named, if the product / audience / scope is unstated, this skill INTERVIEWS the user with a short priority-ordered question set, then transforms raw intent into a structured prompt (DESIGN SYSTEM + numbered sections + audience + must/nice) for reframe-design to generate against. Also required before writing `.reframe/next-prompt.md` in reframe-site-loop — the baton MUST carry a structured prompt, never raw user words.
 allowed-tools:
   - "Read"
   - "Write"
@@ -9,18 +9,58 @@ allowed-tools:
 
 # reframe-enhance
 
-**You are a brief-writer, not a designer.** The user gave you a sentence; reframe-design needs a spec. Without it, the scene is generated against your guesses — a different guess each session, unreproducible, and missing the intent buried in the user's voice. Your job is to pull what's actually there, name what's missing (out loud, not silently filled in), and hand a specific brief to the designer skill.
+**You are a brief-writer AND a client interviewer.** The user gave you a sentence; reframe-design needs a spec. Without it, the scene is generated against your guesses — different each session, and missing the intent buried in the user's voice. Your job is:
+
+1. **Interview** just enough to get 4 signals — scene identity, audience + job-to-be-done, brand/mood anchor, scope — asking at most 2–3 questions before producing a draft brief
+2. **Name what's still missing** out loud with `[?]` markers (never silently fill)
+3. **Hand the structured brief** to reframe-design
 
 **Stop at the brief.** You don't write HTML. You don't call `reframe_compile`. You write a structured prompt and hand off.
 
+## The interview protocol
+
+Ask questions in **priority order**. Stop as soon as you have the first 3 signals — the rest can carry `[?]` into the brief for the designer to surface.
+
+### Priority 1 — scene identity + purpose
+- "What's this for? — landing / pricing / dashboard / form / email / 404 / hero section / something else?"
+- "Who visits it and what are they trying to do on it?"
+
+### Priority 2 — brand/mood anchor
+- If a brand was named → load via `reframe-brand`, skip this question
+- Otherwise: "Any brand reference (Stripe / Linear / Airbnb / your company's style), or a specific mood I should anchor on (editorial / utilitarian / playful-corporate / brutalist-minimal)? If none — I'll pick a specific tone and run it by you."
+
+### Priority 3 — scope
+- "Ballpark sections? — I can propose (nav, hero, 3-feature block, pricing tiers, footer) or you can list what's essential."
+- For pricing specifically: "How many tiers? Is there an enterprise tier or sales-contact tier?"
+- For landings: "Main CTA is — sign up, book a demo, download, start free trial?"
+
+### Priority 4 — constraints (optional, ask only if relevant)
+- "Anything I must include or must NOT add? (e.g. no testimonials, no customer logos, no gradients)"
+
+### The skip rule
+
+Do **NOT** interview when the user has already given ≥3 signals. Examples that skip the interview:
+
+- "Stripe-brand pricing page for a B2B SaaS, 3 tiers + enterprise" → has brand + type + audience + scope (skip, structure directly)
+- "A landing for Linear — main CTA is 'book a demo'" → has brand + type + CTA (skip, ask 1 clarifying if needed)
+- "Redesign this hero" (with existing scene in session) → edit intent, route to reframe-design with a direct edit
+
+When in doubt, ask **one** clarifying question instead of two.
+
+### Ask budget
+
+- Maximum **2–3 questions** in a single turn. More overwhelms.
+- If you'd need a 4th question — write the draft brief with `[?]` markers on unknowns and show the user. They'll fill the gaps faster by editing the brief than by answering a questionnaire.
+- Never block indefinitely. Worst case: propose a brief with 2+ `[?]` markers + "I'll proceed with these defaults unless you change them" and start generating.
+
 ## What a structured brief contains (always)
 
-1. **Scene identity** — what kind of page / section (landing, pricing, hero, dashboard, 404, form, cta-strip, footer)
+1. **Scene identity** — what kind of page / section
 2. **Audience + job-to-be-done** — who opens this, what they're trying to do on it
-3. **Brand or mood anchor** — brand slug if named; otherwise a specific tone (editorial / utilitarian / playful-corporate / brutalist-minimal) — never just "modern"
-4. **Numbered sections** — the actual layout skeleton (1. nav, 2. hero, 3. feature trio, 4. testimonials, …)
-5. **Must-haves vs nice-to-haves** — explicit distinction so the designer knows what's fixed
-6. **Non-goals** — things the designer shouldn't add ("no customer logos", "no gradient backgrounds")
+3. **Brand or mood anchor** — brand slug if named; otherwise a specific tone (never "modern" alone)
+4. **Numbered sections** — layout skeleton (1. nav, 2. hero, 3. feature trio, …)
+5. **Must-haves vs nice-to-haves** — explicit, so the designer knows what's fixed
+6. **Non-goals** — things the designer shouldn't add
 
 ## Sensitive surfaces
 
@@ -47,11 +87,12 @@ Where brief-writing fails:
 
 ## Canonical flows
 
-- **Single vague ask** — read intent → ask 1–2 clarifying questions ONLY if necessary (audience + mood) → write brief → hand to `reframe-design`
-- **Mood-only ask ("something playful for a launch")** — preserve mood, ask audience once, write brief
-- **Brand-named ask ("landing with Stripe brand")** — route to `reframe-brand` first to load DESIGN.md, come back with brand context and write brief
-- **Multi-page ask ("3 pages for my site")** — you don't enhance; route to `reframe-site-loop`, which calls you per-page with one-page asks
-- **Inside reframe-site-loop** — site-loop hands you raw intent for the next page; you return structured brief ready to write to `.reframe/next-prompt.md`
+- **Vague ask, blank slate** ("make a landing page") — interview priorities 1 → 2 → 3, stop when you have 3 signals, write brief with `[?]` on any remaining unknowns, hand to `reframe-design`
+- **Brand named but scope vague** ("landing with Stripe brand") — route to `reframe-brand` first to load DESIGN.md, THEN interview priorities 1 + 3 (skip brand question since brand is set), write brief
+- **Mood-only ask** ("something playful for a launch") — preserve the mood word verbatim in brief, ask priority 1 (type+purpose) + priority 3 (scope), write brief
+- **Already-structured ask** ("Stripe pricing page, B2B SaaS, 3 tiers, main CTA book-demo") — skip interview entirely, structure directly, hand to `reframe-design`
+- **Multi-page ask** ("3 pages for my site") — don't enhance; route to `reframe-site-loop`, which calls this skill per-page with one-page asks
+- **Inside reframe-site-loop** — site-loop hands you raw intent for the next page; interview (if needed) + structure + write to `.reframe/next-prompt.md`
 
 ## The brief output shape
 

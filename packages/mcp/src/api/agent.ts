@@ -225,6 +225,11 @@ export async function handleAgentChat(req: IncomingMessage, res: ServerResponse)
     'mcp__reframe__reframe_edit',
     'mcp__reframe__reframe_export',
     'mcp__reframe__reframe_project',
+    // reframe_ui — 7th tool added for Platform UI automation (used by
+    // the designer-qa skill and any "eyeball the rendered scene" flow
+    // from reframe-critic). Without it in the allowed list the
+    // designer-qa skill activates but can't call its primary tool.
+    'mcp__reframe__reframe_ui',
   ];
   const allowedTools = Array.isArray(body?.allowedTools) && body.allowedTools.length > 0
     ? body.allowedTools
