@@ -1870,6 +1870,7 @@ input, textarea, select {
 .bc-mic,
 .bc-new,
 .bc-think,
+.bc-quickpicks,
 .bc-send {
   flex-shrink: 0;
   width: 36px;
@@ -1887,6 +1888,7 @@ input, textarea, select {
 .bc-mic:hover,
 .bc-new:hover,
 .bc-think:hover,
+.bc-quickpicks:hover,
 .bc-send:hover {
   background: var(--surface-hover);
   border-color: var(--border-strong);
@@ -1895,6 +1897,49 @@ input, textarea, select {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--on-accent, #fff);
+}
+/* Quick-picks: pressed = OFF (chips hidden), unpressed = ON.
+   Muted icon when off so the visual state is obvious. */
+.bc-quickpicks[aria-pressed="false"] {
+  opacity: 0.45;
+}
+
+/* Chip row below an assistant bubble — one row, horizontal wrap,
+   comfortable click targets. Appears only when quick-picks is ON
+   and the bubble carries a <choices>...</choices> marker. */
+.bc-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 8px 12px;
+  max-width: 520px;
+}
+.bc-chip-pick {
+  appearance: none;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 9999px;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.bc-chip-pick:hover {
+  background: var(--surface-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.bc-chip-pick.picked {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent, #fff);
+}
+.bc-chip-pick:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 .bc-send {
   background: var(--accent);

@@ -659,6 +659,12 @@ export function renderBottomChat(): string {
           <path d="M5.5 12.5h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
         </svg>
       </button>
+      <button class="bc-quickpicks" data-bc-quickpicks-toggle aria-pressed="true" title="Quick picks — render agent's multiple-choice questions as clickable chips (off = plain text)" aria-label="Quick picks">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <rect x="1.5" y="3" width="11" height="3" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+          <rect x="1.5" y="8" width="7" height="3" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+        </svg>
+      </button>
       <textarea
         class="bc-input"
         data-bc-input

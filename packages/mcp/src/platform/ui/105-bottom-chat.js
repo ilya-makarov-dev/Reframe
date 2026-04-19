@@ -173,6 +173,83 @@
       logEl.scrollTop = logEl.scrollHeight;
       return b;
     }
+
+    // ── Quick-pick chips (<choices>A|B|C</choices>) ──
+    //
+    // Agent can append a <choices>...</choices> marker to any multiple-
+    // choice question. When enabled, we render clickable chips below the
+    // bubble and strip the marker from visible text. When disabled, we
+    // still strip the marker silently — the question text stays clean
+    // even with the UX feature off. Toggle lives in localStorage so the
+    // user's preference persists across reloads.
+    var QUICK_PICKS_KEY = 'reframe.bottomChat.quickPicks';
+    function quickPicksEnabled() {
+      try { return localStorage.getItem(QUICK_PICKS_KEY) !== '0'; } catch (_) { return true; }
+    }
+    function setQuickPicks(on) {
+      try { localStorage.setItem(QUICK_PICKS_KEY, on ? '1' : '0'); } catch (_) {}
+      syncQuickPicksToggle();
+      // Re-process the last assistant bubble so existing chips
+      // appear/disappear without re-streaming the whole turn.
+      var lastBubble = logEl && logEl.querySelector('.bc-bubble.bc-assistant:last-of-type');
+      var lastRaw = lastBubble && lastBubble.getAttribute('data-raw');
+      if (lastBubble && lastRaw) {
+        // Remove any existing chip row attached to this bubble.
+        var existing = lastBubble.nextElementSibling;
+        if (existing && existing.classList.contains('bc-chip-row')) existing.remove();
+        lastBubble.textContent = lastRaw;
+        finalizeBubbleChoices(lastBubble);
+      }
+    }
+    function finalizeBubbleChoices(bubble) {
+      if (!bubble) return;
+      var raw = bubble.textContent || '';
+      // Support multiple markers in one bubble (rare but future-proof).
+      var re = /<choices>([^<]+)<\/choices>/g;
+      var matches = [];
+      var m;
+      while ((m = re.exec(raw))) matches.push(m);
+      if (matches.length === 0) return;
+      // Stash the raw text so toggle can re-process.
+      bubble.setAttribute('data-raw', raw);
+      // Strip markers from visible text.
+      bubble.textContent = raw.replace(re, '').replace(/\s+\n/g, '\n').trim();
+      if (!quickPicksEnabled()) return;
+      // Pull the options from the LAST marker only — the last question
+      // in a bubble is what the user will answer.
+      var last = matches[matches.length - 1];
+      var options = last[1].split('|').map(function(s) { return s.trim(); }).filter(Boolean);
+      if (options.length === 0) return;
+      var row = document.createElement('div');
+      row.className = 'bc-chip-row';
+      row.setAttribute('data-testid', 'chat-quick-picks');
+      options.forEach(function(opt) {
+        var btn = document.createElement('button');
+        btn.className = 'bc-chip-pick';
+        btn.type = 'button';
+        btn.textContent = opt;
+        btn.addEventListener('click', function() {
+          // Clicking a chip sends that text as the next user message.
+          // The input textarea is just a courtesy — we dispatch directly.
+          if (typeof window.reframeSendBottomChat === 'function') {
+            window.reframeSendBottomChat(opt);
+          } else if (input && sendBtn) {
+            input.value = opt;
+            sendBtn.click();
+          }
+          // Disable the row after one pick so the user can't double-send.
+          row.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
+          btn.classList.add('picked');
+        });
+        row.appendChild(btn);
+      });
+      bubble.parentNode.insertBefore(row, bubble.nextSibling);
+      if (logEl) logEl.scrollTop = logEl.scrollHeight;
+    }
+    function syncQuickPicksToggle() {
+      var btn = document.querySelector('[data-bc-quickpicks-toggle]');
+      if (btn) btn.setAttribute('aria-pressed', quickPicksEnabled() ? 'true' : 'false');
+    }
     // ── TodoWrite → pinned live checklist ──
     // TodoWrite is called repeatedly through a turn with the full,
     // updated todo list each time. We render it into a DEDICATED sticky
@@ -317,6 +394,9 @@
           }
           break;
         case 'tool_use':
+          // Seal any pending assistant text before showing a tool card.
+          // Sealing = scan for <choices> markers and render chip row.
+          if (pendingAssistantBubble) finalizeBubbleChoices(pendingAssistantBubble);
           pendingAssistantBubble = null;
           if (data.toolName === 'TodoWrite') {
             renderTodoChecklist(data.input && data.input.todos);
@@ -347,9 +427,14 @@
           }
           break;
         case 'done':
+          // Seal the last assistant bubble so its <choices> markers
+          // render as chips at the end of the turn.
+          if (pendingAssistantBubble) finalizeBubbleChoices(pendingAssistantBubble);
           pendingAssistantBubble = null;
           break;
         case 'error':
+          if (pendingAssistantBubble) finalizeBubbleChoices(pendingAssistantBubble);
+          pendingAssistantBubble = null;
           appendBubble('assistant', '[error] ' + (data.message || data.code || 'unknown'));
           break;
       }
@@ -379,6 +464,26 @@
     }
 
     sendBtn.addEventListener('click', send);
+    // Chip clicks dispatch the chosen option as if the user typed it and
+    // hit send. Exposed on window so the chip renderer (declared above)
+    // can reach it without tight coupling to this scope.
+    window.reframeSendBottomChat = function(text) {
+      input.value = text;
+      autosize();
+      send();
+    };
+
+    // Quick-picks toggle — renders agent's <choices> markers as
+    // clickable chips when ON. OFF silently strips markers so the
+    // question text stays clean. Default ON so the feature is
+    // discoverable; user can flip it off if it feels noisy.
+    var quickPicksBtn = $('[data-bc-quickpicks-toggle]');
+    if (quickPicksBtn) {
+      syncQuickPicksToggle();
+      quickPicksBtn.addEventListener('click', function() {
+        setQuickPicks(!quickPicksEnabled());
+      });
+    }
     if (cancelBtn) {
       cancelBtn.addEventListener('click', function() {
         if (state.agentChatId) {

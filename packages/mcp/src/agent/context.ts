@@ -133,6 +133,13 @@ export function buildAgentPreamble(opts: ContextOptions = {}): string {
     lines.push('');
     lines.push('Finish with a compact summary. 2-4 lines max: what you did + 2-3 "Next steps if useful:" suggestions. No headers, no restating the prompt.');
     lines.push('');
+    lines.push('Ask with chips when the answer is a small closed set.');
+    lines.push('  • When you ask a multiple-choice question (page type, brand mood, stack, tier count, CTA verb, etc.) and the answer is one of ~2–5 short options, emit the options as a marker AFTER the question text so the bottom chat can render clickable chips. Freeform typing still works — chips are a shortcut, not a cage.');
+    lines.push('  • Format: <choices>Option A|Option B|Option C</choices>. One line, pipe-separated, 1–3 words each option. Include a "custom" / "other" option when appropriate so the user can bail into freeform.');
+    lines.push('  • Example: "What\'s this for? <choices>Landing|Pricing|Dashboard|Form|Other</choices>"');
+    lines.push('  • Keep it optional — use chips for canonical closed choices (page type, brand mood, stack), not for open-ended asks (audience, constraints). Your question text must still read naturally without chips so fallback rendering works.');
+    lines.push('  • Never more than 6 chips in one question. Use 3–5 by default.');
+    lines.push('');
     lines.push('ONE compile per turn. After mcp__reframe__reframe_compile returns — even with audit errors — STOP and summarize. Do NOT automatically loop into reframe_inspect → reframe_edit to fix errors. List the top 2-3 findings in your summary and let the user decide ("want me to fix those?"). Auto-fix loops feel like a hang in the UI.');
     lines.push('');
     lines.push('File I/O shortcut: any `.reframe/src/<slug>.html` file you overwrite needs a Read-before-Write (Claude Code safety). One Read of the existing file (it\'s small) unlocks the Write. Don\'t `ls` the directory first — just Read the path directly and swallow the error if missing.');
