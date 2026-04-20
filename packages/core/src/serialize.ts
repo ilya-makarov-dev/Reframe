@@ -86,6 +86,8 @@ export interface INodeJSON {
   // Grid
   gridTemplateColumns?: GridTrack[];
   gridTemplateRows?: GridTrack[];
+  gridAutoRows?: GridTrack | null;
+  gridAutoColumns?: GridTrack | null;
   gridColumnGap?: number;
   gridRowGap?: number;
   gridPosition?: GridPosition | null;
@@ -399,6 +401,8 @@ export function serializeSceneNode(
   // Grid
   if (!isEmptyArray(node.gridTemplateColumns)) json.gridTemplateColumns = node.gridTemplateColumns;
   if (!isEmptyArray(node.gridTemplateRows)) json.gridTemplateRows = node.gridTemplateRows;
+  if (node.gridAutoRows) json.gridAutoRows = node.gridAutoRows;
+  if (node.gridAutoColumns) json.gridAutoColumns = node.gridAutoColumns;
   if (!compact || !isDefault('gridColumnGap', node.gridColumnGap)) json.gridColumnGap = node.gridColumnGap;
   if (!compact || !isDefault('gridRowGap', node.gridRowGap)) json.gridRowGap = node.gridRowGap;
   if (node.gridPosition !== null) json.gridPosition = node.gridPosition;

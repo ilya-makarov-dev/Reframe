@@ -37,8 +37,22 @@
       if (!e.target.closest || !e.target.closest('[data-macro-dropdowns]')) {
         $$('[data-macro-menu]').forEach(function(m) { m.classList.add('hidden'); });
         $$('[data-macro-btn]').forEach(function(b) { b.classList.remove('active'); });
+        $$('.macro-submenu.open').forEach(function(s) { s.classList.remove('open'); });
       }
     });
+    // Close on Escape — keyboard users get trapped otherwise. Capture
+    // phase beats the canvas Escape handler (which deselects nodes) so
+    // the dropdown is the first responder whenever it's open.
+    document.addEventListener('keydown', function(e) {
+      if (e.key !== 'Escape') return;
+      var anyOpen = document.querySelector('[data-macro-menu]:not(.hidden)') ||
+                    document.querySelector('.macro-submenu.open');
+      if (!anyOpen) return;
+      e.stopPropagation();
+      $$('[data-macro-menu]').forEach(function(m) { m.classList.add('hidden'); });
+      $$('[data-macro-btn]').forEach(function(b) { b.classList.remove('active'); });
+      $$('.macro-submenu.open').forEach(function(s) { s.classList.remove('open'); });
+    }, true);
 
     // ── Submenu hover ─ expand nested panel on hover of trigger ──
     $$('.macro-submenu-trigger').forEach(function(trig) {
@@ -244,12 +258,24 @@
 
     // ── Agent-delegated actions: regenerate / responsive / iterate-fix ──
     if (action === 'regenerate' || action === 'responsive' || action === 'iterate-fix') {
-      var agentInput = $('[data-agent-input]') || document.querySelector('.agent-chat-input');
+      // The bottom chat textarea was renamed from `.agent-chat-input`
+      // to `.bc-input` (data-attr `[data-bc-input]`) when the sidebar
+      // was folded into the bottom chat. The legacy selector still
+      // came first here, so after the rename Responsive / Regenerate /
+      // Iterate-fix silently fell through to the toast-only fallback:
+      // the prompt flashed, disappeared, and nothing was ever sent.
+      var agentInput = $('[data-bc-input]')
+        || document.querySelector('.bc-input')
+        || $('[data-agent-input]')
+        || document.querySelector('.agent-chat-input');
       var prompt = action === 'regenerate'    ? 'Regenerate this scene with a fresh layout while keeping the brand and content intent.'
                  : action === 'responsive'    ? 'Create responsive variants for this scene: 1440 desktop, 768 tablet, 390 mobile.'
                  : /* iterate-fix */            'Run audit and fix all failing rules on this scene.';
       if (agentInput && 'value' in agentInput) {
         agentInput.value = prompt;
+        // Fire input event so any height-autoresize / send-enable
+        // listener on the textarea picks up the new value.
+        agentInput.dispatchEvent(new Event('input', { bubbles: true }));
         agentInput.focus();
         flash('Prompt ready — press Enter to send');
       } else {
@@ -428,6 +454,12 @@
           s.totalThreads + ' thread' + (s.totalThreads === 1 ? '' : 's') +
         '</div>' +
         (s.activeBrand ? '<div class="health-item"><span class="health-dot ok"></span><span class="health-label">BRAND</span> ' + escape(s.activeBrand) + '</div>' : '');
+      // Expose the active brand so the bottom-chat chip row can render it
+      // on the project page (there's no [data-brand-picker-label] here).
+      window.__reframeActiveBrand = s.activeBrand || '';
+      if (typeof window.reframeRenderBottomChips === 'function') {
+        window.reframeRenderBottomChips();
+      }
     } catch (_) {
       healthBar.innerHTML = '<span class="health-loading">Health data unavailable</span>';
     }
@@ -460,6 +492,19 @@
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
-    overlay.querySelector('.close-btn').addEventListener('click', function() { overlay.remove(); });
-    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+    // Close handlers: × button, backdrop click, AND Escape key.
+    // Previously only × and backdrop worked — keyboard users and
+    // anyone on a trackpad had to hunt for the close button.
+    function closeExport() {
+      document.removeEventListener('keydown', onEsc, true);
+      overlay.remove();
+    }
+    function onEsc(e) {
+      if (e.key === 'Escape') { e.stopPropagation(); closeExport(); }
+    }
+    overlay.querySelector('.close-btn').addEventListener('click', closeExport);
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) closeExport(); });
+    // Use capture so this beats any descendant keydown handler
+    // (the canvas editor also listens for Escape to deselect).
+    document.addEventListener('keydown', onEsc, true);
   }

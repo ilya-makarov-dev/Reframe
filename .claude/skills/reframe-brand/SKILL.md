@@ -14,16 +14,127 @@ allowed-tools:
 
 The `reframe_design` tool (action=`extract`) pulls 300+ line DESIGN.md files from the getdesign npm catalog (60+ brands cached in `.reframe/brands/<slug>/`). The scene's `brandFidelity` score measures how well its fills, typography, and component specs match those values. Your job is to **carry the brand fully** so that score stays high, not to guess colors from memory.
 
-## Sensitive surfaces
+## DESIGN.md is the etalon — you walk it, you don't invent
 
-Where brand work tears:
+DESIGN.md was designed as a **deterministic reference** so brand work is traversable, not guessed. The getdesign catalog parses a brand into 300+ lines of concrete values (hex, fonts, weights, OpenType tags, radii, shadows, button specs, motion). Once a DESIGN.md is loaded, every field in the compiled scene must trace back to a line in it. **If DESIGN.md doesn't say it, you don't decide it** — you surface the absence.
 
-- **OpenType features** — Stripe's `tnum`, Linear's `ss01`, Airbnb Cereal's `cv11`. Missing `font-feature-settings` on every text element drops brand fidelity immediately. Most-forgotten brand detail.
-- **Type weight ladder** — brands specify a ladder (400 / 510 / 590 / 700). Scene uses 400/700 only and misses the 510/590 that make the brand feel calibrated.
-- **Corner philosophy** — Stripe 8–10px, Linear 6–8px, Airbnb 12–16px. One corner value on every card is corner inflation. Brand says use different radii for cards vs buttons vs pills.
-- **Single-accent discipline** — most brands have 1 primary + 1 secondary. Scenes drift to 3 accents because the code eats colors freely.
-- **Button height / paddingX** — brands spec 44 or 48 min-height + 16/20 paddingX. Scene uses 36px height and breaks touch target + brand feel.
-- **Motion language** — Linear: spring 100/20; Stripe: 250ms ease-out; Airbnb: longer easing. Scenes often default to 200ms ease; brand-specific motion is silent drift.
+This is the skill's core discipline. The smells below are all species of the same failure: the scene silently diverged from DESIGN.md, either because a field was dropped in transit or because the skill invented where DESIGN.md was silent.
+
+## The parse pipeline — DESIGN.md is prose; the audit reads a typed object
+
+DESIGN.md is human-readable Markdown. The audit is machine code. The bridge is a **deterministic parser** at [packages/core/src/design-system/parser.ts](packages/core/src/design-system/parser.ts) that walks the 9-section standard (awesome-design-md format) and produces a typed [`DesignSystem`](packages/core/src/design-system/types.ts) object:
+
+```
+.reframe/brands/<slug>/DESIGN.md              (prose, 300+ lines)
+        │
+        ▼    packages/core/src/design-system/parser.ts  (regex + section markers — no LLM)
+        ▼
+DesignSystem { typography, colors, components, layout, depth, responsive }
+        │
+        ▼
+brandFidelity audit checks scene fills/fonts/radii AGAINST this typed object
+```
+
+The 9 sections the parser expects:
+1. Visual Theme & Atmosphere
+2. Color Palette & Roles
+3. Typography Rules
+4. Component Stylings
+5. Layout Principles
+6. Depth & Elevation
+7. Do's and Don'ts
+8. Responsive Behavior
+9. Agent Prompt Guide
+
+**What the parser currently captures** (audit checks this):
+- **Typography per role** — hero / title / subtitle / body / caption / disclaimer / button — with fontSize, fontWeight, lineHeight, letterSpacing, textTransform, **OpenType features** (`ss01`, `tnum`, `cv01`, …), and per-breakpoint overrides
+- **Colors** — primary / background / text / accent + full role map + gradients
+- **Components** — Button variants (style / states / shadow / radius), Card / Badge / Input / Nav specs
+- **Layout** — spacing scale, grid, container widths
+- **Depth** — shadow layers per elevation tier
+- **Responsive breakpoints** — mobile / tablet / desktop overrides
+
+**What is NOT captured** (blind spots the audit cannot check — handle manually):
+- **Motion / timing / easing** — HTML doesn't express animation, and the parser currently drops motion specs. Flag as non-goal for static scenes.
+- **Voice / tone / copy guidelines** — semantic, not structural; the audit is content-blind.
+- **Philosophy prose** (Section 1) — mood and atmosphere read as guidance but don't parametrize the audit.
+- **Interaction micro-behavior** — hover cursor changes, focus-ring details beyond the `InteractiveState` fields.
+
+### Debugging when a DESIGN.md field "doesn't count"
+
+If you see a value clearly written in `.reframe/brands/<slug>/DESIGN.md` but `brandFidelity` doesn't penalize its absence in the scene, **the parser probably dropped it**. Check in this order:
+
+1. **Section heading mismatch** — parser splits on `## N. Title` and matches keywords. If a brand's DESIGN.md uses a non-standard section name ("## Colours" vs "## Color Palette"), the section is skipped. Fix: rename the section or extend `findSection` keywords in `parser.ts`.
+2. **Value format mismatch** — parser uses regex for hex, rgb, px values. A color written as `oklch(…)` or `hsl(…)` currently slips past the hex extractor. Fix: add the format to the extractor in `parser.ts`.
+3. **Field not in `types.ts`** — if DESIGN.md mentions a field the `DesignSystem` type doesn't model (e.g. detailed motion specs), the parser has nowhere to put it. Fix: extend `types.ts` + parser + audit together.
+
+When you catch a parser gap, the bug is in `packages/core/src/design-system/` — not in this skill. Log it, propose the fix, don't work around it by editing the DESIGN.md locally (that breaks other users of the same brand).
+
+### Auto-diff as you go — catch parser drift AND FIX IT without being asked
+
+**The skill's job is to enrich the etalon.** DESIGN.md → parsed `DesignSystem` is the deterministic spine that drives every brandFidelity judgment in the app. Every brand load is an opportunity to tighten that spine. When you catch a mismatch, the default is **fix the parser, not report it** — the skill improves the etalon as a side effect of normal work, and every session leaves the system slightly better calibrated.
+
+This is the inverse of a "bug report" protocol. You don't queue drift for later; you close it now.
+
+**Protocol — run every time you load a brand:**
+
+1. After `reframe_design action=extract brand=<slug>`, `Read .reframe/brands/<slug>/DESIGN.md` and note the **concrete values** in the 9 sections that matter for this scene — hex codes, font weights, radii, button height/padding, shadows, OpenType tags.
+2. Call `reframe_inspect` (or read the in-memory DesignSystem) and compare against the parsed fields.
+3. Walk the comparison with this smell-list:
+   - **Typography role present in prose, absent from `typography[role]`** → section-name mismatch or role keyword missing from parser's allowlist
+   - **OpenType tag listed in DESIGN.md, empty `fontFeatures[]`** → regex didn't match the tag notation (`'ss01'` vs `ss01` vs `"ss01"`)
+   - **Color written as `oklch(…)` / `hsl(…)` / CSS var, missing from `colors.roles`** → extractor is hex+rgb only
+   - **Component spec (Card, Badge, Input, Nav) in prose but `components.<name>` undefined** → subsection keyword miss
+   - **Per-breakpoint override described ("mobile: 32px") but `typographyBreakpoints[]` empty** → responsive parser didn't link role × breakpoint
+   - **Motion / easing described but no field to hold it** → known `types.ts` gap, NOT a parser bug; flag for the user as "worth modeling?" (architectural decision, not a drop-in fix)
+4. **Default action: patch the parser.** For every drift that has an obvious mechanical fix (keyword expansion, regex extension, extractor addition), immediately:
+   - Read the relevant section of `packages/core/src/design-system/parser.ts` (or `types.ts` if a new field on the model is needed)
+   - Apply a minimal edit — ideally ≤ 10 lines total
+   - Re-run `reframe_design extract` on the same brand to confirm the field now parses
+   - Add a row to the smell table documenting the drift + the parser change that closed it
+   - Tell the user in one sentence what you found and fixed. Don't ask permission for small mechanical patches — patch, verify, move on.
+5. **Escalate, don't patch, when:** the fix requires a new `types.ts` field (architectural change that ripples to audit + exporter), the fix would touch more than ~20 lines, the parser change could break another brand already passing, or you can't verify with the currently-loaded brand alone. In those cases: report the drift, propose the fix, wait for the user.
+6. **Never edit the DESIGN.md to hide the symptom** — it masks the bug for every other user of that brand. The DESIGN.md is the etalon; the parser catches up to it, not the other way around.
+
+**Why this matters.** The parser is deterministic but the brand catalog evolves — getdesign updates a brand upstream, new brands are added, someone writes `oklch(…)` for the first time. Without this protocol, gaps sit silent for months: fidelity reports 0.92, scene looks "close enough", user never finds out the brand's accent is `oklch(0.65 0.3 250)` and not the fallback `#0071e3`. The skill is the only layer comparing prose against types — be that layer actively, not passively.
+
+**Budget.** A drift scan on a previously-verified brand is < 15 s. A mechanical parser patch is < 5 min. If a single brand load routinely triggers 30 min of parser work, compress — keep a per-brand `verified on <date> / parser hash <X>` note in the smell table and skip re-scan unless the hash changed. The goal is a self-improving system, not a QA loop that blocks every design task.
+
+**Catalog-wide runs are NOT this skill's job.** When the user asks "audit all 60+ brands" / "harden the parser against the whole catalog", that's multi-state orchestrator work, not specialist work — the orchestrator (see `CLAUDE.md § Orchestration → Parallel fix-in-bucket`) drives the parallel-bucket shape and calls this skill's single-brand Auto-diff protocol per bucket. Don't re-implement the parallel machinery here.
+
+## Carrier contract — DESIGN.md → compiled scene
+
+Ten load-bearing axes that MUST flow from DESIGN.md into the rendered scene. Each has a known drop-path (the common way fidelity is lost in transit) and a verification probe. Walk this contract before declaring a brand "applied".
+
+| Axis | Where in DESIGN.md | Common drop | Verification |
+|---|---|---|---|
+| **1. Palette roles** (primary, secondary, semantic, neutrals) | Colors § | Hex hardcoded into scene, not bound to tokens → `brandFidelity` tanks on later edit | `reframe_inspect` → check `meta.tokenBindings.fill` set on fills |
+| **2. Type family** (primary + mono) | Typography § | Missing Google Fonts `<link>` → browser falls back to Inter silently | First text node's computed `fontFamily` == DESIGN.md primary |
+| **3. Weight ladder** (e.g. 400 / 510 / 590 / 700) | Typography.weights | Collapsed to 400/700 because the intermediate weights felt "too much" | Count distinct `fontWeight` values across scene ≥ ladder size |
+| **4. OpenType features** (ss01, tnum, cv11, …) | Typography.font-feature-settings | NOT applied to every text node (most-forgotten detail) | `probe selector:* all:true` check any non-`normal` `font-feature-settings` |
+| **5. Corner scale** (cards vs buttons vs pills have different radii) | Radius § / components.*.radius | Every container gets same radius → corner inflation | `cornerRadius` stdev across frames > 0; cards ≠ buttons ≠ pills |
+| **6. Shadow scale** (elevation tiers) | Shadows § | Every card gets the same shadow, or all shadows stripped (flat) | Distinct shadow intensities used; primary emphasis has stronger shadow |
+| **7. Button spec** (height, paddingX, radius, weight) | components.button | 36 × 12 defaults because audit wasn't checked | Every button/CTA matches DESIGN.md `minHeight` + `paddingX` + `radius` |
+| **8. Spacing rhythm** (4/8/12/16 scale or brand-specific) | Spacing § / layout.grid | Ad-hoc px values (11, 13, 17) because the unit wasn't adopted | All padding/gap values are multiples of brand spacing unit |
+| **9. Single-accent discipline** | Colors.accent | 3+ high-saturation accents creep in because the code eats colors freely | Count fills with saturation > 0.65; group by hue; should be ≤ 1 primary + 1 secondary |
+| **10. Voice / tone** (when DESIGN.md specifies it) | Voice § / Copy guidelines | Generic AI-gen copy overrides brand voice — Stripe's precise prose becomes marketing-speak | Read copy voice vs DESIGN.md Voice section; mismatch = silent drift |
+
+**Rule:** before calling `reframe_inspect brandFidelity`, re-walk this table on the compiled scene. Fidelity score tells you how bad it is; the contract tells you which axis broke.
+
+## When DESIGN.md is silent — don't fill it
+
+The getdesign catalog varies:
+
+- **Thorough brands** (Stripe, Linear, Airbnb, Vercel, Apple) — 300+ lines, every axis covered. Walk the contract, trust each field.
+- **Thin brands** (smaller or newer) — 100–150 lines, often missing motion, OpenType, component specs (button/card/input), spacing scale.
+
+When an axis is absent from DESIGN.md, the only correct moves:
+
+1. **Surface the absence** to the user in plain language — "DESIGN.md doesn't specify button radius; pick 8 px or extend the file?"
+2. **Edit the DESIGN.md** (it's a file on disk at `.reframe/brands/<slug>/DESIGN.md`) if the user gives you a value — persist for the next session.
+3. **Mark the scene as partial-fidelity** so `reframe-critic` doesn't penalize an axis DESIGN.md never defined.
+
+Never fill from memory. "Stripe's button radius is 8 px" sounds confident but is exactly the kind of invention DESIGN.md exists to prevent.
 
 ## Smell table — brand fidelity regressions
 

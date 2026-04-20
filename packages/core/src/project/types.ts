@@ -65,6 +65,14 @@ export interface ProjectManifest {
    * "currently selected" brand for UI / MCP session startup.
    */
   activeBrand?: string;
+  /**
+   * Per-virtual-project active brand overrides. Keyed by virtual project
+   * slug (owner scene slug from `groupScenesIntoProjects`). Lets the user
+   * switch brand in one project on the dashboard without leaking it into
+   * sibling projects that share this `.reframe/` dir. Readers fall back to
+   * {@link activeBrand} when the virtual key is absent — no migration.
+   */
+  activeBrandPerProject?: Record<string, string>;
   /** Ordered list of scenes */
   scenes: SceneEntry[];
 }

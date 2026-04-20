@@ -80,6 +80,13 @@
     if (!state.agentToolMap) state.agentToolMap = {};
     var abortCtrl = null;
     var pendingAssistantBubble = null;
+    var thinkingBubble = null;
+    function clearThinkingBubble() {
+      if (thinkingBubble && thinkingBubble.parentNode) {
+        thinkingBubble.parentNode.removeChild(thinkingBubble);
+      }
+      thinkingBubble = null;
+    }
 
     // ── Muted chip tracking (kind → bool). Reset when scene changes. ──
     if (!state.bottomChatChipsMuted) state.bottomChatChipsMuted = {};
@@ -120,13 +127,20 @@
         var tag = (state.selection.tag || 'node').toLowerCase();
         out.push({ kind: 'node', icon: '◉', label: tag + ' · ' + shortId(state.selection.inode) });
       }
-      // Active brand (from the brand-picker label in the header)
+      // Active brand. The dashboard has a [data-brand-picker-label],
+      // the project page does not — it surfaces brand only via the
+      // project health endpoint. Read the DOM first (dashboard path),
+      // then fall back to the global the toolbar stashes after its
+      // health probe resolves (project-page path). Without the fallback
+      // the agent lost the brand chip on every project session and the
+      // [Scope: …] prefix went out to the LLM without the active brand.
       var brandLabel = document.querySelector('[data-brand-picker-label]');
-      if (brandLabel) {
-        var brand = (brandLabel.textContent || '').trim();
-        if (brand && brand !== 'No brand') {
-          out.push({ kind: 'brand', icon: '✦', label: brand });
-        }
+      var brandText = brandLabel ? (brandLabel.textContent || '').trim() : '';
+      if (!brandText || brandText === 'No brand') {
+        brandText = (window.__reframeActiveBrand || '').trim();
+      }
+      if (brandText && brandText !== 'No brand') {
+        out.push({ kind: 'brand', icon: '✦', label: brandText });
       }
       // Viewport mode
       var vp = state.currentViewport || 'desktop';
@@ -149,6 +163,15 @@
       state.bottomChatChipsMuted[kind] = !state.bottomChatChipsMuted[kind];
       renderChips();
     });
+
+    // Expose so other modules (toolbar Preview macro, selection events)
+    // can force a chip repaint when state.currentViewport / selection
+    // changes. Previously the toolbar called window.reframeRenderBottomChips
+    // as a no-op fallback because nobody ever assigned to it; as a result
+    // the "desktop" chip went stale the moment the user switched to
+    // Preview → Mobile. Keep this assignment LAST in bindBottomChat so it
+    // only goes live after chipsEl / renderChips are ready.
+    window.reframeRenderBottomChips = renderChips;
 
     // ── Log helpers ──
     function escapeHtml(s) {
@@ -321,6 +344,13 @@
       appendBubble('user', prompt);
       pendingAssistantBubble = null;
       state.agentTodoCard = null; // start a fresh checklist for this turn
+      // Thinking indicator: before Claude emits its first text/tool_use
+      // event there's a 5-60 s gap while the subprocess boots the session,
+      // loads context, and waits for the first API token. Without this
+      // placeholder the chat looks dead and users hit send again. Removed
+      // by the first event handler below (text | tool_use | tool_result).
+      thinkingBubble = appendBubble('assistant thinking', '\u2026');
+      thinkingBubble.setAttribute('data-testid', 'chat-thinking');
 
       var body = { prompt: prompt };
       if (state.agentSessionId) body.sessionId = state.agentSessionId;
@@ -361,6 +391,7 @@
         }
         return pump();
       }).catch(function(err) {
+        clearThinkingBubble();
         if (err && err.name === 'AbortError') appendBubble('assistant', '[cancelled]');
         else appendBubble('assistant', '[error] ' + (err && err.message ? err.message : err));
         setSending(false);
@@ -377,6 +408,13 @@
         }
       });
       if (!ev || data === null) return;
+      // First substantive event (text / tool_use / tool_result / done / error)
+      // clears the "thinking…" placeholder. chat_id + session_start arrive
+      // near-instantly and don't count as "agent reached Claude".
+      if (ev === 'text' || ev === 'tool_use' || ev === 'tool_result' ||
+          ev === 'done' || ev === 'error') {
+        clearThinkingBubble();
+      }
       switch (ev) {
         case 'chat_id':
           state.agentChatId = data.chatId;
@@ -524,10 +562,15 @@
       });
     }
     input.addEventListener('keydown', function(e) {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        e.preventDefault();
-        send();
-      }
+      if (e.key !== 'Enter') return;
+      // Shift+Enter inserts a newline (standard chat UX).
+      // Plain Enter OR Cmd/Ctrl+Enter both submit. Previously only
+      // the modifier variant sent — designers trained on Slack /
+      // Discord / iMessage hit Enter, got a newline, saw nothing
+      // happen, and assumed the agent was broken.
+      if (e.shiftKey) return;
+      e.preventDefault();
+      send();
     });
 
     // ── Mic button — Web Speech API voice capture ──
@@ -625,7 +668,11 @@
         if (msg.role === 'user') {
           appendBubble('user', msg.text || '');
         } else if (msg.role === 'assistant') {
-          appendBubble('assistant', msg.text || '');
+          var restored = appendBubble('assistant', msg.text || '');
+          // Run the same sealing pass the streaming 'done' event uses,
+          // otherwise persisted bubbles ship raw <choices>X|Y</choices>
+          // markers as visible text instead of clickable chips.
+          finalizeBubbleChoices(restored);
         } else if (msg.role === 'tool_use') {
           if (msg.toolName === 'TodoWrite') {
             // TodoWrite may appear multiple times — each call redraws

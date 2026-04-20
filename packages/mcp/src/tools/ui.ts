@@ -27,12 +27,15 @@
  * drive itself — the fastest way to debug why an action failed.
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { z } from 'zod';
 import {
   openSession, getSession, listSessions, closeSession, touchSession,
   drainLogs, formatLogs,
   type UiSession,
 } from './ui-session.js';
+import { getWorkspaceRoot } from '../store.js';
 
 type Page = import('playwright').Page;
 
@@ -708,7 +711,37 @@ async function screenshot(page: Page, fullPage: boolean): Promise<Buffer> {
   return await page.screenshot({ fullPage, type: 'png' });
 }
 
+const MAX_INLINE_DIMENSION = 2000;
+
+/** Read width/height from the IHDR chunk of a PNG buffer. */
+function readPngDimensions(png: Buffer): { width: number; height: number } | null {
+  if (png.length < 24) return null;
+  if (png.readUInt32BE(12) !== 0x49484452) return null;
+  return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+}
+
 function withImage(textBody: string, png: Buffer) {
+  const dims = readPngDimensions(png);
+  if (dims && (dims.width > MAX_INLINE_DIMENSION || dims.height > MAX_INLINE_DIMENSION)) {
+    try {
+      const dir = path.join(getWorkspaceRoot(), '.reframe', 'exports');
+      fs.mkdirSync(dir, { recursive: true });
+      const ts = Date.now().toString(36);
+      const filePath = path.join(dir, `ui-screenshot-${ts}.png`);
+      fs.writeFileSync(filePath, png);
+      const kb = Math.round(png.length / 1024);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `${textBody}\n\n⛔ INLINE PREVIEW REFUSED — screenshot is ${dims.width}×${dims.height}px (limit: ${MAX_INLINE_DIMENSION}×${MAX_INLINE_DIMENSION}). Sending a PNG this large will break the chat UI, so it is not attached to this response. Full-resolution file: ${filePath} (${kb}KB). Open that file to see the screenshot. If you need to sample the UI visually in-chat, use a clipped selector screenshot or a viewport capture instead of fullPage.`,
+          },
+        ],
+      };
+    } catch {
+      // Fall through to inline — better to send a big image than nothing.
+    }
+  }
   return {
     content: [
       { type: 'text' as const, text: textBody },

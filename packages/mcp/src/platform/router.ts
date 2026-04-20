@@ -235,6 +235,48 @@ export default async function(o){
 
   // ── API ──────────────────────────────
   if (pathname.startsWith('/platform/api/')) {
+    // Reload-safe shims: after a hard reload of /platform/project/<slug>,
+    // StoreSync.pullFromMCP and a few boot-time callers fire before the
+    // editor's currentSceneId is hydrated, producing:
+    //   /platform/api/audit        → 400 (no sceneId)
+    //   /platform/api/manifest?slug=X  → 404 (route never existed)
+    //   /platform/api/project?slug=X   → 404 (route never existed)
+    // Resolve the project via the Referer (or ?slug=) and either rewrite
+    // the sceneId or return a thin JSON payload so the reload path is silent.
+    const resolveSlug = (): string | null => {
+      const qSlug = url.searchParams.get('slug');
+      if (qSlug) return qSlug;
+      const ref = (req.headers.referer || req.headers.referrer) as string | undefined;
+      if (!ref) return null;
+      const m = /\/platform\/project\/([^/?#]+)/.exec(ref);
+      return m ? decodeURIComponent(m[1]) : null;
+    };
+    if (pathname === '/platform/api/audit' && req.method === 'GET' && !url.searchParams.get('sceneId')) {
+      const slug = resolveSlug();
+      if (slug) {
+        const proj = findProjectBySlug(buildDashboardData(ctx).projects ?? [], slug);
+        const sid = proj?.members?.[0]?.id;
+        if (sid) {
+          url.searchParams.set('sceneId', sid);
+          // Downstream handler re-parses req.url, so rewrite it in place.
+          req.url = `${pathname}?${url.searchParams.toString()}`;
+        }
+      }
+    }
+    if (pathname === '/platform/api/manifest' || pathname === '/platform/api/project') {
+      const slug = resolveSlug();
+      const proj = slug ? findProjectBySlug(buildDashboardData(ctx).projects ?? [], slug) : null;
+      if (!proj) { sendJson(res, 404, { ok: false, error: 'project not found' }); return true; }
+      sendJson(res, 200, {
+        ok: true,
+        slug: proj.slug,
+        name: proj.name,
+        activeSceneId: proj.members[0]?.id ?? null,
+        scenes: proj.members.map(m => ({ id: m.id, slug: m.slug, name: m.name })),
+        activeBrand: getActiveBrand(ctx, proj.slug) ?? null,
+      });
+      return true;
+    }
     // Direct node editing + undo + audit + brands — the design tool backbone.
     if (pathname.startsWith('/platform/api/node/') ||
         pathname.startsWith('/platform/api/scene/') ||
@@ -243,6 +285,7 @@ export default async function(o){
         pathname.startsWith('/platform/api/audit/') ||
         pathname === '/platform/api/brands' ||
         pathname === '/platform/api/brand/switch' ||
+        pathname === '/platform/api/brand/apply' ||
         pathname === '/platform/api/ops' ||
         pathname.startsWith('/platform/api/history/') ||
         pathname === '/platform/api/scene/tree' ||
@@ -590,7 +633,7 @@ function buildScenePage(ctx: PlatformContext, slug: string) {
     intents: loadIntentsSafe(ctx),
     draftIntent: null,
     brands,
-    activeBrand: getActiveBrand(ctx),
+    activeBrand: getActiveBrand(ctx, slug),
     auditScore: ctx.getAuditScore?.(matching.id) ?? 92,
     totalOps: 0,
   };
@@ -777,16 +820,27 @@ function buildBrandsList(ctx: PlatformContext): string[] {
   }
 }
 
-function getActiveBrand(ctx: PlatformContext): string | undefined {
+function getActiveBrand(ctx: PlatformContext, virtualProjectSlug?: string): string | undefined {
   if (!ctx.projectDir) return undefined;
   // Previously: no cache — read project.json from disk on every request.
   // This was the #2 hot-path filesystem call after PlatformContext build.
-  const cached = memoActiveBrand.get(ctx.projectDir);
+  // Cache key now includes the virtual project slug so per-project overrides
+  // don't alias each other.
+  const cacheKey = virtualProjectSlug ? `${ctx.projectDir}::${virtualProjectSlug}` : ctx.projectDir;
+  const cached = memoActiveBrand.get(cacheKey);
   if (cached && Date.now() - cached.at <= MEMO_TTL_MS) return cached.value;
   try {
     const manifest = projectIoMod.loadProject?.(ctx.projectDir);
-    const active = manifest?.activeBrand as string | undefined;
-    memoActiveBrand.set(ctx.projectDir, { value: active, at: Date.now() });
+    if (!manifest) {
+      memoActiveBrand.set(cacheKey, { value: undefined, at: Date.now() });
+      return undefined;
+    }
+    // Prefer the per-project override, fall back to the global activeBrand.
+    const perProject = virtualProjectSlug
+      ? (manifest.activeBrandPerProject as Record<string, string> | undefined)?.[virtualProjectSlug]
+      : undefined;
+    const active = perProject ?? (manifest.activeBrand as string | undefined);
+    memoActiveBrand.set(cacheKey, { value: active, at: Date.now() });
     return active;
   } catch {
     return undefined;

@@ -90,6 +90,19 @@
     if (FRIENDLY[rawName]) displayName = FRIENDLY[rawName];
     // TEXT nodes without absorbed text → show "Text"
     if (node.type === 'TEXT' && !absorbedText) displayName = 'Text';
+    // TEXT nodes WITH text: use the live text content as the display
+    // name. node.name is frozen at import from the original text, so it
+    // stays stale after a reframe_edit characters update — chat agents
+    // report "text updated" but LAYERS still shows the old truncated
+    // name, which reads as "nothing happened." Using the current text
+    // gives immediate visual confirmation; set absorbedText='' after so
+    // we don't render the same content twice (name + preview quote).
+    if (node.type === 'TEXT' && absorbedText) {
+      displayName = absorbedText.length > 28
+        ? absorbedText.slice(0, 28) + '…'
+        : absorbedText;
+      absorbedText = '';
+    }
 
     var indent = depth * 16;
     var hasChildren = effectiveChildren.length > 0;

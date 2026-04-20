@@ -119,6 +119,8 @@ export function createDefaultNode(type: NodeType, id: string): SceneNode {
     gridTemplateAreas: [],
     gridColumnGap: 0,
     gridRowGap: 0,
+    gridAutoRows: null,
+    gridAutoColumns: null,
     gridPosition: null,
     counterAxisAlignContent: 'AUTO',
     itemReverseZIndex: false,

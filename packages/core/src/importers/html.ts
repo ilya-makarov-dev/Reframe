@@ -955,16 +955,24 @@ function resolveGridTrackToken(tok: string): { type: 'FIXED' | 'FR' | 'AUTO'; va
   }
   const minmax = t.match(/^minmax\(\s*([^,]+?)\s*,\s*(.+)\s*\)$/i);
   if (minmax) {
+    const min = minmax[1].trim();
     const max = minmax[2].trim();
     // If the max is an fr unit, the track behaves as an FR track.
     if (max.endsWith('fr')) return { type: 'FR', value: parseFloat(max) || 1 };
+    // `minmax(Npx, auto)` — common Bento idiom. Previously collapsed
+    // to AUTO(0), which made the track take content height only; a
+    // hero cell declaring `grid-row: span 2` then got 0 rows × 2 = 0
+    // extra height. The minimum IS the authoritative sizing hint here,
+    // so honor it as FIXED unless the min is also intrinsic.
     if (max === 'auto' || max === 'max-content' || max === 'min-content') {
+      const minPx = parseUnit(min);
+      if (minPx > 0) return { type: 'FIXED', value: minPx };
       return { type: 'AUTO', value: 0 };
     }
     const maxPx = parseUnit(max);
     if (maxPx > 0) return { type: 'FIXED', value: maxPx };
     // max was something unparseable — fall back to min.
-    return resolveGridTrackToken(minmax[1]);
+    return resolveGridTrackToken(min);
   }
   if (t.startsWith('fit-content(')) return { type: 'AUTO', value: 0 };
   if (t.endsWith('fr')) return { type: 'FR', value: parseFloat(t) || 1 };
@@ -2215,17 +2223,25 @@ function convertElement(
     if (ariaLabel) {
       overrides.name = ariaLabel.slice(0, 30);
     } else {
-      // Use first text content (up to 25 chars) as name hint
+      // Use first text content (up to 25 chars) as name hint —
+      // but only from structurally NEAR descendants. Previously
+      // this walked the entire subtree, which meant every
+      // wrapping frame whose deepest first-text was "axon" got
+      // named "axon", producing 4-5 nested LAYERS entries all
+      // called the same thing. Cap depth at 2: the wrapper's own
+      // direct children, and one level below. Beyond that, the
+      // text belongs to a real sub-section and shouldn't bleed
+      // up into the ancestor's label.
       let firstText = '';
-      const findFirst = (node: any): void => {
-        if (firstText) return;
+      const findFirst = (node: any, depth: number): void => {
+        if (firstText || depth > 2) return;
         if (node.kind === 'text' && node.value?.trim()) {
           firstText = node.value.trim().slice(0, 25);
           return;
         }
-        for (const c of node.children ?? []) findFirst(c);
+        for (const c of node.children ?? []) findFirst(c, depth + 1);
       };
-      findFirst(el);
+      findFirst(el, 0);
       if (firstText) {
         overrides.name = firstText;
       } else {
@@ -3186,6 +3202,24 @@ function cssToOverrides(
       if (cols) o.gridTemplateColumns = parseGridTemplate(cols);
       if (rows) o.gridTemplateRows = parseGridTemplate(rows);
       if (areas) o.gridTemplateAreas = parseGridTemplateAreas(areas);
+      // Implicit tracks — `grid-auto-rows`/`grid-auto-columns` fills
+      // cells placed beyond the explicit template. Common Bento /
+      // dashboard idiom: declare `grid-template-columns: repeat(6,1fr)`
+      // and `grid-auto-rows: minmax(200px, auto)`, let children span
+      // rows implicitly. Without this hookup every child collapsed to
+      // content height because gridTemplateRows stays empty and the
+      // layout engine defaults to `1fr` rows splitting 0 of container
+      // height. Single track expected for each.
+      const autoRows = styles['grid-auto-rows'];
+      const autoCols = styles['grid-auto-columns'];
+      if (autoRows) {
+        const parsed = parseGridTemplate(autoRows);
+        if (parsed.length > 0) o.gridAutoRows = parsed[0];
+      }
+      if (autoCols) {
+        const parsed = parseGridTemplate(autoCols);
+        if (parsed.length > 0) o.gridAutoColumns = parsed[0];
+      }
       // A single `gap:<value>` shorthand fills both column and row gaps —
       // linkedom's computed-style gives it back under the unified `gap`
       // key while keeping `column-gap`/`row-gap` as explicit overrides.

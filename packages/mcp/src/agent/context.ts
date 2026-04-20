@@ -112,7 +112,7 @@ export function buildAgentPreamble(opts: ContextOptions = {}): string {
     lines.push('');
     lines.push('Target the ACTIVE scene by default.');
     lines.push('  • The "Active scene" listed above is the canvas the user is currently looking at. Your edits MUST land there unless the user explicitly asks otherwise.');
-    lines.push('  • When you call mcp__reframe__reframe_compile, pass `name` = the active scene\'s slug (e.g. if Active scene slug="imported", use `name: "imported"`). The engine treats same-slug as UPDATE, not CREATE — so the open canvas shows the result.');
+    lines.push('  • When you call mcp__reframe__reframe_compile, the `name` argument is the active scene\'s slug as a raw string — DO NOT wrap it in extra quotes. If the active slug is imported, the JSON is {"name": "imported", "file": ".reframe/src/imported.html"} — not {"name": "\\"imported\\""}. The engine treats same-slug as UPDATE, not CREATE — so the open canvas shows the result.');
     lines.push('  • Write HTML sources to `.reframe/src/<activeSlug>.html` so re-compiles stay consistent with the active scene.');
     lines.push('');
     lines.push('Create a NEW scene only on an EXPLICIT signal from the user:');

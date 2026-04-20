@@ -346,6 +346,19 @@ export interface SceneNode {
   gridTemplateAreas: string[][];
   gridColumnGap: number;
   gridRowGap: number;
+  /**
+   * Implicit track size for rows/columns created beyond the explicit
+   * `gridTemplateRows`/`gridTemplateColumns`. Populated from CSS
+   * `grid-auto-rows` / `grid-auto-columns`. When only columns are
+   * declared but children span multiple rows, the layout engine uses
+   * this track as the template for every implicit row — otherwise the
+   * grid collapses to content height (one `FR` row split evenly)
+   * because `gridTemplateRows` is empty. Typical value:
+   * `{ type: 'FIXED', value: 200 }` for a Bento-style grid with
+   * `grid-auto-rows: 200px`.
+   */
+  gridAutoRows: GridTrack | null;
+  gridAutoColumns: GridTrack | null;
   gridPosition: GridPosition | null;
   counterAxisAlignContent: 'AUTO' | 'SPACE_BETWEEN';
   itemReverseZIndex: boolean;

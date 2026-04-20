@@ -289,6 +289,29 @@ export async function handleCompile(input: CompileInput) {
     };
   }
 
+  // ─── Inherit prior dimensions when re-compiling a known slug ─
+  //
+  // When the caller passes `file` + `name` without explicit
+  // width/height AND a scene with that slug already exists in the
+  // project, reuse the prior scene's dimensions. Without this, the
+  // agent's typical "edit source HTML, recompile" loop drops the
+  // canvas height back to the importer default (≈1080) on every
+  // iteration — any scene taller than 1080 appears cropped + shows
+  // fresh "content-overflow" warnings until the agent remembers to
+  // pass height= every time. Explicit width/height still win.
+  if (!input.width && !input.height && input.name) {
+    try {
+      const projectDir = getWorkspaceRoot();
+      const manifest = coreProjectIo().loadProject(projectDir);
+      const slugs = [input.name, input.name.split('/').pop()].filter(Boolean) as string[];
+      const prior = manifest?.scenes?.find((s: any) => slugs.includes(s.slug) || slugs.includes(s.id));
+      if (prior?.width && prior?.height) {
+        input.width = prior.width;
+        input.height = prior.height;
+      }
+    } catch { /* best effort — fall through to importer defaults */ }
+  }
+
   // ─── Build size list ────────────────────────────────────────
 
   const sizes: SizeEntry[] = [];

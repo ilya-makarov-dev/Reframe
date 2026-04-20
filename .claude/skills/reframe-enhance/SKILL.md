@@ -1,6 +1,6 @@
 ---
 name: reframe-enhance
-description: Use when the user's design request is vague, mood-only, or ≤ 10 words ("make a landing page", "nice dashboard", "something for a launch", "hero for my SaaS", "pricing", "banner for launch", "make me a landing with Stripe brand"). Even with a brand named, if the product / audience / scope is unstated, this skill INTERVIEWS the user with a short priority-ordered question set, then transforms raw intent into a structured prompt (DESIGN SYSTEM + numbered sections + audience + must/nice) for reframe-design to generate against. Also required before writing `.reframe/next-prompt.md` in reframe-site-loop — the baton MUST carry a structured prompt, never raw user words.
+description: Use when the user's ask for ANY specialist skill is vague, mood-only, or under-specified ("make a landing page", "test the UI", "review this", "ship as React", "apply Stripe brand"). This skill INTERVIEWS the user briefly, then rewrites raw intent into a **structured brief shape'd for the downstream specialist** — design, QA, critic, to-react, brand, or site-loop. Input = natural language. Output = deterministic prompt the specialist can execute without re-interpreting. Also required before writing `.reframe/next-prompt.md` in reframe-site-loop — the baton MUST carry a structured brief, never raw user words.
 allowed-tools:
   - "Read"
   - "Write"
@@ -9,13 +9,28 @@ allowed-tools:
 
 # reframe-enhance
 
-**You are a brief-writer AND a client interviewer.** The user gave you a sentence; reframe-design needs a spec. Without it, the scene is generated against your guesses — different each session, and missing the intent buried in the user's voice. Your job is:
+**You are a brief-writer AND a client interviewer, across all specialist skills.** The user gave you a sentence; the downstream specialist (design, QA, critic, to-react, brand, site-loop) needs a deterministic spec. Without it, the specialist either re-interpreting every session (different result each time) or running a canonical fallback (the same boring output every time). Your job:
 
-1. **Interview** just enough to get 4 signals — scene identity, audience + job-to-be-done, brand/mood anchor, scope — asking at most 2–3 questions before producing a draft brief
-2. **Name what's still missing** out loud with `[?]` markers (never silently fill)
-3. **Hand the structured brief** to reframe-design
+1. **Interview** just enough to get the signals the DOWNSTREAM specialist needs — ≤ 2-3 questions before producing a draft brief
+2. **Name what's still missing** with `[?]` markers (never silently fill)
+3. **Hand the structured brief** to the right specialist — not always `reframe-design`
 
-**Stop at the brief.** You don't write HTML. You don't call `reframe_compile`. You write a structured prompt and hand off.
+**Stop at the brief.** You don't execute anything — no HTML, no probes, no edits. You write a structured prompt and hand off.
+
+## Shape is per target — read the specialist's SKILL.md first
+
+The brief shape is NOT universal. Each specialist needs different fields:
+
+- `reframe-design` — DESIGN SYSTEM + AUDIENCE + sections + must/nice (shape below)
+- `reframe-site-loop` — that same shape, written into `.reframe/next-prompt.md` as the baton
+- `designer-qa` — SCOPE + clusters-to-probe + fault-localization discipline + deliverable (shape below)
+- `reframe-critic` — scene-to-review + brand context + severity mode (brief / deep) + deliverable shape
+- `reframe-to-react` — stack + section-split expectation + typescript? + output location
+- `reframe-brand` — target surfaces + rebrand-or-apply + fidelity bar
+
+**Before writing a brief for a non-design target, open the target's SKILL.md**, find the fields that skill's Canonical flow / Response shape references, and shape the brief around exactly those. Don't invent fields; don't drop fields the specialist needs.
+
+Only two shapes are codified here (design + QA) because those are used most. For other targets, read the SKILL.md and improvise — add the new shape below as a smell-table row once used 2-3 times so it stabilizes.
 
 ## The interview protocol
 
@@ -94,7 +109,7 @@ Where brief-writing fails:
 - **Multi-page ask** ("3 pages for my site") — don't enhance; route to `reframe-site-loop`, which calls this skill per-page with one-page asks
 - **Inside reframe-site-loop** — site-loop hands you raw intent for the next page; interview (if needed) + structure + write to `.reframe/next-prompt.md`
 
-## The brief output shape
+## Brief shape — design target (for `reframe-design` / `reframe-site-loop`)
 
 ```markdown
 ## DESIGN SYSTEM
@@ -125,6 +140,43 @@ Radius: <sharp / editorial / soft / pill — pick one philosophy>
 ```
 
 Hand this string to `reframe-design` directly or write to `.reframe/next-prompt.md` for site-loop.
+
+## Brief shape — QA target (for `designer-qa`)
+
+User says "test the UI" / "QA the right panel" / "find bugs in X" — don't hand them straight to designer-qa as raw intent (skill would ask or canned-sweep). Interview 1-2 questions (what surface feels wrong, what scope — single layer vs cross-stack), then produce:
+
+```markdown
+## SCOPE
+<concrete surface or flow — "right panel ↔ canvas sync", "/preview route", "export vs canvas diff">
+Layer(s): <UI | engine | export | brand | taste | tests — pick all that apply>
+
+## CLUSTERS (what to probe, each with trap and expectation)
+1. <cluster name> — <1-line goal>
+   Trap: <the failure mode that's likely and easy to miss>
+   Expectation: <what the correct behaviour looks like>
+2. <cluster>
+...
+
+## FAULT-LOCALIZATION DISCIPLINE
+For each bug caught, name the SUBSCRIBER that didn't hear from the data-flow loop
+(CLAUDE.md § Platform map in designer-qa). NOT "app broke" — "right-panel subscriber
+didn't refire after scene/tree SSE". Localize, then patch.
+
+## DELIVERABLE
+- <what the user wants back — screenshots? fixed-and-verified? list of product gaps?>
+- <do they want patches committed, or left as diff for review?>
+
+## NON-GOALS
+- Don't run the full 11-flow canonical sweep
+- Don't open orchestrator mode unless a bug genuinely spans layers
+- <scene- or scope-specific exclusions>
+```
+
+Hand to `/designer-qa` as the prompt body. Skill reads this as concrete-target (see its First move section), skips the ASK/PROPOSE branch, goes straight to the target.
+
+## Brief shape — other targets
+
+For `reframe-critic` / `reframe-to-react` / `reframe-brand` vague asks, no codified shape yet — **read the target's SKILL.md**, find what fields its Canonical flow / Response shape references, write the brief around those fields. If a shape stabilizes across 2-3 uses, add it here as a new section so it's not re-discovered each time.
 
 ## Anti-patterns
 

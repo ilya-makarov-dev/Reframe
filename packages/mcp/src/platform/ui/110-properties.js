@@ -86,14 +86,32 @@
         if (!store.ok) throw new Error('no root');
         p = store.props || {};
       }
-      var bgColor = p.background || '#FFFFFF';
+      // Empty-state "Background" = CANVAS WORKSPACE around the scene,
+      // NOT the root frame's fill. User mental model (correctly): when
+      // nothing is selected, I'm editing the canvas itself — the area
+      // around frames, Figma-style. Previously this wrote to root node
+      // fill, which then leaked through any child that didn't cover the
+      // full root bbox (e.g. a section at 1440 inside a root at 1600
+      // showed a surprise stripe of the new color). That was the bug:
+      // user paints "canvas", engine repaints "frame". Now the input
+      // target is the --surface-canvas CSS variable, persisted per
+      // project in localStorage, applied on the documentElement.
+      var workspaceKey = 'reframe:workspace-bg:' + (state.currentSceneSlug || 'default');
+      var savedWorkspace = null;
+      try { savedWorkspace = localStorage.getItem(workspaceKey); } catch (_) {}
+      var canvasBg = savedWorkspace ||
+        (getComputedStyle(document.documentElement).getPropertyValue('--surface-canvas') || '').trim() ||
+        '#E8E2D0';
+      if (savedWorkspace) {
+        try { document.documentElement.style.setProperty('--surface-canvas', savedWorkspace); } catch (_) {}
+      }
       sceneInfo =
         '<div class="props-identity">' +
-          '<div class="node-name">Canvas<span class="node-type">' + escape(p.type || 'frame') + '</span></div>' +
-          '<div class="node-parent">Scene root — edit dimensions, background</div>' +
+          '<div class="node-name">Canvas<span class="node-type">workspace</span></div>' +
+          '<div class="node-parent">Nothing selected — edit the canvas around your frame</div>' +
         '</div>' +
         '<div class="props-section">' +
-          '<div class="props-section-header">Dimensions</div>' +
+          '<div class="props-section-header">Frame dimensions</div>' +
           '<div class="props-section-body">' +
             '<div class="prop-pair">' +
               '<div class="prop-compact"><span class="prop-compact-label">W</span>' +
@@ -107,8 +125,8 @@
           '<div class="props-section-header">Background</div>' +
           '<div class="props-section-body">' +
             '<div class="fill-row">' +
-              '<div class="fill-swatch" style="background:' + escape(bgColor) + '" data-prop="background" data-scene="' + escape(sessionId) + '" data-node="root"></div>' +
-              '<input class="fill-hex" type="text" value="' + escape(bgColor) + '" data-prop="background" data-scene="' + escape(sessionId) + '" data-node="root">' +
+              '<div class="fill-swatch" style="background:' + escape(canvasBg) + '" data-prop="canvas-bg" data-workspace-key="' + escape(workspaceKey) + '"></div>' +
+              '<input class="fill-hex" type="text" value="' + escape(canvasBg) + '" data-prop="canvas-bg" data-workspace-key="' + escape(workspaceKey) + '">' +
             '</div>' +
           '</div>' +
         '</div>';

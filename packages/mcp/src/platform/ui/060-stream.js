@@ -208,6 +208,50 @@
 
   // ── Macro apply buttons (macros page) ────────────────
   // ── Brand picker in global toolbar ─────────────────────────────────
+  // Empty-dashboard brand chips. Clicking a chip fetches the brand via
+  // getdesign (if not already registered), sets it active in the project,
+  // and advances the UI — either refreshing the dashboard to show the
+  // "active brand" state or auto-creating a scene if the user's already
+  // in Create Canvas flow. Previously the chips were decorative spans;
+  // the designer's natural click target did nothing.
+  function bindDashboardBrandChips() {
+    var wrap = document.querySelector('[data-brand-picker]');
+    if (!wrap) return;
+    wrap.addEventListener('click', async function(e) {
+      var btn = e.target.closest('[data-brand-apply]');
+      if (!btn) return;
+      var slug = btn.getAttribute('data-brand-apply');
+      if (!slug) return;
+      e.preventDefault();
+      btn.classList.add('loading');
+      btn.setAttribute('disabled', 'true');
+      try {
+        var r = await fetch('/platform/api/brand/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slug: slug }),
+        });
+        if (!r.ok) {
+          var msg = (await r.text()) || r.statusText;
+          flash('Brand failed: ' + msg.slice(0, 120), 'error');
+          btn.classList.remove('loading');
+          btn.removeAttribute('disabled');
+          return;
+        }
+        var result = await r.json();
+        var verb = result.extracted ? 'Loaded' : 'Activated';
+        flash(verb + ' brand "' + slug + '" — now on the sidebar', 'success');
+        // Refresh the dashboard so the sidebar repaints with the new
+        // active brand + the brand strip fades to "active" state.
+        setTimeout(function() { window.location.reload(); }, 600);
+      } catch (err) {
+        flash('Brand failed: ' + (err && err.message || err), 'error');
+        btn.classList.remove('loading');
+        btn.removeAttribute('disabled');
+      }
+    });
+  }
+
   function bindBrandPicker() {
     var pickerBtn = $('[data-brand-picker-btn]');
     var pickerMenu = $('[data-brand-picker-menu]');

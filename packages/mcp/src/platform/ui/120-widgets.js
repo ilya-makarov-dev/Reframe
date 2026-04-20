@@ -257,6 +257,30 @@
     '</div>';
   }
 
+  // Apply a workspace (canvas-around-frames) background. Two layers:
+  //   1. --surface-canvas CSS var — paints #canvas-area (catches empty
+  //      space outside the CanvasKit <canvas> element)
+  //   2. editor.state.pageColor — OP's SkiaRenderer clears the canvas
+  //      with this on every frame, overriding the hardcoded
+  //      CANVAS_BG_COLOR from @open-pencil/core/constants (0.96,0.96,0.96)
+  // Without step 2 the CanvasKit-painted area stays beige even with the
+  // CSS var set, because the <canvas> fill happens per frame and wins.
+  function applyCanvasBg(hex) {
+    try { document.documentElement.style.setProperty('--surface-canvas', hex); } catch (_) {}
+    var ed = window.__reframeEditor;
+    if (!ed || !ed.state) return;
+    var m = /^#?([0-9a-f]{6}|[0-9a-f]{3})$/i.exec(String(hex).trim());
+    if (!m) return;
+    var h = m[1];
+    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+    var r = parseInt(h.slice(0, 2), 16) / 255;
+    var g = parseInt(h.slice(2, 4), 16) / 255;
+    var b = parseInt(h.slice(4, 6), 16) / 255;
+    ed.state.pageColor = { r: r, g: g, b: b, a: 1 };
+    ed.state.sceneVersion = (ed.state.sceneVersion || 0) + 1;
+    if (typeof ed.requestRender === 'function') { try { ed.requestRender(); } catch (_) {} }
+  }
+
   function bindPropInputs() {
     // Section collapse toggles.
     $$('[data-collapse-toggle]').forEach(function(header) {
@@ -266,8 +290,31 @@
     });
     // Compact number inputs + font input + hex input.
     $$('.prop-compact-input, .spacing-val, .fill-hex, .type-font-input').forEach(function(input) {
+      // Canvas workspace bg — ALSO listen on `input` for live preview
+      // as the user types. Without this, typing "#0a1628" doesn't
+      // apply until Enter/blur and reads as "not working".
+      if (input.getAttribute('data-prop') === 'canvas-bg') {
+        input.addEventListener('input', function() {
+          var v = String(input.value || '').trim();
+          if (/^#[0-9a-fA-F]{6}$/.test(v)) applyCanvasBg(v);
+        });
+      }
       input.addEventListener('change', function() {
         var prop = input.getAttribute('data-prop');
+        // Canvas workspace background — intercepted before node edit.
+        // This targets the CSS variable that paints the area around the
+        // scene frame, not the root INode's fill. Persists per project
+        // in localStorage; nothing hits the scene graph.
+        if (prop === 'canvas-bg') {
+          var key = input.getAttribute('data-workspace-key');
+          var v = String(input.value || '').trim();
+          if (!v) return;
+          applyCanvasBg(v);
+          if (key) { try { localStorage.setItem(key, v); } catch (_) {} }
+          var sibSwatch = input.parentElement && input.parentElement.querySelector('.fill-swatch[data-prop="canvas-bg"]');
+          if (sibSwatch) sibSwatch.style.background = v;
+          return;
+        }
         var scene = input.getAttribute('data-scene');
         var node = input.getAttribute('data-node');
         if (!prop || !scene || !node) return;
@@ -317,7 +364,8 @@
         var prop = swatch.getAttribute('data-prop');
         var scene = swatch.getAttribute('data-scene');
         var node = swatch.getAttribute('data-node');
-        if (!prop || !scene || !node) return;
+        var isWorkspace = prop === 'canvas-bg';
+        if (!prop || (!isWorkspace && (!scene || !node))) return;
         var picker = document.createElement('input');
         picker.type = 'color';
         var hexInput = swatch.parentElement && swatch.parentElement.querySelector('.fill-hex');
@@ -327,9 +375,16 @@
         picker.addEventListener('input', function() {
           swatch.style.background = picker.value;
           if (hexInput) hexInput.value = picker.value;
+          if (isWorkspace) applyCanvasBg(picker.value);
         });
         picker.addEventListener('change', function() {
-          editNodeProp(scene, node, prop, picker.value);
+          if (isWorkspace) {
+            var key = swatch.getAttribute('data-workspace-key');
+            applyCanvasBg(picker.value);
+            if (key) { try { localStorage.setItem(key, picker.value); } catch (_) {} }
+          } else {
+            editNodeProp(scene, node, prop, picker.value);
+          }
           picker.remove();
         });
         picker.click();
@@ -681,19 +736,35 @@
       if (hexInput) hexInput.value = hex;
     }
 
+    // Canvas workspace bg — swatch has no scene/node, routes via
+    // applyCanvasBg + localStorage. Without this branch the popover
+    // would call editNodeProp with empty sceneId/nodeId and the POST
+    // would silently fail, so the picker looked broken.
+    var isWorkspace = prop === 'canvas-bg';
+    var wsKey = swatch.getAttribute('data-workspace-key');
+    function commit(hex) {
+      if (isWorkspace) {
+        applyCanvasBg(hex);
+        if (wsKey) { try { localStorage.setItem(wsKey, hex); } catch (_) {} }
+      } else {
+        editNodeProp(sceneId, nodeId, prop, hex);
+      }
+    }
     popHex.addEventListener('input', function() {
       var v = popHex.value.trim();
-      if (/^#[0-9a-fA-F]{6}$/.test(v)) applyHex(v);
+      if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+        applyHex(v);
+        if (isWorkspace) applyCanvasBg(v); // live preview
+      }
     });
     popNative.addEventListener('input', function() {
       applyHex(popNative.value);
+      if (isWorkspace) applyCanvasBg(popNative.value); // live preview
     });
-    popNative.addEventListener('change', function() {
-      editNodeProp(sceneId, nodeId, prop, popNative.value);
-    });
+    popNative.addEventListener('change', function() { commit(popNative.value); });
     popHex.addEventListener('change', function() {
       var v = popHex.value.trim();
-      if (/^#[0-9a-fA-F]{6}$/.test(v)) editNodeProp(sceneId, nodeId, prop, v);
+      if (/^#[0-9a-fA-F]{6}$/.test(v)) commit(v);
     });
     // (Token chips are wired async inside fetchSceneTokens.then above.)
 

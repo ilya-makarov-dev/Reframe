@@ -29,6 +29,23 @@ Where designs trip — check these before compiling, and especially after:
 - **Centered hero variance** — centering is only safe when the hero has ≤3 elements total (headline + sub + CTA). Add a badge, a stat row, a secondary CTA, an image — now it needs an asymmetric layout.
 - **Interaction targets** — the audit enforces 44px touch. But secondary ghost CTAs often drift to 36px and pass because of min-height; user still can't tap them on mobile.
 
+## Taste triage — scene feels off, where to look first
+
+A compiled scene that passes the audit can still read wrong. Instead of scanning the full smell table every time, translate the designer's reaction into the smell cluster that most likely caused it. One probe, one fix direction — escalate to the full table only if the first hit comes up clean.
+
+| Designer says | Most likely class | First smell to check |
+|---|---|---|
+| "Feels generic" / "could be any SaaS" | template-shape slop | 3-equal-cards horizontal; centered-hero-with-5-things |
+| "Feels fake" / "who's Sarah at ACME?" | invented content | invented stats ("40k engineers"); fake logos; made-up testimonials |
+| "Feels flat" / "visually boring" | variance too low | all corners same; all shadows same intensity; single font weight; single padding value |
+| "Feels noisy" / "too much going on" | variance too high | ≥ 2 colors above 80% saturation; gradient inflation; shadow inflation; emoji-as-icon |
+| "Feels dated" / "reads 2010s" | pattern regression | text+image 50/50 hero; all-caps nano nav; hero gradient + glass behind everything |
+| "Tone's off" / "doesn't match the brand" | voice/type mismatch | Inter on premium brand; serif in dashboard; casual copy on formal brand |
+| "Nothing grabs the eye" | hierarchy failure | centered hero with too many elements; primary CTA same visual weight as ghost CTA; headline not the biggest thing |
+| "Looks AI-generated" | multiple slop smells stacked | run the full smell table — single reaction means multiple regressions |
+
+If the triage hit doesn't fix the feeling, THEN walk the full smell table below. Triage is the first pass, not the only pass.
+
 ## Smell table — the patterns the audit cannot catch
 
 | Smell | Why it reads fake | Probe | Fix |

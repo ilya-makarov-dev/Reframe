@@ -30,6 +30,7 @@ export {
   registerBrand,
   loadBrandFromProject,
   setActiveBrand,
+  resolveActiveBrand,
   listRegisteredBrands,
 } from './io.js';
 

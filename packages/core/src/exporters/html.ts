@@ -683,7 +683,7 @@ export function exportToHtml(
   ${fontLinks.join('\n  ')}
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-    html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+    html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility;${rootBgForBody(root, graph)} }
     body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root, graph)} }
     a { color: inherit; text-decoration: none; }
     img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}
@@ -810,12 +810,18 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
       // HUG or suspect dimension = content-sized, let CSS compute
       s.push('flex: 0 0 auto');
     } else {
-      // FIXED with valid dimension
+      // FIXED with valid dimension. Emit the dimension AND flex-shrink: 0 —
+      // default flex-shrink:1 lets a sibling with long content crush this
+      // child to width:0 (the bug that hid a 32×32 badge in the welcome-email
+      // scene when its sibling wrapped to 2 lines). FIXED means "this size,
+      // period" and the CSS that conveys that in a flex parent needs the
+      // shrink:0 — width alone is a hint the browser ignores under pressure.
       if (isParentRow) {
         s.push(`width: ${px(node.width)}`);
       } else {
         s.push(`height: ${px(node.height)}`);
       }
+      s.push('flex-shrink: 0');
     }
 
     // Counter axis (perpendicular to parent direction)
@@ -897,6 +903,12 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
     }
     if (node.gridTemplateRows.length > 0) {
       s.push(`grid-template-rows: ${gridTracksToCSS(node.gridTemplateRows)}`);
+    }
+    if (node.gridAutoRows) {
+      s.push(`grid-auto-rows: ${gridTracksToCSS([node.gridAutoRows])}`);
+    }
+    if (node.gridAutoColumns) {
+      s.push(`grid-auto-columns: ${gridTracksToCSS([node.gridAutoColumns])}`);
     }
     if (node.gridColumnGap > 0) s.push(`column-gap: ${px(node.gridColumnGap)}`);
     if (node.gridRowGap > 0) s.push(`row-gap: ${px(node.gridRowGap)}`);

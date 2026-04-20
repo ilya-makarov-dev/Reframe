@@ -82,16 +82,25 @@ export function groupScenesIntoProjects(
   const slugById = new Map<string, string>();
   for (const s of scenes) slugById.set(s.id, s.slug);
 
-  // Group key → members. For each scene, pick the strongest signal:
-  //   1. variantOf chain → follow it to a root, use that root's slug
-  //   2. otherwise, the inferred prefix (first token)
-  const groups = new Map<string, SceneLike[]>();
-  const ownerCandidates = new Map<string, SceneLike>(); // key → shortest-slug scene
+  // Two-pass grouping. Pass 1: assign a tentative key per scene from
+  // either explicit variantOf lineage or the shared-prefix heuristic,
+  // and tally how many scenes land on each prefix. Pass 2: promote any
+  // prefix that only one scene claims to use its full slug as its key
+  // instead — a "group of one" is not a group, and grouping distinct
+  // standalone scenes just because they happen to share a first token
+  // (e.g. `qa-a-run1`, `qa-b-run1`, `qa-c-run1` all collapsing into one
+  // "qa" project) breaks URL-level isolation: only the owner's
+  // `/platform/project/<slug>` resolves and everyone else 404s. This
+  // also caused the designer-qa parallel sweep to lose bucket
+  // isolation — see the smell table.
+  interface TentativeKey { key: string; fromVariant: boolean; }
+  const tentative = new Map<SceneLike, TentativeKey>();
+  const prefixCount = new Map<string, number>();
 
   for (const scene of scenes) {
     let key: string | undefined;
+    let fromVariant = false;
 
-    // Try variantOf chain
     if (getVariantOf) {
       let cursor: string | undefined = scene.id;
       const visited = new Set<string>();
@@ -103,12 +112,28 @@ export function groupScenesIntoProjects(
       }
       if (cursor && cursor !== scene.id) {
         const parentSlug = slugById.get(cursor);
-        if (parentSlug) key = parentSlug;
+        if (parentSlug) { key = parentSlug; fromVariant = true; }
       }
     }
 
-    // Fall back to prefix inference
     if (!key) key = inferProjectKey(scene.slug);
+
+    tentative.set(scene, { key, fromVariant });
+    prefixCount.set(key, (prefixCount.get(key) ?? 0) + 1);
+  }
+
+  const groups = new Map<string, SceneLike[]>();
+  const ownerCandidates = new Map<string, SceneLike>();
+
+  for (const scene of scenes) {
+    const t = tentative.get(scene)!;
+    // Demote a prefix group of one to a full-slug group so it becomes
+    // its own project. Variant-linked keys stay grouped regardless of
+    // count — an explicit variantOf parent ID always means "same
+    // project" even if currently only one variant exists.
+    const key = t.fromVariant || (prefixCount.get(t.key) ?? 0) > 1
+      ? t.key
+      : scene.slug;
 
     let members = groups.get(key);
     if (!members) {

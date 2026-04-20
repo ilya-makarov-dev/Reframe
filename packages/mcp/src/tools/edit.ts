@@ -522,6 +522,15 @@ function findNode(graph: SceneGraph, rootId: string, path: string): SceneNode | 
   const root = graph.getNode(rootId);
   if (!root) return undefined;
 
+  // Explicit prefixes: role:<role>, text:<substring>, id:<hash>.
+  // The depth-capped HTML importer makes most wrapper frames share
+  // generic names like "Stack" / "Row", so when the agent knows a
+  // node by its semantic role or visible text it should say so
+  // directly instead of guessing the literal name.
+  if (path.startsWith('role:')) return findByRoleLoose(graph, rootId, path.slice(5));
+  if (path.startsWith('text:')) return findByTextLoose(graph, rootId, path.slice(5));
+  if (path.startsWith('id:'))   return graph.getNode(path.slice(3));
+
   // If path matches root node's name (exact or partial), return root itself
   const parts = path.split('/');
   if (parts[0] === root.name || root.name?.includes(parts[0])) {
@@ -545,12 +554,82 @@ function findNode(graph: SceneGraph, rootId: string, path: string): SceneNode | 
       if (parts.length === 1) {
         const deep = findDeep(graph, root.id, part);
         if (deep) return deep;
+
+        // Still no hit — fall back to role/text heuristics. After the
+        // depth-capped import pass, the agent says path="Hero" meaning
+        // "the hero section", which no longer matches any literal
+        // frame name. Try semanticRole first (case-insensitive), then
+        // text-contains on any descendant. One of these almost always
+        // works when the name-based walk failed.
+        const byRole = findByRoleLoose(graph, root.id, part);
+        if (byRole) return byRole;
+        const byText = findByTextLoose(graph, root.id, part);
+        if (byText) return byText;
       }
       return undefined;
     }
     current = match;
   }
   return current;
+}
+
+/**
+ * Case-insensitive semanticRole lookup. Accepts both exact role matches
+ * ("hero", "nav") and English synonyms the agent commonly reaches for
+ * ("header" → nav, "footer" → footer, "cta" → button).
+ */
+function findByRoleLoose(graph: SceneGraph, rootId: string, needle: string): SceneNode | undefined {
+  const n = needle.trim().toLowerCase();
+  if (!n) return undefined;
+  const synonyms: Record<string, string[]> = {
+    header: ['nav', 'header'],
+    navbar: ['nav'],
+    menu:   ['nav'],
+    cta:    ['button'],
+    card:   ['card'],
+    section:['section'],
+    hero:   ['hero'],
+    footer: ['footer'],
+    title:  ['heading', 'title'],
+    heading:['heading', 'title'],
+  };
+  const targets = synonyms[n] ?? [n];
+  let hit: SceneNode | undefined;
+  const walk = (id: string) => {
+    if (hit) return;
+    const node = graph.getNode(id);
+    if (!node) return;
+    const role = ((node as any).semanticRole ?? '').toLowerCase();
+    if (role && targets.includes(role)) { hit = node; return; }
+    for (const cid of node.childIds) walk(cid);
+  };
+  walk(rootId);
+  return hit;
+}
+
+/**
+ * Case-insensitive text-contains lookup. Matches TEXT nodes whose
+ * characters contain the needle, OR frames whose first TEXT descendant
+ * matches (so "Observability" finds both the <h1> and its wrapper).
+ * Prefers TEXT matches so props like {text: "..."} land on the right node.
+ */
+function findByTextLoose(graph: SceneGraph, rootId: string, needle: string): SceneNode | undefined {
+  const n = needle.trim().toLowerCase();
+  if (!n) return undefined;
+  let textHit: SceneNode | undefined;
+  let frameHit: SceneNode | undefined;
+  const walk = (id: string) => {
+    if (textHit) return;
+    const node = graph.getNode(id);
+    if (!node) return;
+    const t = node.type === 'TEXT' ? (node.text ?? '') : '';
+    if (t && t.toLowerCase().includes(n)) { textHit = node; return; }
+    const name = node.name ?? '';
+    if (!frameHit && name.toLowerCase().includes(n)) frameHit = node;
+    for (const cid of node.childIds) walk(cid);
+  };
+  walk(rootId);
+  return textHit ?? frameHit;
 }
 
 /** Recursive depth-first search by exact name. */

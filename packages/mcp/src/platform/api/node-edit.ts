@@ -54,6 +54,21 @@ function sendJson(res: ServerResponse, code: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/**
+ * Parse the virtual project slug out of a Referer like
+ * `http://host/platform/project/<slug>[?...]`. Returns `undefined` when the
+ * request didn't originate from a project page (dashboard, components page,
+ * direct API call, etc.) so the caller can fall back to the global active
+ * brand. This is the backstop for endpoints whose body doesn't carry the
+ * virtual slug explicitly.
+ */
+function extractVirtualSlugFromReferer(req: IncomingMessage): string | undefined {
+  const ref = req.headers.referer;
+  if (!ref || typeof ref !== 'string') return undefined;
+  const match = ref.match(/\/platform\/project\/([^/?#]+)/);
+  return match?.[1];
+}
+
 function sendError(res: ServerResponse, code: number, message: string): void {
   sendJson(res, code, { ok: false, error: message });
 }
@@ -1095,7 +1110,12 @@ export async function handleNodeEditApi(
     }
     try {
       const { setActiveBrand } = await import('../../../../core/src/project/io.js');
-      const entry = setActiveBrand(ctx.projectDir, slug);
+      // Virtual project slug comes from request body (preferred) or referer
+      // URL `/platform/project/<slug>`. When set, the brand choice is
+      // scoped to that virtual project instead of leaking across siblings.
+      const virtualSlug = (body.project as string | undefined)
+        ?? extractVirtualSlugFromReferer(req);
+      const entry = setActiveBrand(ctx.projectDir, slug, virtualSlug);
       // SSE notify.
       try {
         const { emitEvent } = await import('../../http-server.js');
@@ -1104,6 +1124,73 @@ export async function handleNodeEditApi(
       sendJson(res, 200, { ok: true, brand: entry });
     } catch (e: any) {
       sendError(res, 400, e?.message ?? 'brand switch failed');
+    }
+    return true;
+  }
+
+  // ── POST /platform/api/brand/apply ──────────────────────
+  //
+  // Single-step designer flow: take a brand slug, ensure it's in the
+  // project registry (extract via getdesign npm if missing), then set it
+  // active. Powers the dashboard brand chips so clicking "Linear" does
+  // what a designer expects — loads the brand + activates — in one
+  // round-trip. Previously the chips were decorative `<span>`s with no
+  // handler; brand activation was only reachable via MCP `reframe_design`.
+  //
+  // Body: { slug }
+  // Response: { ok, brand, extracted: boolean } — extracted=true when
+  // the brand was fetched fresh, false when it was already on disk.
+  if (pathname === '/platform/api/brand/apply' && req.method === 'POST') {
+    const body = await readJson(req);
+    const slug = body.slug as string;
+    if (!slug) { sendError(res, 400, 'slug required'); return true; }
+    try {
+      const projectIo = await import('../../../../core/src/project/io.js');
+      // Ensure .reframe project exists. First call on a fresh workspace
+      // hits this path, so init lazily — the dashboard brand chips are
+      // the typical entry point for a brand-new user.
+      let projectDir = ctx.projectDir;
+      if (!projectDir) {
+        projectDir = process.cwd();
+        if (!projectIo.projectExists(projectDir)) {
+          projectIo.initProject(projectDir, 'Reframe project');
+        }
+        (ctx as any).projectDir = projectDir;
+      }
+      const manifest = projectIo.loadProject(projectDir);
+      const alreadyRegistered = !!manifest?.brands?.[slug];
+      let extracted = false;
+      let entry;
+      const virtualSlug = (body.project as string | undefined)
+        ?? extractVirtualSlugFromReferer(req);
+      if (!alreadyRegistered) {
+        // Fetch via getdesign + write to .reframe/brands/<slug>/DESIGN.md.
+        // Reuse the engine's canonical extract (MCP tools/design.ts uses
+        // the same helper) so CLI/UI/agent all share one code path.
+        const { loadBrandDesignMd } = await import('../../tools/compile.js');
+        const md = await loadBrandDesignMd(slug);
+        if (!md) {
+          sendError(res, 404, `brand "${slug}" not found via getdesign`);
+          return true;
+        }
+        entry = projectIo.registerBrand(projectDir, slug, md, { setActive: true });
+        // registerBrand({setActive:true}) uses the global slot — follow up
+        // with an explicit per-project write so subsequent visits to this
+        // virtual project see this brand as default.
+        if (virtualSlug) {
+          projectIo.setActiveBrand(projectDir, slug, virtualSlug);
+        }
+        extracted = true;
+      } else {
+        entry = projectIo.setActiveBrand(projectDir, slug, virtualSlug);
+      }
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'design-system:updated' } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, brand: entry, extracted });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'brand apply failed');
     }
     return true;
   }

@@ -886,25 +886,29 @@ input, textarea, select {
   grid-template-columns: 1fr;
 }
 
-/* Mobile: sidebar swallows half of a 390 px screen with no way to
-   close it, so the dashboard grid got squeezed to ~90 px and cards
-   clipped to unreadable slivers. Below 720 px, collapse the sidebar
-   and give the main surface the full width. (Right rail on scenes
-   already stacks via its own grid when present.) */
-@media (max-width: 720px) {
+/* Mobile / narrow: sidebar (220) + right (340) leaves the canvas
+   pane with near-zero width at 390 px — CanvasKit silently refuses
+   to render a zero-width surface. At 768 px the canvas is still
+   only 228 px (<30% of viewport), below the 60%-of-viewport floor
+   designer-qa treats as "collapse required". Below 1024 px we drop
+   BOTH asides and hand the canvas the full width. (Right rail on
+   scenes already stacks via its own grid when present.) */
+@media (max-width: 1024px) {
   .body,
-  .body.with-right {
-    grid-template-columns: 1fr;
+  .body.with-right,
+  .body.no-sidebar {
+    grid-template-columns: 1fr !important;
   }
   .body .sidebar,
-  .body aside,
+  .body > aside,
+  .body .right,
   .body .right-panel,
   .body .panel-resize-sidebar,
   .body .panel-resize-right,
   .app > aside,
   .app > .sidebar,
   .app .right-panel {
-    display: none;
+    display: none !important;
   }
   /* Editor shell uses a grid too; the layers + properties asides
      eat the canvas. Stack the main surface full-width. */
@@ -1672,6 +1676,19 @@ input, textarea, select {
   background: var(--surface-elevated);
   color: var(--text-primary);
   border: 1px solid var(--border-subtle);
+}
+.bc-bubble.thinking {
+  align-self: flex-start;
+  background: transparent;
+  color: var(--text-muted, rgba(128,128,128,0.8));
+  border: 1px dashed var(--border-subtle);
+  font-size: 14px;
+  letter-spacing: 0.35em;
+  animation: bc-thinking-pulse 1.3s ease-in-out infinite;
+}
+@keyframes bc-thinking-pulse {
+  0%,100% { opacity: 0.45; }
+  50%     { opacity: 1;    }
 }
 .bc-tool {
   align-self: flex-start;

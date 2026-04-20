@@ -483,8 +483,19 @@ export function loadBrandFromProject(
  * Change the active brand. Updates {@link ProjectManifest.activeBrand} and
  * mirrors the corresponding DESIGN.md to `.reframe/design.md` for legacy
  * consumers. Throws if the slug isn't registered.
+ *
+ * When `virtualProjectSlug` is provided, also records the choice in
+ * `activeBrandPerProject[virtualProjectSlug]`. Readers (`getActiveBrand`)
+ * check the per-project map first, so switching the brand on one dashboard
+ * project no longer bleeds into other projects that share this `.reframe/`
+ * dir. Legacy `activeBrand` stays updated so old readers continue to work
+ * and new projects opened without a virtual slug still land on something.
  */
-export function setActiveBrand(projectDir: string, slug: string): BrandRegistryEntry {
+export function setActiveBrand(
+  projectDir: string,
+  slug: string,
+  virtualProjectSlug?: string,
+): BrandRegistryEntry {
   const manifest = loadProject(projectDir);
   const entry = manifest.brands?.[slug];
   if (!entry) {
@@ -492,6 +503,10 @@ export function setActiveBrand(projectDir: string, slug: string): BrandRegistryE
     throw new Error(`Brand "${slug}" is not registered in this project. Known: ${known}`);
   }
   manifest.activeBrand = slug;
+  if (virtualProjectSlug) {
+    manifest.activeBrandPerProject = manifest.activeBrandPerProject ?? {};
+    manifest.activeBrandPerProject[virtualProjectSlug] = slug;
+  }
   manifest.designSystem = 'design.md';
   // Mirror content to legacy file
   const srcPath = path.join(reframeDir(projectDir), entry.path);
@@ -504,6 +519,22 @@ export function setActiveBrand(projectDir: string, slug: string): BrandRegistryE
   }
   writeManifest(projectDir, manifest);
   return entry;
+}
+
+/**
+ * Resolve the active brand slug for a virtual project, preferring the
+ * per-project override, then falling back to the global activeBrand.
+ * Returns `undefined` when no brand is set at either level.
+ */
+export function resolveActiveBrand(
+  manifest: ProjectManifest,
+  virtualProjectSlug?: string,
+): string | undefined {
+  if (virtualProjectSlug) {
+    const perProject = manifest.activeBrandPerProject?.[virtualProjectSlug];
+    if (perProject) return perProject;
+  }
+  return manifest.activeBrand;
 }
 
 /** List all registered brands in the project. */

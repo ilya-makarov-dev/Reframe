@@ -51,7 +51,15 @@ function greeting(): string {
   return 'Good evening.';
 }
 
-const GENERIC_TAGS = new Set(['div', 'span', 'section', 'main', 'header', 'footer', 'article', 'aside', 'nav']);
+// Includes both generic HTML tags (Linkedom lands here when no class/role
+// stands out) and the auto-inferred INode names produced by the importer
+// ("Stack" for column flex, "Row" for row flex, "Group"/"Frame"/"Canvas"
+// for structural nodes). Falling back to the project slug keeps the card
+// header readable ("qa-landing") instead of implementation detail ("Stack").
+const GENERIC_TAGS = new Set([
+  'div', 'span', 'section', 'main', 'header', 'footer', 'article', 'aside', 'nav',
+  'stack', 'row', 'column', 'group', 'frame', 'canvas', 'body', 'html',
+]);
 
 export function renderDashboard(data: DashboardData): string {
   const main = data.scenes.length === 0
@@ -166,9 +174,14 @@ function renderEmpty(): string {
       <!-- BRAND STRIP -->
       <div class="dash-brand-strip">
         <span class="dash-brand-label">60+ brand systems available</span>
-        <div class="dash-brand-chips">
-          ${['Stripe', 'Linear', 'Vercel', 'Notion', 'Spotify', 'Airbnb', 'GitHub', 'Figma', 'Arc', 'Supabase', 'Raycast', 'Loom'].map(b =>
-            `<span class="dash-brand-chip">${escape(b)}</span>`
+        <div class="dash-brand-chips" data-brand-picker>
+          ${[
+            ['Stripe', 'stripe'], ['Linear', 'linear'], ['Vercel', 'vercel'],
+            ['Notion', 'notion'], ['Spotify', 'spotify'], ['Airbnb', 'airbnb'],
+            ['GitHub', 'github'], ['Figma', 'figma'], ['Arc', 'arc'],
+            ['Supabase', 'supabase'], ['Raycast', 'raycast'], ['Loom', 'loom'],
+          ].map(([label, slug]) =>
+            `<button class="dash-brand-chip" data-brand-apply="${escape(slug)}" type="button">${escape(label)}</button>`
           ).join('')}
           <a class="dash-brand-chip dash-brand-more" href="/platform/design-system">Browse all</a>
         </div>

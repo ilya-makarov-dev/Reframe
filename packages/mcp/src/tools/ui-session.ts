@@ -28,9 +28,47 @@ export interface UiSession {
   page: Page;
   createdAt: number;
   lastActiveAt: number;
+  /** Project slug this session is navigated to, parsed from the open URL. */
+  projectSlug: string | null;
   consoleLog: LogEntry<ConsoleEntry>[];
   pageErrors: LogEntry<ErrorEntry>[];
   networkErrors: LogEntry<NetworkErrorEntry>[];
+}
+
+/**
+ * Thrown by `openSession` when another live session already owns the same
+ * `/platform/project/<slug>` URL. Parallel designer-qa sweeps require
+ * slug-isolation — two sessions on the same project share SSE broadcasts
+ * and last-write-wins the same `manifest.json` on disk. Raising early is
+ * better than silent corruption; the caller fails loudly with a 409-style
+ * error and the agent picks a unique slug on retry.
+ */
+export class SlugInUseError extends Error {
+  constructor(public readonly slug: string, public readonly ownerSessionId: string) {
+    super(
+      `Project slug "${slug}" is already open in session ${ownerSessionId}. ` +
+      `Two concurrent reframe_ui sessions on the same project corrupt manifest state ` +
+      `— use a unique slug per session, or close the other one first.`,
+    );
+    this.name = 'SlugInUseError';
+  }
+}
+
+/**
+ * Parse `/platform/project/<slug>` out of an open URL. Returns null for
+ * dashboard / preview / any non-project route — those are safe to share
+ * across sessions (read-only surfaces don't mutate disk state).
+ */
+export function parseProjectSlug(rawUrl: string): string | null {
+  try {
+    // Accept both absolute ("http://localhost:4100/platform/project/foo")
+    // and path-only ("/platform/project/foo") forms.
+    const path = rawUrl.startsWith('http') ? new URL(rawUrl).pathname : rawUrl.split('?')[0];
+    const m = path.match(/\/platform\/project\/([^/]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch {
+    return null;
+  }
 }
 
 interface ConsoleEntry { type: string; text: string; }
@@ -80,6 +118,18 @@ export interface OpenOptions {
 }
 
 export async function openSession(opts: OpenOptions): Promise<UiSession> {
+  // Slug collision guard — reject up front if another live session owns
+  // the same project. Done BEFORE the Playwright context is created so we
+  // don't waste a Chromium context on a call that's about to fail.
+  const projectSlug = parseProjectSlug(opts.url);
+  if (projectSlug) {
+    for (const existing of sessions.values()) {
+      if (existing.projectSlug === projectSlug) {
+        throw new SlugInUseError(projectSlug, existing.id);
+      }
+    }
+  }
+
   // Evict oldest if we're at the cap. Keeps browser memory bounded even
   // when an over-enthusiastic agent forgets to close what it opened.
   if (sessions.size >= MAX_SESSIONS) {
@@ -96,6 +146,7 @@ export async function openSession(opts: OpenOptions): Promise<UiSession> {
     id, page,
     createdAt: Date.now(),
     lastActiveAt: Date.now(),
+    projectSlug,
     consoleLog: [],
     pageErrors: [],
     networkErrors: [],

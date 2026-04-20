@@ -9,7 +9,7 @@
  */
 
 import type { SceneGraph } from './scene-graph';
-import type { SceneNode } from './types';
+import type { SceneNode, GridTrack } from './types';
 
 // ─── Yoga Provider Interface ────────────────────────────────────
 
@@ -630,15 +630,43 @@ function computeGridLayout(graph: SceneGraph, frame: SceneNode): void {
 
   // Resolve column tracks
   const colSizes = resolveGridTracks(frame.gridTemplateColumns, contentW, colGap, children.length);
-  // Resolve row tracks — if not defined, auto-create rows based on column count
+  // Resolve row tracks — if not defined, auto-create rows based on
+  // column count. Naive `ceil(children / cols)` ignores spans: a bento
+  // grid where a hero cell is `span 4 / span 2` + sibling cells at
+  // `span 2` on a 6-col track would collapse to 1 row because
+  // children.length=3 and numCols=6. Pre-simulate auto-placement so
+  // implicit row count reflects actual occupancy including spans.
   const numCols = colSizes.length || 1;
-  const numRows = Math.max(
-    frame.gridTemplateRows.length,
-    Math.ceil(children.length / numCols),
-  );
+  let implicitRows = 1;
+  {
+    let ac = 0, ar = 0;
+    for (const child of children) {
+      const cSpan = Math.min(child.gridPosition?.columnSpan || 1, numCols);
+      const rSpan = child.gridPosition?.rowSpan || 1;
+      if (child.gridPosition && child.gridPosition.column > 0 && child.gridPosition.row > 0) {
+        // explicit placement — row is 1-indexed
+        const endRow = child.gridPosition.row - 1 + rSpan;
+        if (endRow > implicitRows) implicitRows = endRow;
+      } else {
+        if (ac + cSpan > numCols) { ac = 0; ar++; }
+        const endRow = ar + rSpan;
+        if (endRow > implicitRows) implicitRows = endRow;
+        ac += cSpan;
+        if (ac >= numCols) { ac = 0; ar++; }
+      }
+    }
+  }
+  const numRows = Math.max(frame.gridTemplateRows.length, implicitRows);
+  // Row tracks: explicit `gridTemplateRows` wins. When absent, prefer
+  // `gridAutoRows` (from CSS `grid-auto-rows`) so implicit tracks get a
+  // meaningful height — typical Bento idiom. Only fall back to `FR 1`
+  // when neither is set (engine's original "split container evenly"
+  // default), which collapses to 0 when the container itself is HUG.
   const defaultRowTracks: typeof frame.gridTemplateRows = frame.gridTemplateRows.length > 0
     ? frame.gridTemplateRows
-    : Array.from({ length: numRows }, () => ({ type: 'FR' as const, value: 1 }));
+    : frame.gridAutoRows
+      ? Array.from({ length: numRows }, () => frame.gridAutoRows as GridTrack)
+      : Array.from({ length: numRows }, () => ({ type: 'FR' as const, value: 1 }));
   const rowSizes = resolveGridTracks(defaultRowTracks, contentH, rowGap, children.length);
 
   // Grow the container to fit its grid tracks when the tracks demand more
@@ -853,15 +881,55 @@ export function computeAllLayouts(graph: SceneGraph, scopeId?: string): void {
 
   // Post-Yoga pass: compute GRID layouts that Yoga treated as fixed-size leaves.
   // GRID containers need their own layout pass to place children in grid cells.
+  let anyGridGrew = false;
   function findGridFrames(nodeId: string): void {
     const node = graph.getNode(nodeId);
     if (!node) return;
     if (node.layoutMode === 'GRID') {
+      const hBefore = node.height;
       computeGridLayout(graph, node);
+      const after = graph.getNode(nodeId);
+      if (after && Math.abs(after.height - hBefore) > 0.5) anyGridGrew = true;
     }
     for (const childId of node.childIds) findGridFrames(childId);
   }
   findGridFrames(startId);
+
+  // Post-layout propagation: measure every VERTICAL container (scene
+  // root included) against its actual child extents and grow it when
+  // content overflows. Walks the tree bottom-up so inner containers
+  // grow first, then their ancestors see the new child extents. CANNOT
+  // re-run `computeLayout` here — Yoga's re-pass would overwrite grid
+  // cell x/y coords computed by `computeGridLayout`, collapsing every
+  // bento cell back onto the top-left of the grid frame. Manual
+  // propagation walks heights without touching child positions.
+  //
+  // Runs unconditionally because ANY layout path (pure flex, grid,
+  // mixed) can overflow the importer's default 1080 root height:
+  // editorial long-form (2500+), dashboards, pricing tables — all
+  // exceed it once content settles.
+  function propagateHeights(nodeId: string): void {
+    const node = graph.getNode(nodeId);
+    if (!node || node.childIds.length === 0) return;
+    for (const childId of node.childIds) propagateHeights(childId);
+    if (node.layoutMode !== 'VERTICAL' && node.id !== startId) return;
+    // Auto-grow only VERTICAL containers (scene root usually, column
+    // sections otherwise). HORIZONTAL / GRID frames own their heights
+    // from their own pass.
+    if (node.layoutMode !== 'VERTICAL' && node.layoutMode !== 'NONE') return;
+    let contentBottom = 0;
+    for (const childId of node.childIds) {
+      const c = graph.getNode(childId);
+      if (!c) continue;
+      const bottom = (c.y ?? 0) + (c.height ?? 0);
+      if (bottom > contentBottom) contentBottom = bottom;
+    }
+    const needed = contentBottom + (node.paddingBottom ?? 0);
+    if (needed > node.height + 0.5) {
+      graph.updateNode(node.id, { height: needed });
+    }
+  }
+  propagateHeights(startId);
 }
 
 /**

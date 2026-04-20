@@ -27,7 +27,7 @@ export interface BootSceneData {
   /** Scene root node props — powers the empty-selection Properties panel. */
   root: { id: string; width: number; height: number; background: string } | null;
   /** 37-rule audit result (may be null if the run failed). */
-  audit: { score: number; counts: Record<string, number>; findings: any[] } | null;
+  audit: { score: number; counts: Record<string, number>; findings: any[]; brandFidelity?: any } | null;
   /** Layer tree — same shape as GET /platform/api/scene/tree. */
   tree: any;
   /** Annotations (marks + comments). */
@@ -232,10 +232,27 @@ async function buildAuditResult(ctx: PlatformContext, scene: any): Promise<BootS
       rule: i.rule,
       severity: i.severity,
       message: i.message,
-      fix: i.fix ?? null,
+      fix: i.fix
+        ? { property: i.fix.property, current: i.fix.current, suggested: i.fix.suggested, css: i.fix.css }
+        : null,
     }));
-    return { score, counts, findings };
-  } catch {
+
+    // Brand fidelity — mirror `/platform/api/audit` shape so the UI can
+    // consume the boot snapshot without fetching for the BF score too.
+    let brandFidelity: any = null;
+    if (designSystem) {
+      try {
+        const { computeBrandFidelity } = await import('../../../core/src/brand-fidelity.js');
+        brandFidelity = computeBrandFidelity(wrappedRoot as any, designSystem);
+      } catch { /* optional */ }
+    }
+
+    return { score, counts, findings, brandFidelity };
+  } catch (err) {
+    // Don't swallow silently — a null boot audit forces every right-panel
+    // mount to re-fetch, defeating the pre-hydration design. Surface to
+    // stderr so QA sweeps catch the real cause instead of "audit=null".
+    try { console.error('[boot-payload] audit build failed:', (err as any)?.message ?? err); } catch { /* ignore */ }
     return null;
   }
 }

@@ -189,10 +189,69 @@ export async function applyBrandToScene(sceneId: string, brandSlug: string, ctx:
   };
 }
 
+// Rotate colors + Toggle mode both need a live token index.
+// If the scene was compiled without a brand — or the active brand
+// never went through defineTokens — `rebuildTokenIndexFromGraph`
+// returns null and the macros 400 with "no tokens defined". That
+// error is technically correct but useless to a designer who just
+// clicked "Invert accent" in the toolbar: they don't know what
+// tokens are. Recover transparently: load the project's active
+// brand DESIGN.md and tokenize+bind on the fly, THEN apply.
+async function ensureTokenIndex(
+  scene: { graph: any; rootId: string; brand?: string },
+  sceneId: string,
+  store: any,
+  ctx: PlatformContext | null,
+) {
+  const { rebuildTokenIndexFromGraph, tokenizeDesignSystem, autoBindTokensFromGraph } =
+    await import('../../../../core/src/design-system/tokens.js');
+  let tokenIdx = rebuildTokenIndexFromGraph(scene.graph);
+  if (tokenIdx) return tokenIdx;
+
+  // No tokens — try auto-defining from the project's active brand
+  // so the macro "just works" on a fresh scene. Prefer the project
+  // manifest's activeBrand (always the slug, e.g. "linear") over
+  // scene.brand (which stores the DESIGN.md display label, e.g.
+  // "Inspired by Linear" — not a valid registry key).
+  let brandSlug: string | undefined;
+  if (ctx?.projectDir) {
+    try {
+      const projectIo = await import('../../../../core/src/project/io.js');
+      const manifest = projectIo.loadProject?.(ctx.projectDir);
+      brandSlug = manifest?.activeBrand as string | undefined;
+      // If the scene was compiled with a brand whose label happens to
+      // be registered, resolve its slug. (Label → slug fallback when
+      // the project has no activeBrand set.)
+      if (!brandSlug && scene.brand && manifest?.brands) {
+        for (const [k, entry] of Object.entries(manifest.brands)) {
+          if ((entry as any)?.label === scene.brand) { brandSlug = k; break; }
+        }
+        if (!brandSlug && manifest.brands[scene.brand]) brandSlug = scene.brand;
+      }
+    } catch { /* fall through */ }
+  }
+  if (!brandSlug || !ctx) {
+    throw new Error('no tokens defined — run Modify → Rebrand (or load a brand) first');
+  }
+  const brandMd = await loadBrandMd(ctx, brandSlug);
+  if (!brandMd) {
+    throw new Error(`no tokens defined; active brand "${brandSlug}" has no DESIGN.md on disk`);
+  }
+  const { getSession } = await import('../../session.js');
+  const { parseDesignMd } = await import('../../../../core/src/design-system/index.js');
+  const parsed = getSession().getOrParseDesignMd(brandMd, parseDesignMd);
+  tokenIdx = tokenizeDesignSystem(scene.graph, parsed, { darkMode: true });
+  autoBindTokensFromGraph(scene.graph, scene.rootId, tokenIdx);
+  const sessId = store.findSessionId(sceneId);
+  if (sessId) store.setTokenIndex(sessId, tokenIdx);
+  return tokenIdx;
+}
+
 async function applyVariationToScene(
   sceneId: string,
   kind: string,
   value: any,
+  ctx: PlatformContext | null = null,
 ) {
   const store = await getStore();
   const scene = store.getScene(sceneId);
@@ -227,14 +286,12 @@ async function applyVariationToScene(
       changed = applyTypographyPreset(scene.graph, scene.rootId, value);
       break;
     case 'colorRotation': {
-      const tokenIdx = rebuildTokenIndexFromGraph(scene.graph);
-      if (!tokenIdx) throw new Error('no tokens defined — run rebrand or defineTokens first');
+      const tokenIdx = await ensureTokenIndex(scene, sceneId, store, ctx);
       changed = rotateColors(scene.graph, tokenIdx, value);
       break;
     }
     case 'mode': {
-      const tokenIdx = rebuildTokenIndexFromGraph(scene.graph);
-      if (!tokenIdx) throw new Error('no tokens defined — run rebrand or defineTokens first');
+      const tokenIdx = await ensureTokenIndex(scene, sceneId, store, ctx);
       const modeId = switchTokenMode(scene.graph, tokenIdx, String(value));
       if (!modeId) throw new Error(`mode "${value}" not found`);
       changed = 1;
@@ -308,7 +365,7 @@ export async function handleVariationsApi(
       return true;
     }
     try {
-      const result = await applyVariationToScene(sceneId, kind, value);
+      const result = await applyVariationToScene(sceneId, kind, value, ctx);
       await notifySceneChange();
       sendJson(res, 200, { ok: true, ...result });
     } catch (e: any) {

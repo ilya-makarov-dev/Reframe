@@ -126,17 +126,25 @@ export function renderEditorShell(options: {
       height: 100vh;
     }
 
-    /* Mobile: 220 + 1fr + 320 on a 390 px screen squeezed canvas to
-       a 0-wide sliver (CanvasKit can't init a zero-width surface, so
-       the viewport never rendered). Below 720 px, hide both asides
-       and let the main canvas use the full width. */
-    @media (max-width: 720px) {
+    /* Narrow: 220 + 1fr + 320 on anything below 1024 px starves the
+       canvas pane (0 px at 390, 228 px at 768 -- both unusable). At
+       these widths hide both asides and hand the canvas the full
+       width. Base #app uses the grid-template shorthand so the
+       override MUST use the full shorthand too; a longhand
+       grid-template-columns 1fr alone loses to the shorthand's
+       column list at equal specificity. !important defends against
+       a later re-declaration of the shorthand anywhere downstream. */
+    @media (max-width: 1024px) {
       #app {
-        grid-template-columns: 1fr;
-        grid-template-areas: "header" "canvas";
+        grid-template: "header" 48px "canvas" 1fr / 1fr !important;
       }
-      #sidebar, #panel { display: none; }
+      #sidebar, #panel { display: none !important; }
       #header { overflow-x: auto; }
+      /* Absolute-centered macro pill collides with the right-anchored
+         Export button once the header loses its side rails. Hide it at
+         tablet+ breakpoints — Generate/Modify/Preview/More all stay
+         reachable via the bottom chat palette and agent prompts. */
+      .macro-dropdowns { display: none !important; }
     }
 
     /* ── Header ── */

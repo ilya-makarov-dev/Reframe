@@ -3,6 +3,29 @@
     // (editor-shell). Both set data-scene to the current project slug.
     const appEl = $('.app') || document.getElementById('app');
     if (appEl) state.currentSceneSlug = appEl.getAttribute('data-scene') || null;
+    // Restore per-project canvas workspace background (set via the
+    // empty-state Background control). Sets CSS var immediately, then
+    // retries pageColor assignment until the CanvasKit editor is wired
+    // (it boots 2-3s after DOMContentLoaded). Without pageColor the
+    // CanvasKit surface still paints CANVAS_BG_COLOR (0.96,0.96,0.96)
+    // on every frame, so the CSS var alone is invisible.
+    try {
+      var wsKey = 'reframe:workspace-bg:' + (state.currentSceneSlug || 'default');
+      var wsVal = localStorage.getItem(wsKey);
+      if (wsVal) {
+        document.documentElement.style.setProperty('--surface-canvas', wsVal);
+        var applyTries = 0;
+        var applyLoop = setInterval(function() {
+          applyTries++;
+          if (typeof applyCanvasBg === 'function' && window.__reframeEditor) {
+            applyCanvasBg(wsVal);
+            clearInterval(applyLoop);
+          } else if (applyTries > 30) {
+            clearInterval(applyLoop);
+          }
+        }, 200);
+      }
+    } catch (_) {}
     // Initialize original viewport dims from scene data
     var vpFrame = $('.viewport-frame');
     if (vpFrame) {
@@ -36,23 +59,37 @@
       window.addEventListener('reframe:canvas-select', function(evt) {
         var detail = evt.detail || {};
         var nodeId = detail.nodeId;
+        // Deep-click promotion: when the hit node is a leaf that LAYERS
+        // hides (text spans inside buttons, inner wrappers, OP layout
+        // helpers), walk up parents until we reach the nearest ancestor
+        // that IS in LAYERS and promote the selection to that node. A
+        // plain click should land on "first meaningful parent", not the
+        // deepest leaf — matches Figma UX. Double-click / drill-in can
+        // still descend; that path bypasses this handler.
+        if (nodeId) {
+          var ed = window.__reframeEditor;
+          var maxHops = 8;
+          var cur = nodeId;
+          while (cur && maxHops-- > 0) {
+            if (document.querySelector('[data-layer-node="' + CSS.escape(cur) + '"]')) break;
+            var n = ed && ed.getNode && ed.getNode(cur);
+            if (!n || !n.parentId) { cur = null; break; }
+            cur = n.parentId;
+          }
+          if (cur) nodeId = cur;
+        }
         // Mirror selection into shared state so right-panel + chat chip
-        // + persisted-reload all see the same thing. The OP canvas was
-        // the one selection source that didn't write back; clicking on
-        // canvas left LAYERS and the chip showing the *previous*
-        // selection while the right panel rendered the new node.
-        //
-        // Guard: only write ids that actually live in the scene
-        // (data-layer-node attrs). OP fires auto-selection events for
-        // layout helpers / selection handles whose ids never appear
-        // in LAYERS; without this guard those clobber a
-        // LAYERS-click-persisted selection on every reload.
+        // + persisted-reload all see the same thing. Guard: only write
+        // ids that actually live in the scene (data-layer-node attrs);
+        // layout-helper ids would clobber a LAYERS-persisted selection.
         if (nodeId && state && state.selection) {
           var knownInLayers = !!document.querySelector('[data-layer-node="' + CSS.escape(nodeId) + '"]');
           if (knownInLayers) {
             state.selection.inode = nodeId;
             state.selection.tag = state.selection.tag || '';
             try { persistUiState(); } catch (_) {}
+            try { if (typeof window.reframeRenderBottomChips === 'function') window.reframeRenderBottomChips(); } catch (_) {}
+            try { window.dispatchEvent(new CustomEvent('reframe:ui-state-changed')); } catch (_) {}
           }
         }
         var frame = $('.viewport-frame') || document.getElementById('reframe-viewport');
@@ -198,6 +235,20 @@
         var detail = evt.detail || {};
         if (currentPropsNodeId === toRfId(detail.nodeId)) queuePropsRefresh();
       });
+      // Property-change from right-panel input → re-fetch after the
+      // mutation so derived fields refresh. Changing font-size reflows
+      // the text bbox (W/H), but the panel only rewrote the font-size
+      // input itself; Size W/H stayed frozen at pre-edit values until a
+      // re-select. Refresh on any layout-affecting prop so the user
+      // sees the new dimensions without clicking LAYERS again.
+      window.addEventListener('reframe:prop-changed', function(evt) {
+        var detail = evt.detail || {};
+        var prop = detail.prop || '';
+        if (!currentPropsNodeId || currentPropsNodeId !== toRfId(detail.nodeId)) return;
+        if (/^(font-size|font-family|font-weight|line-height|letter-spacing|padding|padding-|width|height|min-|max-|gap|itemSpacing|text|characters)/.test(prop)) {
+          queuePropsRefresh();
+        }
+      });
 
       // OP canvas is always in "edit mode" — set state so CSS classes work
       state.editMode = true;
@@ -247,6 +298,7 @@
     bindVariantStrip();
     bindPipelineStepper();
     bindBrandPicker();
+    bindDashboardBrandChips();
     refreshAnnotations();
     // Run audit + timeline after measurements arrive (deferred —
     // measurements come async via postMessage from the inject script).
@@ -274,6 +326,25 @@
     }
     setTimeout(function() { refreshAudit(); refreshTimeline(); refreshLayersTree(); }, 600);
 
+    // Seed window.__reframeActiveBrand so the bottom-chat chip row
+    // renders the active brand on project pages (where there is no
+    // [data-brand-picker-label] in the DOM). Fire-and-forget — the chip
+    // render is additive, and without this the agent was losing the
+    // brand context chip despite a brand being active in the project
+    // manifest.
+    (async function seedActiveBrand() {
+      try {
+        var r = await fetch('/platform/api/project/health');
+        if (!r.ok) return;
+        var j = await r.json();
+        var brand = (j && j.summary && j.summary.activeBrand) ? j.summary.activeBrand : '';
+        window.__reframeActiveBrand = brand || '';
+        if (typeof window.reframeRenderBottomChips === 'function') {
+          window.reframeRenderBottomChips();
+        }
+      } catch (_) { /* additive, don't block init */ }
+    })();
+
     // ── Restore persisted UI state ──────────────────────────
     // If the previous session left a selection + viewport pinned,
     // re-apply them here so the user walks into the same workspace
@@ -296,6 +367,14 @@
       // attempt is cheap (one GET /api/node/get). Stops early once the
       // props panel has contents that aren't the empty-state dashboard.
       function tryRestoreProps(attemptsLeft) {
+        // No persisted selection → render the Canvas-root dashboard
+        // (W/H + background + audit) instead of leaving the static
+        // "Select a node to inspect" placeholder from the HTML shell.
+        // Only runs once, on the top-level call (attemptsLeft === 6).
+        if ((!state.selection || !state.selection.inode) && attemptsLeft === 6) {
+          if (typeof clearPropsPanel === 'function') clearPropsPanel();
+          return;
+        }
         if (!state.selection || !state.selection.inode || attemptsLeft <= 0) return;
         var frame = document.querySelector('.viewport-frame') || document.getElementById('reframe-viewport');
         var sid = frame ? (frame.getAttribute('data-session') || frame.dataset.session) : null;

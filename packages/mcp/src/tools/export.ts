@@ -407,9 +407,22 @@ export async function handleExport(input: {
           // Return the rendered image inline as an MCP image content block
           // when it's small enough. This lets multimodal agents SEE the
           // result of their design pass in the tool response, without a
-          // separate Read call. We cap at 1.5 MB — larger payloads are left
-          // as a file-path reference the caller can open itself.
+          // separate Read call. Two caps: 1.5 MB base64 and 2000 px on
+          // either axis. The dimension cap matches _preview.ts — chat UIs
+          // reject images taller/wider than 2000 px even when the byte
+          // payload is small (a 2880×13600 long-scroll export is 1.4 MB
+          // but still breaks the session on the receiving end).
           const INLINE_LIMIT = 1_500_000;
+          const INLINE_MAX_DIMENSION = 2000;
+          const exceedsDim = w > INLINE_MAX_DIMENSION || h > INLINE_MAX_DIMENSION;
+          if (exceedsDim) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: `${text}\n(image omitted — ${w}×${h}px exceeds ${INLINE_MAX_DIMENSION}px inline dimension cap; open the file to view)`,
+              }],
+            };
+          }
           if (pngBytes.length <= INLINE_LIMIT) {
             // Convert Uint8Array → base64 without blowing the node stack
             // on large buffers. Buffer.from is zero-copy over the same

@@ -1510,7 +1510,19 @@ export function parseDesignMd(markdown: string): DesignSystem {
   const typoSection = findSection(sections, 'typography', 'type', 'font') ?? fallbackSection;
   const componentSection = findSection(sections, 'component', 'styling', 'button', 'element') ?? fallbackSection;
   const layoutSection = findSection(sections, 'layout', 'spacing', 'grid') ?? fallbackSection;
-  const radiusSection = findSection(sections, 'radius', 'corner');
+  // Prefer a dedicated h2 section; fall back to carving a `### Border
+  // Radius` / `### Corner Radius` sub-block out of the layout section's
+  // body (Linear, Stripe, Airbnb DESIGN.md all keep radius under
+  // "## Layout" as an h3). Without this fallback the whole section
+  // block — including unrelated spacing / grid prose — is fed to the
+  // radius parser, which matches numeric tokens from the wrong subtree
+  // and produces garbage scales.
+  let radiusSection = findSection(sections, 'radius', 'corner');
+  if (!radiusSection && layoutSection) {
+    const body = layoutSection.body;
+    const subMatch = body.match(/^###\s+(?:[^\n]*?(?:radius|corner)[^\n]*)\n([\s\S]*?)(?=\n###\s|\n##\s|$)/im);
+    if (subMatch) radiusSection = { title: 'radius', body: subMatch[1] };
+  }
   const depthSection = findSection(sections, 'depth', 'elevation', 'shadow');
   const responsiveSection = findSection(sections, 'responsive', 'breakpoint', 'adaptive');
   const rulesSection = findSection(sections, 'rules', 'do', 'don');
@@ -1526,6 +1538,25 @@ export function parseDesignMd(markdown: string): DesignSystem {
       if (nums && nums.length >= 2) {
         parsedLayout.borderRadiusScale = nums.map(n => parseInt(n, 10)).filter(n => Number.isFinite(n));
       }
+    }
+    // Bullet-list format common in prose DESIGN.md files, e.g.:
+    //   - Micro (2px): Inline badges, …
+    //   - Standard (4px): Small containers
+    //   - Comfortable (6px): Buttons, inputs
+    //   - Card (8px): …
+    //   - Full Pill (9999px): Chips, status tags
+    // Pull every `(Npx)` or `: Npx` across the section body — covers
+    // Linear, Stripe, Airbnb-style docs where the scale isn't declared
+    // on a single `scale:` line. Without this, parser fell back to the
+    // default `[0,2,4,8,12,16]` and Linear's signature 6px radius was
+    // off-scale, tanking BrandFidelity.radiusCompliance to ~28%.
+    const proseRadii = [...radiusText.matchAll(/\((\d{1,5})\s*(?:px|%)?\)|:\s*(\d{1,5})\s*px/gi)]
+      .map(m => parseInt(m[1] ?? m[2], 10))
+      .filter(n => Number.isFinite(n));
+    if (proseRadii.length > 0) {
+      const vals = new Set<number>(scaleMatch ? parsedLayout.borderRadiusScale : []);
+      for (const v of proseRadii) vals.add(v);
+      parsedLayout.borderRadiusScale = [...vals].sort((a, b) => a - b);
     }
     // "button: 8  card: 12  badge: 9999" — add to scale
     const componentRadii = [...radiusText.matchAll(/(?:button|card|badge|input|image)[:\s]*(\d+)/gi)];

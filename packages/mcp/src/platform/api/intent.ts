@@ -69,7 +69,12 @@ export async function handleIntentApi(
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const pathname = url.pathname;
 
-  if (!pathname.startsWith('/platform/api/')) return false;
+  // Only handle intent routes. Historically this file guarded
+  // `/platform/api/*` wholesale and 400'd with "No project open"
+  // before later handlers (brand/apply, export, etc.) could run.
+  // That made new endpoints look broken on a pristine workspace.
+  // Scope the guard tightly so sibling handlers run on their own terms.
+  if (!pathname.startsWith('/platform/api/intent')) return false;
 
   if (!ctx.projectDir) {
     sendError(res, 400, 'No project open — run reframe_project init or open first.');

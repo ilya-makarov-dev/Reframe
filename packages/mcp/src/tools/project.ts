@@ -409,15 +409,19 @@ function doListBrands() {
   return ok(lines.join('\n'));
 }
 
-function doSetActiveBrand(input: { brand?: string }) {
+function doSetActiveBrand(input: { brand?: string; project?: string }) {
   if (!_projectDir) return err('No project open. Use "init" or "open" first.');
   if (!input.brand) return err('brand slug is required for set_active_brand');
-  const entry = setActiveBrand(_projectDir, input.brand);
+  // `project` is the virtual project slug (dashboard owner) — when passed,
+  // the per-project override is recorded so sibling virtual projects that
+  // share this .reframe/ dir don't inherit this brand choice.
+  const entry = setActiveBrand(_projectDir, input.brand, input.project);
   // Emit a generic project:updated event so Studio / session listeners can
   // refresh their view — set_active_brand can change brand compliance results
   // for every scene without touching a single node.
   emitProjectEvent({ type: 'project:updated', manifest: loadProject(_projectDir) });
-  return ok(`Active brand → "${entry.slug}" (${entry.path}, hash=${entry.hash})`);
+  const scope = input.project ? ` in project "${input.project}"` : '';
+  return ok(`Active brand → "${entry.slug}"${scope} (${entry.path}, hash=${entry.hash})`);
 }
 
 function doHistory(input: { sceneId?: string }) {

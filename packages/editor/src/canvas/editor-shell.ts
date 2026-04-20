@@ -140,9 +140,31 @@ export async function createReframeEditor(
     } catch { /* non-critical — continue rendering */ }
 
     try {
-      const vp = options.canvas.parentElement
-        ? { w: options.canvas.parentElement.clientWidth, h: options.canvas.parentElement.clientHeight }
-        : { w: options.canvas.width, h: options.canvas.height };
+      // Viewport size drives the renderer's frustum culling: nodes with
+      // absolute coords outside `worldViewport` get dropped. If we pass the
+      // parent container's CSS size (e.g. 900×852 in a narrow editor shell)
+      // while the scene is 1440-wide, every leaf past x=900 is culled —
+      // dashboards look half-empty even though PNG export renders fine.
+      //
+      // Fix: inflate the viewport to cover the full scene root bbox so
+      // culling can only drop nodes genuinely outside the scene (off-canvas
+      // drag previews, overlays). Perf cost is negligible at editor scale.
+      const containerW = options.canvas.parentElement?.clientWidth ?? options.canvas.width;
+      const containerH = options.canvas.parentElement?.clientHeight ?? options.canvas.height;
+      let sceneW = 0;
+      let sceneH = 0;
+      try {
+        const rootId = (editor.graph as any).rootId;
+        const rootNode = rootId ? (editor.graph as any).getNode?.(rootId) : null;
+        if (rootNode) {
+          sceneW = rootNode.width ?? 0;
+          sceneH = rootNode.height ?? 0;
+        }
+      } catch { /* graph not ready yet — fall through to container-only */ }
+      const vp = {
+        w: Math.max(containerW, sceneW),
+        h: Math.max(containerH, sceneH),
+      };
       (renderer as any).renderFromEditorState(
         editor.state,
         editor.graph,
