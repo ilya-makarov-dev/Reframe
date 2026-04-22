@@ -378,8 +378,19 @@ export default async function(o){
     const { renderEditorShell } = await import('./pages/editor-shell-page.js');
     const { buildEditorBoot } = await import('./boot-payload.js');
     const boot = await buildEditorBoot(ctx, activeSceneId, project.slug);
+    // Fall back to the project slug when the INode root name is a generic
+    // structural tag ("Row", "Stack", "div", etc.) — those are auto-inferred
+    // by the HTML importer and read as implementation detail in the header
+    // breadcrumb. Same list as dashboard.ts `GENERIC_TAGS`.
+    const GENERIC_ROOT_NAMES = new Set([
+      'div', 'span', 'section', 'main', 'header', 'footer', 'article', 'aside', 'nav',
+      'stack', 'row', 'column', 'group', 'frame', 'canvas', 'body', 'html',
+    ]);
+    const projectLabel = GENERIC_ROOT_NAMES.has((project.name || '').toLowerCase())
+      ? project.slug
+      : project.name;
     const html = renderEditorShell({
-      title: `reframe \u00B7 ${project.name}`,
+      title: `reframe \u00B7 ${projectLabel}`,
       sceneIds,
       sceneSlug: project.slug,
       editorJsPath: '/platform/viewport-init.js',

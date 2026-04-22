@@ -930,6 +930,15 @@ export function computeAllLayouts(graph: SceneGraph, scopeId?: string): void {
     }
   }
   propagateHeights(startId);
+
+  // Yoga + grid + propagateHeights have just overwritten x/y/width/height on
+  // most nodes in the tree. The graph's `absPosCache` keyed on node id is
+  // now stale — downstream readers (audit via standalone-node
+  // `absoluteBoundingBox`, resize/adapt bleed check, Canva adapter) would
+  // otherwise get cached pre-layout coords and report false overlaps /
+  // overflow / out-of-bounds findings. Clearing here keeps the cache
+  // honest without forcing every mutation site to remember.
+  graph.clearAbsPosCache();
 }
 
 /**

@@ -112,17 +112,25 @@ export function invalidateAuditCacheAll(): void {
 
 // ─── Color helpers ──────────────────────────────────────────
 
-function hexToRgba(hex: string): { r: number; g: number; b: number; a: number } | null {
-  const m = hex.match(/^#?([a-f0-9]{6}|[a-f0-9]{8})$/i);
-  if (!m) return null;
-  const h = m[1];
-  return {
-    r: parseInt(h.slice(0, 2), 16) / 255,
-    g: parseInt(h.slice(2, 4), 16) / 255,
-    b: parseInt(h.slice(4, 6), 16) / 255,
-    a: h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1,
-  };
+/**
+ * Parse 3/4/6/8-char hex with or without `#`. Mirrors the shape
+ * `reframe_edit` accepts so both mutation paths write identical INode state.
+ * Returns `{color:{r,g,b,a:1}, opacity}` where hex alpha maps to the fill's
+ * `opacity` field (not `color.a`) — same convention as edit.ts `hexToColor`.
+ */
+function parseHexFill(hex: string): { color: { r: number; g: number; b: number; a: number }; opacity: number } | null {
+  let h = hex.trim().replace(/^#/, '');
+  if (!/^[a-f0-9]+$/i.test(h)) return null;
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  else if (h.length === 4) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2] + h[3] + h[3];
+  if (h.length !== 6 && h.length !== 8) return null;
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  const alpha = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+  return { color: { r, g, b, a: 1 }, opacity: alpha };
 }
+
 
 function rgbaToHex(c: { r: number; g: number; b: number; a?: number }): string {
   const r = Math.round((c.r ?? 0) * 255).toString(16).padStart(2, '0');
@@ -289,8 +297,25 @@ function nodeToCssProps(node: any): Record<string, any> {
  *   'font-size' → fontSize
  *   etc.
  */
-function cssPropsToNodePartial(edits: Record<string, any>): Record<string, any> {
+export function cssPropsToNodePartial(
+  edits: Record<string, any>,
+  node?: { strokes?: any[] },
+): Record<string, any> {
   const partial: Record<string, any> = {};
+
+  // Stroke edits merge with the existing first stroke (color / weight / cap /
+  // join / align / dashPattern are independent fields — editing one shouldn't
+  // reset the others). If no existing stroke, we synthesize a minimal one.
+  const baseStroke = () => {
+    const existing = Array.isArray(node?.strokes) && node!.strokes!.length > 0
+      ? { ...(node!.strokes![0] as any) }
+      : { color: { r: 0, g: 0, b: 0, a: 1 }, weight: 1, opacity: 1, visible: true, align: 'INSIDE' };
+    return existing;
+  };
+  const ensureStrokeSlot = () => {
+    if (!partial.strokes) partial.strokes = [baseStroke()];
+    return (partial.strokes as any[])[0];
+  };
 
   for (const [key, value] of Object.entries(edits)) {
     switch (key) {
@@ -298,10 +323,6 @@ function cssPropsToNodePartial(edits: Record<string, any>): Record<string, any> 
       case 'height':        partial.height = Number(value); break;
       case 'x':             partial.x = Number(value); partial.layoutPositioning = 'ABSOLUTE'; break;
       case 'y':             partial.y = Number(value); partial.layoutPositioning = 'ABSOLUTE'; break;
-      // Layout primitives used by the "Detach" button. Without these
-      // cases the server silently dropped these edits, so the browser's
-      // OP graph kept the old AUTO layoutMode even after detach →
-      // Yoga kept overriding x/y and drag felt dead.
       case 'layoutPositioning': partial.layoutPositioning = String(value); break;
       case 'primaryAxisSizing': partial.primaryAxisSizing = String(value); break;
       case 'counterAxisSizing': partial.counterAxisSizing = String(value); break;
@@ -309,6 +330,7 @@ function cssPropsToNodePartial(edits: Record<string, any>): Record<string, any> 
       case 'layoutGrow':        partial.layoutGrow = Number(value); break;
       case 'layoutMode':        partial.layoutMode = String(value); break;
       case 'gap':           partial.itemSpacing = Number(value); break;
+      case 'padding':       partial.padding = Number(value); break;
       case 'padding-top':   partial.paddingTop = Number(value); break;
       case 'padding-right': partial.paddingRight = Number(value); break;
       case 'padding-bottom':partial.paddingBottom = Number(value); break;
@@ -316,39 +338,50 @@ function cssPropsToNodePartial(edits: Record<string, any>): Record<string, any> 
       case 'font-size':     partial.fontSize = Number(value); break;
       case 'font-family':   partial.fontFamily = String(value); break;
       case 'font-weight':   partial.fontWeight = Number(value); break;
-      case 'line-height':   partial.lineHeight = { value: Number(value), unit: 'PIXELS' }; break;
-      case 'letter-spacing':partial.letterSpacing = { value: Number(value), unit: 'PIXELS' }; break;
+      case 'line-height':   partial.lineHeight = Number(value); break;
+      case 'letter-spacing':partial.letterSpacing = Number(value); break;
       case 'text-content':  partial.text = String(value); break;
       case 'text-align':    partial.textAlignHorizontal = String(value).toUpperCase(); break;
       case 'border-radius': partial.cornerRadius = Number(value); break;
       case 'opacity':       partial.opacity = Number(value); break;
       case 'visible':       partial.visible = !!value; break;
       case 'clips-content': partial.clipsContent = !!value; break;
-      case 'background': {
-        const rgba = hexToRgba(String(value));
-        if (rgba) {
-          partial.fills = [{ type: 'SOLID', color: rgba, opacity: 1, visible: true }];
-        }
-        break;
-      }
+      case 'role':          partial.semanticRole = String(value); break;
+      case 'background':
       case 'color': {
-        // Text color — same as background but semantically distinct.
-        const rgba = hexToRgba(String(value));
-        if (rgba) {
-          partial.fills = [{ type: 'SOLID', color: rgba, opacity: 1, visible: true }];
+        const parsed = parseHexFill(String(value));
+        if (parsed) {
+          partial.fills = [{ type: 'SOLID', color: parsed.color, opacity: parsed.opacity, visible: true }];
         }
         break;
       }
       case 'border-color': {
-        const rgba = hexToRgba(String(value));
-        if (rgba) {
-          partial.strokes = [{ color: rgba, weight: 1, opacity: 1, visible: true, align: 'INSIDE' }];
+        const parsed = parseHexFill(String(value));
+        if (parsed) {
+          const s = ensureStrokeSlot();
+          s.color = parsed.color;
+          s.opacity = parsed.opacity;
         }
         break;
       }
       case 'border-width': {
-        // Stroke weight — needs existing stroke or creates one.
-        partial.strokes = [{ color: { r: 0, g: 0, b: 0, a: 1 }, weight: Number(value), opacity: 1, visible: true, align: 'INSIDE' }];
+        const s = ensureStrokeSlot();
+        s.weight = Number(value);
+        break;
+      }
+      case 'stroke-weight': {
+        const s = ensureStrokeSlot();
+        s.weight = Number(value);
+        break;
+      }
+      case 'stroke-cap': {
+        const s = ensureStrokeSlot();
+        s.cap = String(value);
+        break;
+      }
+      case 'stroke-join': {
+        const s = ensureStrokeSlot();
+        s.join = String(value);
         break;
       }
       case 'display': {
@@ -374,21 +407,6 @@ function cssPropsToNodePartial(edits: Record<string, any>): Record<string, any> 
       case 'grid-col-gap':    partial.gridColumnGap = Number(value); break;
       case 'grid-row-gap':    partial.gridRowGap = Number(value); break;
       case 'href':            partial.href = String(value); break;
-      case 'stroke-weight': {
-        if (!partial.strokes) partial.strokes = [{ color: { r: 0, g: 0, b: 0, a: 1 }, weight: 1, opacity: 1, visible: true, align: 'INSIDE' }];
-        (partial.strokes as any[])[0].weight = Number(value);
-        break;
-      }
-      case 'stroke-cap': {
-        if (!partial.strokes) partial.strokes = [{ color: { r: 0, g: 0, b: 0, a: 1 }, weight: 1, opacity: 1, visible: true, align: 'INSIDE' }];
-        (partial.strokes as any[])[0].cap = String(value);
-        break;
-      }
-      case 'stroke-join': {
-        if (!partial.strokes) partial.strokes = [{ color: { r: 0, g: 0, b: 0, a: 1 }, weight: 1, opacity: 1, visible: true, align: 'INSIDE' }];
-        (partial.strokes as any[])[0].join = String(value);
-        break;
-      }
       case 'font-features': {
         partial.fontFeatureSettings = Array.isArray(value) ? value : String(value).split(',').map(s => s.trim());
         break;
@@ -474,6 +492,12 @@ export async function handleNodeEditApi(
       }
       const prevParentId = node.parentId;
       scene.graph.reparentNode(nodeId, newParentId);
+      // Reparent moves a node between HUG containers — old parent may shrink,
+      // new parent may grow. Layout pass keeps both in sync.
+      try {
+        const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+        ensureSceneLayout(scene.graph, scene.rootId);
+      } catch { /* best-effort */ }
       // Record reparent op for undo.
       if (ctx.projectDir && scene.slug) {
         try {
@@ -497,8 +521,18 @@ export async function handleNodeEditApi(
       return true;
     }
 
-    // Capture previous values for undo.
-    const partial = cssPropsToNodePartial(edits);
+    // Capture previous values for undo. Route through the shared sanitizer so
+    // the Platform UI path produces identical INode state to reframe_edit
+    // (clamps out-of-range numbers, expands `padding` shorthand, translates
+    // `role` → `semanticRole`, resolves `{token:'…'}` refs + records bindings).
+    const rawPartial = cssPropsToNodePartial(edits, node);
+    const { sanitizeNodePartial } = await import('../../tools/edit.js');
+    const { getTokenIndex } = await import('../../store.js');
+    const partial = sanitizeNodePartial(rawPartial, {
+      targetId: nodeId,
+      graph: scene.graph,
+      tokenIdx: getTokenIndex(sceneId),
+    }).changes;
     const prevValues: Record<string, any> = {};
     for (const key of Object.keys(partial)) {
       prevValues[key] = (node as any)[key];
@@ -506,6 +540,32 @@ export async function handleNodeEditApi(
 
     // Apply changes.
     scene.graph.updateNode(nodeId, partial);
+
+    // Server owns layout truth: re-run Yoga when the edit could affect box
+    // dimensions. Without this, HUG parents stay stale and the client-side
+    // OP layout (which we intentionally skip for pure-visual edits) has no
+    // corrected dims to pull via SSE. Pure-visual edits (fills/opacity/
+    // blendMode/cornerRadius/rotation) skip this pass — no layout work needed.
+    const LAYOUT_AFFECTING_KEYS = new Set([
+      'text', 'characters',
+      'fontSize', 'fontFamily', 'fontWeight',
+      'lineHeight', 'letterSpacing',
+      'width', 'height',
+      'minWidth', 'maxWidth', 'minHeight', 'maxHeight',
+      'padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'itemSpacing', 'counterAxisSpacing',
+      'layoutMode', 'layoutWrap', 'layoutGrow', 'layoutAlignSelf',
+      'primaryAxisSizing', 'counterAxisSizing',
+      'primaryAxisAlign', 'counterAxisAlign',
+      'gridTemplateColumns', 'gridTemplateRows',
+      'gridColumnGap', 'gridRowGap',
+    ]);
+    if (Object.keys(partial).some(k => LAYOUT_AFFECTING_KEYS.has(k))) {
+      try {
+        const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+        ensureSceneLayout(scene.graph, scene.rootId);
+      } catch { /* best-effort */ }
+    }
 
     // Append to ops history so Cmd+Z can revert.
     if (ctx.projectDir && scene.slug) {
@@ -580,6 +640,15 @@ export async function handleNodeEditApi(
         const node = scene.graph.getNode(lastOp.nodeId);
         if (node) {
           scene.graph.updateNode(lastOp.nodeId, lastOp.prevProps);
+          // Undo may revert layout-affecting props — re-run layout so the
+          // resulting graph matches what Yoga would produce on a fresh
+          // compile. Without this, a reverted padding/text/dim stays
+          // mechanically applied but ancestor HUG dims stay at the post-
+          // edit value.
+          try {
+            const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+            ensureSceneLayout(scene.graph, scene.rootId);
+          } catch { /* best-effort */ }
         }
       }
 
@@ -632,6 +701,14 @@ export async function handleNodeEditApi(
       ...(nodeType === 'TEXT' ? { text: 'New text', fontSize: 16, fontFamily: 'Inter' } : {}),
     } as any);
 
+    // HUG parent needs to grow to fit new child — without this, the added
+    // node is stored but doesn't expand its container, so it overflows or
+    // gets clipped. Same pattern as /api/node/edit layout-affecting path.
+    try {
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(scene.graph, scene.rootId);
+    } catch { /* best-effort */ }
+
     store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
     try { const { emitEvent } = await import('../../http-server.js'); emitEvent({ type: 'scene:session-changed' } as any); } catch {}
     sendJson(res, 200, { ok: true, nodeId: newNode.id, type: nodeType });
@@ -675,17 +752,32 @@ export async function handleNodeEditApi(
         const fixable = issues.filter((i: any) => i.fix && i.nodeId);
         if (fixable.length === 0) break;
 
+        const { sanitizeNodePartial } = await import('../../tools/edit.js');
+        const { getTokenIndex } = await import('../../store.js');
         for (const issue of fixable) {
           const fix = (issue as any).fix;
           const node = scene.graph.getNode((issue as any).nodeId);
           if (!node || !fix) continue;
           const edits: Record<string, any> = {};
           edits[fix.property] = fix.suggested;
-          const partial = cssPropsToNodePartial(edits);
-          scene.graph.updateNode((issue as any).nodeId, partial);
+          const rawPartial = cssPropsToNodePartial(edits, node);
+          const { changes } = sanitizeNodePartial(rawPartial, {
+            targetId: (issue as any).nodeId,
+            graph: scene.graph,
+            tokenIdx: getTokenIndex(sceneId),
+          });
+          scene.graph.updateNode((issue as any).nodeId, changes);
           totalFixed++;
         }
       }
+
+      // Auto-fix applies a batch of per-node partials (padding, font-size,
+      // dimensions, etc.) — re-run layout once at the end so HUG ancestors
+      // reflect the aggregate effect, same as the single-edit path.
+      try {
+        const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+        ensureSceneLayout(scene.graph, scene.rootId);
+      } catch { /* best-effort */ }
 
       store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
       try { const { emitEvent } = await import('../../http-server.js'); emitEvent({ type: 'scene:session-changed' } as any); } catch {}
@@ -796,6 +888,12 @@ export async function handleNodeEditApi(
     if (!scene) { sendError(res, 404, 'scene not found'); return true; }
     if (nodeId === scene.rootId) { sendError(res, 400, 'cannot delete root node'); return true; }
     scene.graph.deleteNode(nodeId);
+    // HUG parents need to shrink when a child is removed. Without this the
+    // parent stays inflated with a gap where the deleted child used to be.
+    try {
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(scene.graph, scene.rootId);
+    } catch { /* best-effort */ }
     store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
     try { const { emitEvent } = await import('../../http-server.js'); emitEvent({ type: 'scene:session-changed' } as any); } catch {}
     sendJson(res, 200, { ok: true, deleted: nodeId });
@@ -815,6 +913,11 @@ export async function handleNodeEditApi(
     if (!node || !node.parentId) { sendError(res, 400, 'cannot wrap root'); return true; }
     const wrapper = scene.graph.groupNodes([nodeId], node.parentId);
     wrapper.name = 'Container';
+    // Wrap changes tree shape; siblings shift and HUG ancestors re-size.
+    try {
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(scene.graph, scene.rootId);
+    } catch { /* best-effort */ }
     store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
     try { const { emitEvent } = await import('../../http-server.js'); emitEvent({ type: 'scene:session-changed' } as any); } catch {}
     sendJson(res, 200, { ok: true, wrapperId: wrapper.id });
@@ -1271,6 +1374,15 @@ export async function handleNodeEditApi(
         }
       }
 
+      // Multi-op revert can cascade layout-affecting reversions — re-run
+      // once at the end so ancestor HUG dims match the restored state.
+      if (reverted > 0) {
+        try {
+          const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+          ensureSceneLayout(scene.graph, scene.rootId);
+        } catch { /* best-effort */ }
+      }
+
       // Rewrite history once.
       const fs = await import('fs');
       const histFile = historyMod.historyFilePath(ctx.projectDir, scene.slug);
@@ -1588,10 +1700,19 @@ export async function handleNodeEditApi(
       return true;
     }
 
-    // Map the audit fix property (CSS name) → engine prop change.
+    // Map the audit fix property (CSS name) → engine prop change, then run
+    // through the shared sanitizer so audit auto-fix respects the same
+    // clamps/shorthand as the agent path.
     const edits: Record<string, any> = {};
     edits[property] = suggested;
-    const partial = cssPropsToNodePartial(edits);
+    const rawPartial = cssPropsToNodePartial(edits, node);
+    const { sanitizeNodePartial } = await import('../../tools/edit.js');
+    const { getTokenIndex } = await import('../../store.js');
+    const partial = sanitizeNodePartial(rawPartial, {
+      targetId: nodeId,
+      graph: scene.graph,
+      tokenIdx: getTokenIndex(sceneId),
+    }).changes;
 
     // Capture prev values for undo.
     const prevValues: Record<string, any> = {};
@@ -1600,6 +1721,27 @@ export async function handleNodeEditApi(
     }
 
     scene.graph.updateNode(nodeId, partial);
+
+    // Same layout-affecting allowlist as the main /api/node/edit path —
+    // audit fixes apply padding / font-size / dimensions and must reflow
+    // HUG ancestors through Yoga rather than leaving them at stale dims.
+    const AUDIT_FIX_LAYOUT_KEYS = new Set([
+      'text', 'characters', 'fontSize', 'fontFamily', 'fontWeight',
+      'lineHeight', 'letterSpacing', 'width', 'height',
+      'minWidth', 'maxWidth', 'minHeight', 'maxHeight',
+      'padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'itemSpacing', 'counterAxisSpacing',
+      'layoutMode', 'layoutWrap', 'layoutGrow', 'layoutAlignSelf',
+      'primaryAxisSizing', 'counterAxisSizing',
+      'primaryAxisAlign', 'counterAxisAlign',
+      'gridTemplateColumns', 'gridTemplateRows', 'gridColumnGap', 'gridRowGap',
+    ]);
+    if (Object.keys(partial).some(k => AUDIT_FIX_LAYOUT_KEYS.has(k))) {
+      try {
+        const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+        ensureSceneLayout(scene.graph, scene.rootId);
+      } catch { /* best-effort */ }
+    }
 
     // Ops history.
     if (ctx.projectDir && scene.slug) {

@@ -1,65 +1,46 @@
 /**
- * @reframe/editor — Interactive design editor.
+ * @reframe/editor — Interactive design editor (DOM-canvas only).
  *
- * Combines @open-pencil/core (CanvasKit viewport, .fig, editing)
- * with @reframe/core (audit, tokens, resize, export, HTML import).
+ * As of 2026-04-22 reframe ships a single editor backend: the
+ * DOM canvas (iframe + HTML exporter + CSS 3D). All @open-pencil/core
+ * / CanvasKit / Skia code paths removed in the same release.
  */
 
-// Bridge
-export { GraphBridge } from './bridge/graph-bridge.js';
+// Canvas — DOM backend
 export {
-  type ReframeExtension,
-  extractExtension,
-  applyExtension,
-  opGridTrackToReframe,
-  reframeGridTrackToOP,
-} from './bridge/node-bridge.js';
+  createDOMCanvas,
+  type DOMCanvasOptions,
+  createSceneRenderer,
+  type SceneRendererOptions,
+  createZoomPan,
+  ZOOM_LEVELS,
+  type ZoomPanState,
+  createSelectionOverlay,
+  type SelectionRect,
+  type HandlePosition,
+  hitTest,
+  type HitTestResult,
+  type HitTestOptions,
+  createPresentMode,
+  type CameraPreset,
+  type FilterPreset,
+  type PresentModeController,
+  isTexElementAvailable,
+  getTexElementFunction,
+  createWebGLPresentMode,
+} from './canvas-dom/index.js';
 
-// Canvas
-export {
-  createReframeEditor,
-  type ReframeEditorOptions,
-  type ReframeEditorShell,
-} from './canvas/editor-shell.js';
-export {
-  drawAuditOverlay,
-  createAuditOverlayState,
-  type AuditOverlayState,
-  type AuditIssueOverlay,
-} from './canvas/audit-overlay.js';
-
-// Sync
+// Sync (DOM canvas uses SSE directly via renderer.ts; MCPClient kept
+// for any future headless integration)
 export { MCPClient, type MCPClientOptions } from './sync/mcp-client.js';
-export { StoreSync, type StoreSyncOptions } from './sync/store-sync.js';
 
-// Panels
-export { renderPropertiesPanel, type PropertiesPanelData } from './panels/properties.js';
+// Panels (non-canvas-specific rendering helpers)
 export { renderBlocksPanel, BLOCK_LIBRARY, type BlockDef } from './panels/blocks.js';
 export { renderAIChatPanel, type AIChatPanelData, type AIChatMessage } from './panels/ai-chat.js';
 export { renderExportPanel, EXPORT_OPTIONS, type ExportFormat, type ExportOption } from './panels/export.js';
 export { renderDesignSystemPanel, type DesignSystemPanelData } from './panels/design-system.js';
 export { renderAuditPanel, type AuditPanelData } from './panels/audit.js';
 
-// Tool Bridge
-export {
-  importFigFile,
-  exportToFig,
-  runOPLint,
-  getOPTools,
-  executeOPTool,
-  CAPABILITY_MAP,
-} from './sync/tool-bridge.js';
-
-// Canvas Interaction
-export { setupCanvasInteraction, type InteractionCallbacks } from './canvas/interaction.js';
-
 // App
 export { renderEditorShell } from './app/shell-html.js';
 export { initPlatformViewport, getEditorShell } from './app/platform-bootstrap.js';
-export { setupFileDragDrop, openFileDialog } from './app/file-handler.js';
-export {
-  getContextMenuItems,
-  renderContextMenu,
-  executeContextAction,
-  type ContextMenuItem,
-} from './app/context-menu.js';

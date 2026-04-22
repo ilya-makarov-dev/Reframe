@@ -13,7 +13,6 @@ import { exportToReact, exportToReactTree } from '../../../core/src/exporters/re
 import { exportToAnimatedHtml } from '../../../core/src/exporters/animated-html.js';
 import { exportToLottie } from '../../../core/src/exporters/lottie.js';
 import { buildLottiePreviewHtml } from '../../../core/src/exporters/lottie-preview.js';
-import { exportSite } from '../../../core/src/exporters/site.js';
 // transition exporter removed — was niche resize-preview animation
 import { StandaloneNode } from '../../../core/src/adapters/standalone/node.js';
 import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js';
@@ -23,7 +22,7 @@ import { presets, stagger as staggerFn, listPresets } from '../../../core/src/an
 import type { ITimeline, INodeAnimation } from '../../../core/src/animation/types.js';
 import { exportToRaster, initCanvasKit } from '../../../core/src/exporters/raster.js';
 import { exportSvgFromGraph } from '../engine.js';
-import { resolveScene, getScene, listScenes, getExportsBaseDir } from '../store.js';
+import { resolveScene, getScene, getExportsBaseDir } from '../store.js';
 import { getSession } from '../session.js';
 import type { SceneGraph } from '../../../core/src/engine/scene-graph.js';
 import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
@@ -33,8 +32,8 @@ import { makeToolJsonErrorResult } from '../tool-result.js';
 
 export const exportInputSchema = {
   sceneId: z.string().describe('Scene ID to export.'),
-  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'animated_html', 'lottie', 'site'])
-    .describe('Output format. "site" bundles multiple scenes into a clickable multi-page HTML app with routing.'),
+  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'lottie', 'video'])
+    .describe('Output format. `html` respects `animate:true` to embed the scene timeline as inline CSS keyframes / GSAP (replaces the old "animated_html" format). `video` produces an MP4 via hyperframes render (Puppeteer + FFmpeg). Multi-page projects: call `reframe_export format=html` per scene — no "site" format needed.'),
 
   // HTML options
   fullDocument: z.boolean().optional().default(true),
@@ -92,9 +91,16 @@ export const exportInputSchema = {
     }).optional(),
     loop: z.boolean().optional().default(false),
     speed: z.number().optional().default(1),
-  }).optional().describe('Animation config — required for animated_html and lottie formats'),
+  }).optional().describe('Animation config — required for `format: lottie`. For `format: html`, passing this config makes the output animated HTML (GSAP + timeline scrub); omit for plain static HTML.'),
 
-  controls: z.boolean().optional().default(true).describe('Include play/pause in animated HTML'),
+  controls: z.boolean().optional().default(true).describe('Include play/pause controls when `format: html` has an `animate` config.'),
+
+  // Video options (format: 'video')
+  renderVideo: z.boolean().optional().default(false).describe(
+    'For format="video" only: spawn `npx hyperframes render` after emitting the composition HTML and return the MP4 path. Requires hyperframes CLI installed (npx fetches on first run; ~100 MB Chromium download on first invocation). Default false — returns the HTML + CLI command for the caller to run.',
+  ),
+  videoFps: z.number().optional().default(30).describe('For format="video" with renderVideo: frames per second. Default 30.'),
+  videoQuality: z.enum(['draft', 'standard', 'high']).optional().default('standard').describe('For format="video" with renderVideo: encoder quality preset. Default "standard".'),
 };
 
 // ─── Timeline builder ─────────────────────────────────────────
@@ -195,7 +201,7 @@ function buildTimeline(
 
 export async function handleExport(input: {
   sceneId: string;
-  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'animated_html' | 'lottie' | 'site';
+  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'lottie' | 'video';
   fullDocument?: boolean;
   dataAttributes?: boolean;
   cssClasses?: boolean;
@@ -219,6 +225,9 @@ export async function handleExport(input: {
     speed?: number;
   };
   controls?: boolean;
+  renderVideo?: boolean;
+  videoFps?: number;
+  videoQuality?: 'draft' | 'standard' | 'high';
 }) {
   const { format, sceneId } = input;
 
@@ -245,7 +254,12 @@ export async function handleExport(input: {
   // ─── 3. Build timeline for animated formats ─────────────────
   let timeline: ITimeline | null = null;
 
-  if ((format === 'animated_html' || format === 'lottie') && input.animate) {
+  // Animation config drives two routes:
+  //   `format: 'lottie'` — mandatory (timeline baked into Lottie JSON)
+  //   `format: 'html'` with `animate:{...}` — embeds GSAP timeline into
+  //      the emitted HTML (replaces the old `format: 'animated_html'`)
+  const wantsAnimation = (format === 'lottie') || (format === 'html' && !!input.animate);
+  if (wantsAnimation && input.animate) {
     const built = buildTimeline(graph, rootId, input.animate);
     const errors = validateTimeline(built.timeline);
 
@@ -278,7 +292,7 @@ export async function handleExport(input: {
       `Animation: ${timeline.animations.length} animation${timeline.animations.length > 1 ? 's' : ''}, ` +
       `${duration}ms${timeline.loop ? ' (loop)' : ''}`,
     );
-  } else if ((format === 'animated_html' || format === 'lottie') && !input.animate) {
+  } else if (format === 'lottie' && !input.animate) {
     return {
       content: [{
         type: 'text' as const,
@@ -293,11 +307,21 @@ export async function handleExport(input: {
   try {
     switch (format) {
       case 'html': {
-        content = exportToHtml(graph, rootId, {
-          fullDocument: input.fullDocument ?? true,
-          dataAttributes: input.dataAttributes ?? false,
-          cssClasses: input.cssClasses ?? false,
-        });
+        // When `animate` config is provided, route to the animated-HTML
+        // exporter (timeline → GSAP + CSS keyframes). Otherwise plain
+        // static HTML. Replaces the old `format: 'animated_html'` split.
+        if (timeline) {
+          content = exportToAnimatedHtml(graph, rootId, timeline, {
+            fullDocument: true,
+            controls: input.controls ?? true,
+          });
+        } else {
+          content = exportToHtml(graph, rootId, {
+            fullDocument: input.fullDocument ?? true,
+            dataAttributes: input.dataAttributes ?? false,
+            cssClasses: input.cssClasses ?? false,
+          });
+        }
         break;
       }
 
@@ -478,54 +502,30 @@ export async function handleExport(input: {
         }
       }
 
-      case 'animated_html': {
-        content = exportToAnimatedHtml(graph, rootId, timeline!, {
-          fullDocument: true,
-          controls: input.controls ?? true,
-        });
-        break;
-      }
-
       case 'lottie': {
         const lottie = exportToLottie(graph, rootId, timeline!);
         content = JSON.stringify(lottie);
         break;
       }
 
-      case 'site': {
-        // Bundle scenes into a multi-page site. Filtering policy:
-        //  1. If the requested sceneId belongs to a project group (e.g.
-        //     compiled with name="site/home" → group="site"), only bundle
-        //     scenes that share that group. This is the common case —
-        //     the agent is exporting a coherent micro-site, not the
-        //     entire ad-hoc session of 65 grid variants and rebrands.
-        //  2. Otherwise fall back to bundling every scene. Old behavior
-        //     stays available for ad-hoc multi-scene previews.
-        const allScenes = listScenes();
-        const sourceStored = getScene(sceneId);
-        const sourceGroup = sourceStored?.group;
-        const filtered = sourceGroup
-          ? allScenes.filter(s => getScene(s.id)?.group === sourceGroup)
-          : allScenes;
-        if (filtered.length < 2) {
-          const hint = sourceGroup
-            ? `Site export from group "${sourceGroup}" found only ${filtered.length} scene. Compile additional pages with name="${sourceGroup}/<page>" first.`
-            : 'Site export requires at least 2 scenes. Create more scenes with reframe_compile or reframe_edit first.';
-          return { content: [{ type: 'text' as const, text: hint }] };
-        }
-        const sitePages = filtered.map(s => {
-          const stored = getScene(s.id)!;
-          return {
-            slug: stored.slug,
-            name: stored.name ?? stored.slug,
-            graph: stored.graph,
-            rootId: stored.rootId,
-          };
+      case 'video': {
+        // Hyperframes composition — emit the HTML shape that `npx
+        // hyperframes render <dir>` consumes. We write the composition
+        // as `<slug>-video/index.html` + pass back the directory path
+        // + the CLI command the user runs to produce MP4. The render
+        // itself is NOT invoked here: it needs hyperframes CLI installed
+        // globally (or via npx) + runtime Puppeteer + FFmpeg, all of
+        // which are caller-side concerns. This exporter's job is the
+        // adapter (INode → hyperframes shape); the pipeline stays
+        // out-of-process so we don't drag Chromium into the MCP
+        // sidecar.
+        const { exportToHyperframes } = await import('../../../core/src/exporters/hyperframes.js');
+        const storedForVideo = getScene(sceneId);
+        const videoResult = exportToHyperframes(graph, rootId, {
+          compositionId: storedForVideo?.slug ?? sceneId,
+          timeline: timeline ?? null,
         });
-        content = exportSite(sitePages, {
-          title: sitePages.map(p => p.name).join(' | '),
-          transition: 'fadeSlideUp',
-        });
+        content = videoResult.html;
         break;
       }
 
@@ -545,14 +545,25 @@ export async function handleExport(input: {
 
   // Auto-save exported file to .reframe/exports/
   const extMap: Record<string, string> = {
-    html: 'html', svg: 'svg', react: 'tsx', animated_html: 'animated.html',
-    lottie: 'lottie.json', site: 'html', png: 'png', pdf: 'pdf',
+    html: 'html', svg: 'svg', react: 'tsx',
+    lottie: 'lottie.json', png: 'png', pdf: 'pdf',
+    // video-format writes a directory, not an extension'd file (see below)
+    video: 'html',
   };
   const ext = extMap[format] ?? format;
   const exportDir = getExportsBaseDir();
   if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
-  const fileName = format === 'site' ? `site.${ext}` : `${slug}.${ext}`;
-  const filePath = join(exportDir, fileName);
+  // video: hyperframes wants `<projectDir>/index.html`, not a loose file.
+  // Emit the composition into `<slug>-video/index.html` so callers can
+  // run `npx hyperframes render <dir> -o out.mp4` directly.
+  let filePath: string;
+  if (format === 'video') {
+    const videoDir = join(exportDir, `${slug}-video`);
+    if (!existsSync(videoDir)) mkdirSync(videoDir, { recursive: true });
+    filePath = join(videoDir, 'index.html');
+  } else {
+    filePath = join(exportDir, `${slug}.${ext}`);
+  }
   try {
     writeFileSync(filePath, content, 'utf-8');
   } catch {}
@@ -569,6 +580,37 @@ export async function handleExport(input: {
     } catch {}
   }
 
+  // Video: optional auto-render. Spawns `npx hyperframes render` — blocking
+  // child_process call. First invocation downloads ~100 MB Chromium;
+  // subsequent ~15 s for a 2 s composition at 30 fps. We don't want
+  // Chromium + Puppeteer inside the MCP sidecar itself (keeps the in-
+  // process memory / startup surface sane), so we shell out. Telemetry
+  // is disabled repo-wide (see `npx hyperframes telemetry disable` in
+  // Fix log 2026-04-22 entry).
+  let videoMp4Path: string | undefined;
+  let videoRenderError: string | undefined;
+  if (format === 'video' && input.renderVideo) {
+    const { spawnSync } = await import('child_process');
+    const videoDir = filePath.replace(/[\\/]index\.html$/, '');
+    videoMp4Path = join(videoDir, `${slug}.mp4`);
+    const fps = String(input.videoFps ?? 30);
+    const quality = input.videoQuality ?? 'standard';
+    // `npx --yes hyperframes render <dir> -o <out> --fps N --quality Q`.
+    // Windows spawn quirks: use shell:true so the global npx shim
+    // resolves; args array keeps the path quoting safe.
+    const result = spawnSync('npx', ['--yes', 'hyperframes', 'render', videoDir, '-o', videoMp4Path, '--fps', fps, '--quality', quality], {
+      encoding: 'utf-8',
+      shell: true,
+      timeout: 300000, // 5 min cap — first-run Chrome download + real render
+    });
+    if (result.status !== 0 || !existsSync(videoMp4Path)) {
+      videoRenderError = result.stderr?.split('\n').slice(-10).join('\n')
+        || result.stdout?.split('\n').slice(-5).join('\n')
+        || 'hyperframes render failed without stderr';
+      videoMp4Path = undefined;
+    }
+  }
+
   const absPath = filePath.replace(/\\/g, '/');
   // Per-format preview URL. HTML/SVG/TSX get a distinct live-rendered
   // endpoint (`/preview/<id>.svg`, `.tsx`, etc.) so opening any one
@@ -579,21 +621,34 @@ export async function handleExport(input: {
     html: '',
     svg: '.svg',
     react: '.tsx',
-    site: null,           // handled below
-    animated_html: '',    // served via HTML render (keyframes applied)
     lottie: '.lottie',
     png: null,            // no live render — link to file
+    pdf: null,
+    video: null,
   };
   let previewUrl: string;
-  if (format === 'site') {
-    previewUrl = 'http://localhost:4100/site';
-  } else if (previewExtMap[format] == null) {
-    // File-only formats — direct file URL.
+  if (previewExtMap[format] == null) {
     previewUrl = `file:///${absPath.replace(/\\/g, '/')}`;
   } else {
     previewUrl = `http://localhost:4100/preview/${sceneId}${previewExtMap[format]}`;
   }
-  sections.push(`Exported **${format === 'site' ? 'site' : slug}**  ${previewUrl} → [${fileName}](${absPath}) (${(content.length / 1024).toFixed(1)}KB)`);
+  const displayFileName = filePath.split(/[\\/]/).pop() ?? slug;
+  sections.push(`Exported **${slug}** (${format})  ${previewUrl} → [${displayFileName}](${absPath}) (${(content.length / 1024).toFixed(1)}KB)`);
+  if (format === 'video') {
+    const videoDir = filePath.replace(/[\\/]index\.html$/, '').replace(/\\/g, '/');
+    if (videoMp4Path) {
+      const mp4Abs = videoMp4Path.replace(/\\/g, '/');
+      const { statSync: _stat } = await import('fs');
+      let mp4Size = '?';
+      try { mp4Size = `${(_stat(videoMp4Path).size / 1024).toFixed(1)}KB`; } catch {}
+      sections.push(`  → rendered: [${slug}.mp4](${mp4Abs}) (${mp4Size})`);
+    } else if (videoRenderError) {
+      sections.push(`  → render failed: ${videoRenderError.split('\n').slice(0, 3).join(' · ')}`);
+      sections.push(`  → retry manually: \`npx hyperframes render ${videoDir} -o ${videoDir}/${slug}.mp4 --fps 30\``);
+    } else {
+      sections.push(`  → run: \`npx hyperframes render ${videoDir} -o ${videoDir}/${slug}.mp4 --fps 30\``);
+    }
+  }
   if (lottiePreviewPath) {
     const previewAbs = lottiePreviewPath.replace(/\\/g, '/');
     sections.push(`  → [${slug}.lottie.preview.html](${previewAbs}) (open in browser to play)`);

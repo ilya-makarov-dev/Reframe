@@ -469,7 +469,10 @@
   function showExportPreview(sessionId, format) {
     var previewUrl = '/preview/' + sessionId;
     var exportUrl = '/preview/' + sessionId + '.' + format;
-    var isCode = (format === 'react' || format === 'tsx');
+    // Both branches of the old `isCode` ternary emitted identical iframe
+    // markup — the server already wraps TSX/React in an HTML document with
+    // a <pre> view (see http-server.ts /preview/:id.tsx handler), so the
+    // iframe is correct for every format. Left=canvas render, right=export.
 
     var overlay = document.createElement('div');
     overlay.className = 'export-preview show';
@@ -484,11 +487,7 @@
         '</div>' +
         '<div class="export-preview-body">' +
           '<div class="export-preview-left"><iframe src="' + escape(previewUrl) + '"></iframe></div>' +
-          '<div class="export-preview-right">' +
-            (isCode
-              ? '<iframe src="' + escape(exportUrl) + '"></iframe>'
-              : '<iframe src="' + escape(exportUrl) + '"></iframe>') +
-          '</div>' +
+          '<div class="export-preview-right"><iframe src="' + escape(exportUrl) + '"></iframe></div>' +
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);

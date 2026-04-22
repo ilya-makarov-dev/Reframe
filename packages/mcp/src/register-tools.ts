@@ -43,11 +43,13 @@ export function registerReframeMcpTools(server: McpServer): void {
 
 Use this FIRST in any design workflow to establish brand context. Without it, compile/audit cannot enforce brand compliance.
 
-Four actions:
-- list: show all available brands from the getdesign npm registry (60+ brands). Use "search" param to filter by keyword (e.g. "ai", "crypto", "automotive"). Call this when the user asks "what brands are available?" or wants to browse.
+Actions:
+- list: show all available brands from the getdesign npm registry (60+ brands). Use "search" param to filter by keyword (e.g. "ai", "crypto", "automotive").
 - extract + brand: fetch DESIGN.md by slug via npm (e.g. "stripe", "airbnb", "linear"). Auto-cached in .reframe/brands/.
 - extract + html/url: reverse-engineer an existing site's design system into DESIGN.md format.
 - prompt: converts DESIGN.md into an optimized AI system prompt with size-specific guidance.
+- listBlocks: browse the hyperframes motion-component catalog cached under .reframe/blocks/. Blocks are installed into scenes via \`reframe_edit op=addBlock blockName=<name>\`.
+- extractBlock + blockName: fetch a catalog block's HTML (e.g. "flash-through-white", "instagram-follow", "data-chart") so the agent can inspect before installing.
 
 Returns: the full DESIGN.md (300+ lines of prose with exact values, philosophy, component prompts). For brand slugs, returns the complete brand spec from getdesign npm. Persists to .reframe/design.md automatically. Session caches the parsed design system for subsequent compile/audit calls.
 
@@ -145,16 +147,14 @@ Use this after every compile and every edit cycle. The inspect → edit → insp
     'reframe_export',
     `Export a scene to a deliverable format. Auto-saves to .reframe/exports/ and returns the file path.
 
-Formats (10 total):
-- html: static HTML page with inline styles, semantic tags, hover/responsive CSS, token CSS variables. Best for review and web deployment.
-- react: React functional component (TSX) with TypeScript annotations. Includes hover states and responsive media queries.
+Formats (7):
+- html: static HTML page with inline styles, semantic tags, hover/responsive CSS, token CSS variables. Passing an \`animate\` config embeds the scene timeline as GSAP (replaces the old \`animated_html\` format). For multi-page output, call once per scene — no separate \`site\` format.
+- react: React functional component (TSX) with TypeScript annotations. Includes hover states and responsive media queries. Supports 4 stacks (inline / css-modules / tailwind / styled-components).
 - svg: vector graphics with text and layout preserved. Good for icons, illustrations, static assets.
-- png: raster image via CanvasKit (Skia WASM). Use scale parameter for retina (e.g. scale: 2 for @2x). Great for thumbnails, social sharing, OG images.
+- png: raster image via CanvasKit (server-side). Use scale parameter for retina (e.g. scale: 2 for @2x).
 - pdf: PDF document with embedded raster. Good for print-ready marketing materials, pitch decks.
-- animated_html: HTML with animations. Requires animate parameter with presets (fadeIn, slideIn, scaleIn, popIn, bounce, etc.) or stagger config. Supports engine: 'css' (default) or 'waapi' (Web Animations API with spring physics).
-- lottie: Lottie JSON for native mobile/web animations.
-- site: bundles ALL session scenes into a multi-page app with routing, navigation, and page transitions. Use this for complete website prototypes.
-- transition: animated resize preview (source → target dimensions). Requires transitionTarget parameter.
+- lottie: Lottie JSON for native mobile / web-embedded animations. Niche — prefer \`video\` for general distribution.
+- video: MP4 / WebM via hyperframes (Puppeteer + FFmpeg). Emits an INode scene + timeline as a hyperframes composition HTML; pass \`renderVideo: true\` to auto-spawn \`npx hyperframes render\` and get an MP4 path inline.
 
 Also available via Headless API: GET /api/render/{sceneId}?format=html&brand=stripe&viewport=mobile
 Batch API: POST /api/render/batch for N brands × M viewports × K formats in one call.

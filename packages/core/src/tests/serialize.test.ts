@@ -275,7 +275,12 @@ section('Visual properties roundtrip');
   assert(r2.opacity === 0.9, 'opacity');
   assert(r2.rotation === 45, 'rotation');
   assert(r2.blendMode === 'MULTIPLY', 'blendMode');
-  assert(r2.locked === true, 'locked');
+  // `locked` is @editorState (see engine/editor-state.ts + types.ts) — it's
+  // UI lock bookkeeping, NOT design data, and is intentionally dropped from
+  // persistence. Reading back gives the default (false) regardless of the
+  // in-memory value. Replaces the old contract that asserted `locked === true`
+  // survives the roundtrip.
+  assert(r2.locked === false, 'locked is editor-state — drops to default on roundtrip');
   assert(r2.flipX === true, 'flipX');
 }
 
@@ -772,7 +777,10 @@ section('Compact mode preserves non-defaults');
   assert(compact.opacity === 0.5, 'compact: non-default opacity');
   assert(compact.rotation === 30, 'compact: non-default rotation');
   assert(compact.layoutMode === 'VERTICAL', 'compact: non-default layoutMode');
-  assert(compact.locked === true, 'compact: non-default locked');
+  // `locked` is @editorState (engine/editor-state.ts) — intentionally
+  // stripped from the serialized form EVEN when set to non-default,
+  // because it's editor UI bookkeeping, not design data.
+  assert(compact.locked === undefined, 'compact: @editorState locked is dropped from serialization');
   assert(compact.flipX === true, 'compact: non-default flipX');
 }
 

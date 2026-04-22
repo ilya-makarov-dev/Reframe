@@ -6,7 +6,18 @@
  * "Auto-fix" button runs the auto-fix pipeline.
  */
 
-import type { AuditIssueOverlay } from '../canvas/audit-overlay.js';
+/**
+ * Audit issue shape — inlined from the deleted OP-based `audit-overlay.ts`.
+ * Minimal surface the panel needs; full INode-audit findings come from the
+ * engine via `/api/audit` and are shaped at the API boundary.
+ */
+export interface AuditIssueOverlay {
+  ruleId: string;
+  severity: 'error' | 'warning' | 'info';
+  nodeId: string;
+  message: string;
+  fix?: { property: string; current: unknown; suggested: unknown; css?: string };
+}
 
 export interface AuditPanelData {
   issues: AuditIssueOverlay[];
@@ -91,7 +102,7 @@ function issueGroup(title: string, issues: AuditIssueOverlay[], color: string): 
     " onmouseover="this.style.background='#1a1a1a';this.style.borderColor='#262626'" onmouseout="this.style.background='transparent';this.style.borderColor='transparent'">
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="width:6px;height:6px;border-radius:50%;background:${color};flex-shrink:0;"></span>
-        <span style="color:#888;font-size:10px;">${issue.rule}</span>
+        <span style="color:#888;font-size:10px;">${issue.ruleId}</span>
       </div>
       <div style="margin-top:2px;color:#ccc;">${escHtml(issue.message.slice(0, 100))}</div>
     </button>`;

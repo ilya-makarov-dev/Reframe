@@ -1,11 +1,11 @@
 # reframe — AI-Native Design Editor
 
 Import → Graph → Audit → Transform → Export. INode is to structured content what AST is to code.
-Interactive CanvasKit viewport powered by @open-pencil/core. 37-rule quality engine. 8 export formats.
+Browser-native DOM canvas. 37-rule quality engine. 7 export formats (html / react / svg / png / pdf / lottie / video).
 
-**Architecture:** `@open-pencil/core` (MIT, npm) = viewport rendering + .fig + pointer interaction. `@reframe/core` = INode AST + SceneGraph + layout + audit + tokens + resize + variations + animation + semantic layer + 8 exporters — the engine. `@reframe/editor` = GraphBridge (OP ↔ INode) + canvas bootstrap + panels + sync. `@reframe/mcp` = MCP tools + Platform UI + REST API.
+**Architecture:** `@reframe/core` = INode AST + Yoga-backed layout + audit + tokens + resize + variations + animation + semantic layer + 7 exporters — the engine. `@reframe/editor` = DOM canvas (iframe + HTML exporter + CSS 3D transforms) + selection overlays + zoom/pan + present mode. `@reframe/mcp` = 7 MCP tools + Platform UI (`:4100`) + REST API + SSE sync. **No @open-pencil/core, no CanvasKit, no Skia in runtime** — removed 2026-04-22. Editor bundle ships at ~32 KB; scene renders through the same HTML exporter whether you're editing, exporting, or previewing.
 
-**For design work:** three input paths — DESIGN.md seeds brand context, AI agent writes HTML, direct canvas editing (Figma-like). All converge on one INode SceneGraph.
+**For design work:** three input paths — DESIGN.md seeds brand context, AI agent writes HTML, direct canvas editing (drag / resize / inline-text-edit / Shift+click multi-select / present mode via `P` key). All converge on one INode SceneGraph. Server is the single source of layout truth: every mutation endpoint runs `ensureSceneLayout` + SSE broadcasts + canvas incremental-patches without flashy full reload.
 
 ## When running as the in-app agent
 
@@ -192,24 +192,24 @@ node packages/editor/src/bridge/bridge.integration.test.mjs  # editor integratio
 
 ```
 packages/core      @reframe/core    — headless engine: SceneGraph, audit (37 rules), tokens, resize, variations, 8 exporters, HTML import, animation
-packages/mcp       @reframe/mcp     — MCP server (6 pipeline tools + reframe_ui) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
-packages/editor    @reframe/editor  — interactive editor: GraphBridge (@open-pencil/core ↔ reframe), CanvasKit viewport, panels, sync
+packages/mcp       @reframe/mcp     — MCP server (8 tools including reframe_block) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
+packages/editor    @reframe/editor  — DOM canvas editor: iframe + HTML exporter + CSS 3D transforms + selection overlay + present mode (~32 KB bundled)
 packages/cli       @reframe/cli     — CLI: init/build/test
 ```
 
-## MCP Tools — 6 core
+## MCP Tools — 7 total
 
 ```
-reframe_design     brand load/list/extract (60+ brands via getdesign npm)
-reframe_compile    HTML → INode scene + 37-rule audit + auto-fix + .fig import (via @open-pencil/core)
+reframe_design     brand load/list/extract (60+ brands via getdesign) + catalog: listBlocks / extractBlock (hyperframes motion library)
+reframe_compile    HTML → INode scene + 37-rule audit + auto-fix + token binding
 reframe_inspect    tree + 37-rule audit + 8 aesthetic metrics + brand fidelity + diff + semantic skeleton
-reframe_edit       ALL mutations — structural + theming + variations + adapt + vary + components + multiColumn + resize
-reframe_export     8 core formats: html / react / svg / png / pdf / lottie / animated_html / site (+ theatre, transition for advanced use)
+reframe_edit       ALL mutations — update / add / delete / clone / move / resize / macros (scaleSpacing, scaleRadius, rotateColors, typographyPreset) / components / variations / adapt / vary / addBlock (install hyperframes catalog block as INode subtree)
+reframe_export     7 formats: html (optionally animated via `animate` config) / react / svg / png / pdf / lottie / video (hyperframes-backed MP4)
 reframe_project    persistence — save/load/history/content/macros/brands/components
 reframe_ui         Playwright-backed Platform UI automation — open/act/probe/screenshot/wait/close/list
 ```
 
-reframe_ui is the 7th tool. Stateful sessions, session-scoped Playwright Chromium, inline PNG + console/network logs returned on every mutating call. Mirrors what reframe_compile/inspect/edit do for the engine, but for the browser-side Platform UI — reproduce UI bugs, verify fixes, walk multi-step flows end-to-end.
+reframe_ui drives the live Platform UI via Playwright — stateful sessions, inline PNG + console/network logs returned on every mutating call. Mirrors what reframe_compile/inspect/edit do for the engine, but for the browser side — reproduce UI bugs, verify fixes, walk multi-step flows end-to-end. Catalog blocks (formerly `reframe_block`) are browsed via `reframe_design action=listBlocks` and installed via `reframe_edit op=addBlock` — one merged surface instead of two overlapping tools.
 
 ## reframe_edit — the one place for mutations
 
@@ -263,7 +263,8 @@ Agent receives the **full DESIGN.md** from `reframe_design` — 300+ lines with 
 - Brand DESIGN.md files cached in `.reframe/brands/` — delete to re-fetch
 - Token export: `defineTokens` auto-saves `.reframe/tokens.json` (DTCG format)
 - Aesthetic scoring: 8 metrics (alignment, whitespace, balance, harmony, hierarchy, rhythm, readability, proportion)
-- PNG/PDF export: requires CanvasKit WASM (auto-initialized on first call)
+- PNG/PDF export: uses CanvasKit WASM **server-side only** (loaded lazily by `packages/core/src/exporters/raster.ts` on first raster call). Browser editor never touches it — HTML rendering happens natively via iframe.
 - Layout backend: Yoga WASM (own mapping logic). Optional Taffy fallback via `setLayoutBackend('taffy')` before `initYoga()` — requires `yoga-layout-taffy` npm.
-- `@open-pencil/core` is an npm dependency for interactive viewport. SceneNode models are 95% compatible (forked from same origin). GraphBridge handles conversion.
+- Canvas backend: DOM + iframe + CSS 3D. OP / CanvasKit / Skia removed from editor runtime 2026-04-22 (see `.claude/skills/designer-qa/SKILL.md` Fix log `architecture/op-removal-B-C`). `.fig` import unsupported — use Figma's "Copy as HTML" + `reframe_compile` instead.
+- Video export: uses `hyperframes` CLI out-of-process (Puppeteer + FFmpeg). Telemetry disabled globally. `reframe_export format=video renderVideo=true` spawns the render inline.
 - `project init` with a different dir preserves session scenes (no longer clears them).

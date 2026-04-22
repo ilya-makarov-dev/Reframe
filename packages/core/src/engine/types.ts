@@ -266,6 +266,13 @@ export interface SceneNode {
   opacity: number;
   blendMode: BlendMode;
   visible: boolean;
+  /**
+   * @editorState — **UI lock flag**, NOT part of the design AST.
+   * Editor-only: "prevent accidental selection / drag on canvas" — has
+   * no effect on layout, rendering, or export. Serializer/exporters drop
+   * it via `EDITOR_STATE_KEYS` (see `engine/editor-state.ts`). Long-term
+   * this field moves off `SceneNode` into `WorkspaceState.lockedIds`.
+   */
   locked: boolean;
   clipsContent: boolean;
 
@@ -305,6 +312,14 @@ export interface SceneNode {
   maxLines: number | null;
   styleRuns: StyleRun[];
   textTruncation: TextTruncation;
+  /**
+   * @runtimeCache — pre-rasterized glyph picture from CanvasKit.
+   * Figma-inherited perf hack; no semantic meaning, never persisted
+   * (serializer skips because Uint8Array ≠ JSON-safe). Moves to
+   * `graph.runtimeCache.textPictures: Map<nodeId, Uint8Array>` in the
+   * eventual runtime-cache extraction pass. See `engine/editor-state.ts`
+   * for `RUNTIME_CACHE_KEYS` registry.
+   */
   textPicture: Uint8Array | null;
   /** OpenType font feature settings: ['ss01', 'tnum', 'cv01'] → font-feature-settings: "ss01", "tnum", "cv01" */
   fontFeatureSettings: string[];
@@ -372,7 +387,15 @@ export interface SceneNode {
 
   // Vector & Geometry
   vectorNetwork: VectorNetwork | null;
+  /**
+   * @runtimeCache — rasterized fill path commands.
+   * Recomputable from `vectorNetwork` / node shape; never persisted
+   * (serializer comments this explicitly — contains non-JSON Uint8Array
+   * `commandsBlob`). Figma-inherited optimization. Moves to
+   * `graph.runtimeCache.fillGeometry` in the eventual extraction.
+   */
   fillGeometry: GeometryPath[];
+  /** @runtimeCache — stroke path commands, same rationale as `fillGeometry`. */
   strokeGeometry: GeometryPath[];
   arcData: ArcData | null;
 
@@ -383,7 +406,18 @@ export interface SceneNode {
   // Special
   pointCount: number;
   starInnerRadius: number;
+  /**
+   * @editorState — **LAYERS panel expand/collapse state**, NOT design data.
+   * Whether a node's children are visible in the left-rail tree has zero
+   * bearing on the rendered scene. Target for extraction into
+   * `WorkspaceState.expandedIds`. Serializer/exporters drop it.
+   */
   expanded: boolean;
+  /**
+   * @editorState — **editor rename-on-type heuristic**, NOT design data.
+   * "Should the editor auto-regenerate this node's name when its type
+   * changes?" — pure UX toggle. Drop from persistence + export.
+   */
   autoRename: boolean;
 
   // Semantic
@@ -403,7 +437,31 @@ export interface SceneNode {
   variantProperties: Record<string, string>;            // e.g. { size: 'lg', state: 'hover' }
   componentPropertyDefinitions: ComponentPropertyDefinition[] | null;
   isDefaultVariant: boolean;
+  /**
+   * Figma-compatible **variable bindings** — field path → variable id.
+   *
+   * Keys: full field paths like `'fills[0].color'`, `'cornerRadius'`.
+   * Values: ids into `graph.variables` (arbitrary user-defined vars).
+   *
+   * **Different concept from `meta.tokenBindings`**, which holds DS-role
+   * bindings (`fill`/`stroke`/`fontSize`) → role name like `'primary'`.
+   * The two coexist because they solve different indirections:
+   *  - `boundVariables` — "this field = this Figma Variable I created"
+   *  - `meta.tokenBindings` — "this field = the current brand's <role>"
+   *
+   * Exporters read BOTH and emit CSS custom properties. If a field has
+   * bindings in both maps, the `meta.tokenBindings` wins (exporter order
+   * — DS-role binding is usually the stronger designer intent, applied
+   * by auto-bind/rebrand ops, whereas `boundVariables` is a static
+   * per-variable reference). See `exporters/html.ts` collection passes.
+   */
   boundVariables: Record<string, string>;
+  /**
+   * @editorState — **"hide from publish" flag**, NOT design data.
+   * Component-system bookkeeping: node is internal to a master and should
+   * not surface to instances. Editor/compiler concern. Target for move
+   * into component-master metadata, not per-node.
+   */
   internalOnly: boolean;
 
   // Source provenance — tracks where this node came from (HTML tag, class, etc.)

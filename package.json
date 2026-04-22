@@ -10,7 +10,7 @@
     "start": "node packages/mcp/dist/mcp/src/http-server.js",
     "build": "npm run build:core && npm run build:cli && npm run build:mcp && npm run build:editor && npm run build:editor-bundle",
     "build:editor": "npm run build -w packages/editor",
-    "build:editor-bundle": "npx esbuild packages/editor/src/app/platform-bootstrap.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=packages/mcp/dist/mcp/src/platform/editor-bundle.js --alias:@reframe/core=./packages/core/src/browser.ts --alias:@open-pencil/core=./node_modules/@open-pencil/core/dist/index.js --external:canvaskit-wasm --external:node:fs/promises --external:node:url --external:node:path --external:node:fs --external:fs --external:path",
+    "build:editor-bundle": "npx esbuild packages/editor/src/app/platform-bootstrap.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=packages/mcp/dist/mcp/src/platform/editor-bundle.js --alias:@reframe/core=./packages/core/src/browser.ts --external:node:fs/promises --external:node:url --external:node:path --external:node:fs --external:fs --external:path",
     "build:core": "npm run build -w packages/core",
     "build:cli": "npm run build -w packages/cli",
     "build:mcp": "npm run build -w packages/mcp",

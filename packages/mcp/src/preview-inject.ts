@@ -118,9 +118,14 @@ export const PREVIEW_INJECT_JS = `
     };
   }
 
+  // Parent and preview iframe are same-origin (both served by the sidecar).
+  // Pin targetOrigin to window.location.origin so an embedder that mounts
+  // /preview/:id in a cross-origin page never receives our hover/click/bbox
+  // stream — that would leak scene structure + text content.
+  const PARENT_ORIGIN = window.location.origin;
   function post(message) {
     try {
-      window.parent.postMessage({ source: 'reframe-preview', ...message }, '*');
+      window.parent.postMessage({ source: 'reframe-preview', ...message }, PARENT_ORIGIN);
     } catch (_) {}
   }
 
@@ -225,6 +230,13 @@ export const PREVIEW_INJECT_JS = `
 
   // ── Parent → iframe messages ───────────────────────────
   function onMessage(event) {
+    // Origin-pin. Without this, ANY page that embeds our preview (or a
+    // sibling frame under the same top) can postMessage with a forged
+    // source:'reframe-host' tag and flip annotationMode / trigger a
+    // measurement storm via reframe:measure-all. String-tag alone is not
+    // a trust boundary.
+    if (event.origin !== PARENT_ORIGIN) return;
+    if (event.source !== window.parent) return;
     const data = event.data || {};
     if (data.source !== 'reframe-host') return;
     if (data.type === 'reframe:setMode') {

@@ -275,6 +275,15 @@ const operationSchema = z.discriminatedUnion('op', [
     node: nodeDescSchema.describe('Node to add (with optional children)'),
   }),
 
+  // Install a hyperframes catalog block as INode subtree (merged
+  // from former reframe_block tool; still same underlying flow).
+  z.object({
+    op: z.literal('addBlock'),
+    sceneId: z.string().optional().describe('Target scene (default: last created)'),
+    parentId: z.string().optional().describe('Target parent node id (default: scene root)'),
+    blockName: z.string().describe('Catalog block slug — e.g. "flash-through-white", "instagram-follow", "data-chart". Run reframe_design action=listBlocks to see cached blocks.'),
+  }),
+
   // Update existing node(s)
   z.object({
     op: z.literal('update'),
@@ -784,12 +793,22 @@ function findBySlot(
  * its result line. Mutates `propsCopy` in place during sanitisation —
  * pass a fresh copy per node when calling for multiple targets.
  */
-function applyNodeUpdate(
-  graph: SceneGraph,
-  target: SceneNode,
+/**
+ * Sanitize + transform an INode partial into engine-legal shape.
+ * Shared by reframe_edit (MCP) and /api/node/edit (Platform UI) so both paths
+ * produce identical INode state for the same logical input. Clamps ranges,
+ * explodes shorthand (`padding`), translates aliases (`role → semanticRole`),
+ * resolves `{token: '…'}` refs + records bindings, sanitizes fill color space.
+ *
+ * Call site is responsible for writing `changes` into the graph.
+ */
+export function sanitizeNodePartial(
   propsInput: Record<string, any>,
-  tokenIdx: TokenIndex | undefined,
-): { warnings: string[]; appliedKeys: string[] } {
+  opts?: { targetId?: string; graph?: SceneGraph; tokenIdx?: TokenIndex },
+): { changes: Record<string, any>; warnings: string[]; appliedKeys: string[] } {
+  const graph = opts?.graph;
+  const tokenIdx = opts?.tokenIdx;
+  const targetId = opts?.targetId;
   const changes: any = { ...propsInput };
   const sanitizeWarnings: string[] = [];
   const clampInPlace = (key: string, min: number, max: number) => {
@@ -842,8 +861,10 @@ function applyNodeUpdate(
   if (changes.fills) {
     const { fills, tokenBindings } = parseFillsWithTokens(changes.fills, graph, tokenIdx);
     changes.fills = fills;
-    for (const [idx, tokenName] of tokenBindings) {
-      bindTokenToNode(graph, tokenIdx!, target.id, `fills[${idx}].color`, tokenName);
+    if (graph && tokenIdx && targetId) {
+      for (const [idx, tokenName] of tokenBindings) {
+        bindTokenToNode(graph, tokenIdx, targetId, `fills[${idx}].color`, tokenName);
+      }
     }
   }
 
@@ -854,8 +875,8 @@ function applyNodeUpdate(
     if (changes[field] !== undefined) {
       const { value, tokenName } = resolveTokenProp(changes[field], graph, tokenIdx);
       changes[field] = value;
-      if (tokenName && tokenIdx) {
-        bindTokenToNode(graph, tokenIdx, target.id, field, tokenName);
+      if (tokenName && tokenIdx && graph && targetId) {
+        bindTokenToNode(graph, tokenIdx, targetId, field, tokenName);
       }
     }
   }
@@ -866,9 +887,9 @@ function applyNodeUpdate(
     changes.paddingRight = value;
     changes.paddingBottom = value;
     changes.paddingLeft = value;
-    if (tokenName && tokenIdx) {
+    if (tokenName && tokenIdx && graph && targetId) {
       for (const side of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft']) {
-        bindTokenToNode(graph, tokenIdx, target.id, side, tokenName);
+        bindTokenToNode(graph, tokenIdx, targetId, side, tokenName);
       }
     }
     delete changes.padding;
@@ -877,6 +898,17 @@ function applyNodeUpdate(
   if (changes.role !== undefined) {
     changes.semanticRole = changes.role;
     delete changes.role;
+  }
+
+  // Unwrap {value, unit} objects for fields the engine stores as plain numbers.
+  // Platform UI's CSS mapper historically wrote {value:N, unit:'PIXELS'} for
+  // line-height / letter-spacing; the engine type is number, so the object
+  // wrapper broke layout + audit reads silently.
+  for (const f of ['lineHeight', 'letterSpacing'] as const) {
+    const v = changes[f];
+    if (v && typeof v === 'object' && typeof v.value === 'number') {
+      changes[f] = v.value;
+    }
   }
 
   if (changes.states) {
@@ -889,8 +921,22 @@ function applyNodeUpdate(
     changes.states = states;
   }
 
+  return { changes, warnings: sanitizeWarnings, appliedKeys: Object.keys(propsInput) };
+}
+
+function applyNodeUpdate(
+  graph: SceneGraph,
+  target: SceneNode,
+  propsInput: Record<string, any>,
+  tokenIdx: TokenIndex | undefined,
+): { warnings: string[]; appliedKeys: string[] } {
+  const { changes, warnings, appliedKeys } = sanitizeNodePartial(propsInput, {
+    targetId: target.id,
+    graph,
+    tokenIdx,
+  });
   graph.updateNode(target.id, changes);
-  return { warnings: sanitizeWarnings, appliedKeys: Object.keys(propsInput) };
+  return { warnings, appliedKeys };
 }
 
 // ─── Build node tree into graph ──────────────────────────────
@@ -1312,6 +1358,62 @@ export async function handleEdit(input: {
         touchedScenes.add(sceneId);
         const childCount = countNodes(stored.graph, newNode.id);
         results.push(`ADD "${newNode.name ?? newNode.type}" to ${op.parent ?? 'root'} — ${childCount} node(s)`);
+        break;
+      }
+
+      case 'addBlock': {
+        // Install a hyperframes catalog block as native INode subtree.
+        // Fetches the block via `npx hyperframes add <name>` (or reads
+        // cache at `.reframe/blocks/<name>/index.html`), then imports
+        // through our HTML importer — pseudo-class states + @media +
+        // grid-auto-rows all preserved via the same pipeline. User
+        // edits the installed block like any other INode content.
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('ADDBLOCK ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`ADDBLOCK ERROR: scene "${sceneId}" not found`); break; }
+
+        const { existsSync, readFileSync, mkdirSync } = await import('fs');
+        const { join } = await import('path');
+        const { spawnSync } = await import('child_process');
+        const { getWorkspaceRoot } = await import('../store.js');
+        const { importFromHtml } = await import('../../../core/src/importers/html.js');
+
+        const cacheDir = join(getWorkspaceRoot(), '.reframe', 'blocks');
+        if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
+        const blockDir = join(cacheDir, op.blockName);
+        if (!existsSync(join(blockDir, 'index.html'))) {
+          const fetch = spawnSync('npx', ['--yes', 'hyperframes', 'add', op.blockName, '--dir', cacheDir], {
+            encoding: 'utf-8', shell: true, timeout: 180000,
+          });
+          if (fetch.status !== 0 || !existsSync(join(blockDir, 'index.html'))) {
+            const errTail = (fetch.stderr || fetch.stdout || '').split('\n').slice(-5).join('\n');
+            results.push(`ADDBLOCK ERROR: couldn't fetch "${op.blockName}" — ${errTail}`);
+            break;
+          }
+        }
+        const html = readFileSync(join(blockDir, 'index.html'), 'utf-8');
+        const tmp = await importFromHtml(html);
+        const parentId = op.parentId ?? stored.rootId;
+        if (!stored.graph.getNode(parentId)) {
+          results.push(`ADDBLOCK ERROR: parentId "${parentId}" not found in scene`);
+          break;
+        }
+
+        // Recursive copy into target graph — fresh IDs minted by
+        // createNode so re-installing the same block doesn't collide.
+        const copyIntoTarget = (srcId: string, destParentId: string): string | null => {
+          const src = tmp.graph.getNode(srcId);
+          if (!src) return null;
+          const { id: _id, parentId: _p, childIds: _c, ...rest } = src as any;
+          const dest = stored.graph.createNode(src.type as any, destParentId, rest);
+          for (const cid of src.childIds) copyIntoTarget(cid, dest.id);
+          return dest.id;
+        };
+        const newRootId = copyIntoTarget(tmp.rootId, parentId);
+
+        touchedScenes.add(sceneId);
+        results.push(`ADDBLOCK "${op.blockName}" → subtree rooted at ${newRootId ?? '(failed)'} under ${parentId}`);
         break;
       }
 

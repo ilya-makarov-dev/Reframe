@@ -432,7 +432,10 @@ export function serializeSceneNode(
   if (!compact || !isDefault('visible', node.visible)) json.visible = node.visible;
   if (!compact || !isDefault('rotation', node.rotation)) json.rotation = node.rotation;
   if (!compact || !isDefault('blendMode', node.blendMode)) json.blendMode = node.blendMode;
-  if (!compact || !isDefault('locked', node.locked)) json.locked = node.locked;
+  // `locked` is editor state (see `engine/editor-state.ts` + `types.ts`
+  // `@editorState` JSDoc). Skip in persistence so `.scene.json` stays pure
+  // design data. The field still exists on the in-memory `SceneNode` for
+  // the editor to read at runtime — we just don't round-trip it.
   if (!compact || !isDefault('flipX', node.flipX)) json.flipX = node.flipX;
   if (!compact || !isDefault('flipY', node.flipY)) json.flipY = node.flipY;
 
@@ -495,7 +498,8 @@ export function serializeSceneNode(
   }
   if (!compact || !isDefault('isDefaultVariant', node.isDefaultVariant)) json.isDefaultVariant = node.isDefaultVariant;
   if (!isEmptyObject(node.boundVariables)) json.boundVariables = { ...node.boundVariables };
-  if (!compact || !isDefault('internalOnly', node.internalOnly)) json.internalOnly = node.internalOnly;
+  // `internalOnly` is editor state (@editorState in types.ts). Skip in
+  // persistence — same rationale as `locked`/`expanded`/`autoRename`.
 
   // ── Semantic ───────────────────────────────────
   if (node.semanticRole !== null) json.semanticRole = node.semanticRole;

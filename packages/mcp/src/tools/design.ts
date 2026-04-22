@@ -34,7 +34,7 @@ import { makeToolJsonErrorResult } from '../tool-result.js';
 // ─── Schema ────────────────────────────────────────────────────
 
 export const designInputSchema = {
-  action: z.enum(['extract', 'prompt', 'list']),
+  action: z.enum(['extract', 'prompt', 'list', 'listBlocks', 'extractBlock']),
   html: z.string().optional().describe('HTML to extract design system from (for action: extract)'),
   url: z.string().optional().describe('Website URL to fetch and extract design system from (for action: extract). Alternative to html.'),
   brand: z.string().optional().describe(
@@ -48,12 +48,15 @@ export const designInputSchema = {
   })).optional(),
   focus: z.enum(['banners', 'social', 'web', 'all']).optional().default('all'),
   search: z.string().optional().describe('Filter brand list by keyword (for action: list). Example: "ai", "crypto", "automotive".'),
+  blockName: z.string().optional().describe(
+    'Hyperframes catalog block slug (for action: listBlocks/extractBlock). Examples: "flash-through-white", "instagram-follow", "data-chart". Fetched via `npx hyperframes add` and cached under `.reframe/blocks/`.',
+  ),
 };
 
 // ─── Handler ───────────────────────────────────────────────────
 
 export async function handleDesign(input: {
-  action: 'extract' | 'prompt' | 'list';
+  action: 'extract' | 'prompt' | 'list' | 'listBlocks' | 'extractBlock';
   html?: string;
   url?: string;
   brand?: string;
@@ -61,7 +64,11 @@ export async function handleDesign(input: {
   sizes?: Array<{ width: number; height: number; name?: string }>;
   focus?: 'banners' | 'social' | 'web' | 'all';
   search?: string;
+  blockName?: string;
 }) {
+  if (input.action === 'listBlocks' || input.action === 'extractBlock') {
+    return handleBlocks(input.action, input.blockName);
+  }
   if (input.action === 'list') {
     return handleList(input.search);
   }
@@ -1200,4 +1207,47 @@ function buildDesignPrompt(ds: DesignSystem): string {
   }
 
   return lines.join('\n');
+}
+
+// ─── Hyperframes catalog blocks (merged from former reframe_block tool) ─────
+
+async function handleBlocks(action: 'listBlocks' | 'extractBlock', blockName?: string) {
+  const { existsSync, readFileSync, mkdirSync, readdirSync } = await import('fs');
+  const { join } = await import('path');
+  const { spawnSync } = await import('child_process');
+  const { getWorkspaceRoot } = await import('../store.js');
+
+  const cacheDir = join(getWorkspaceRoot(), '.reframe', 'blocks');
+  if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
+
+  if (action === 'listBlocks') {
+    const cached = readdirSync(cacheDir).filter(f => !f.startsWith('.'));
+    const body = cached.length > 0
+      ? `Cached blocks (${cached.length}):\n` + cached.map(n => `  - ${n}`).join('\n')
+      : 'No blocks cached yet.';
+    const hint = `\n\nInstall a block via reframe_edit:  op=addBlock blockName=<name> parentId=<node>\nFetch HTML only:                 reframe_design action=extractBlock blockName=<name>\nFull catalog:                     https://github.com/heygen-com/hyperframes/tree/main/packages/core/src/catalog`;
+    return { content: [{ type: 'text' as const, text: body + hint }] };
+  }
+
+  // action === 'extractBlock' — fetch + return HTML
+  if (!blockName) {
+    return { content: [{ type: 'text' as const, text: 'Error: `blockName` required for action=extractBlock' }] };
+  }
+  const blockDir = join(cacheDir, blockName);
+  if (!existsSync(join(blockDir, 'index.html'))) {
+    const result = spawnSync('npx', ['--yes', 'hyperframes', 'add', blockName, '--dir', cacheDir], {
+      encoding: 'utf-8', shell: true, timeout: 180000,
+    });
+    if (result.status !== 0 || !existsSync(join(blockDir, 'index.html'))) {
+      const err = (result.stderr || result.stdout || '').split('\n').slice(-8).join('\n');
+      return { content: [{ type: 'text' as const, text: `Failed to fetch block "${blockName}":\n${err}` }] };
+    }
+  }
+  const html = readFileSync(join(blockDir, 'index.html'), 'utf-8');
+  return {
+    content: [{
+      type: 'text' as const,
+      text: `Block **${blockName}** at ${blockDir} (${(html.length / 1024).toFixed(1)} KB)\n\nTo install into a scene: reframe_edit op=addBlock blockName=${blockName} parentId=<node>\n\n\`\`\`html\n${html.slice(0, 2000)}${html.length > 2000 ? '\n... (truncated)' : ''}\n\`\`\``,
+    }],
+  };
 }

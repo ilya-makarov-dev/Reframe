@@ -99,14 +99,14 @@ export async function importFromHtml(
 
   let parsed = await parseWithLinkedom(processedHtml);
   let dom = parsed.dom;
-  let { linkedomStyles, cssVars, mediaRules } = parsed;
+  let { linkedomStyles, cssVars, mediaRules, pseudoRules } = parsed;
 
   const graph = new SceneGraph();
   const page = graph.addPage(options.name ?? 'HTML Import');
 
   const stats = { elements: 0, textNodes: 0, images: 0, unsupported: [] as string[] };
   let ctx: ConvertContext = {
-    graph, stats, cssVars, linkedomStyles, mediaRules,
+    graph, stats, cssVars, linkedomStyles, mediaRules, pseudoRules,
     defaultWidth: options.width ?? 1920,
     defaultHeight: options.height ?? 1080,
     stableIds: options.stableIds === true,
@@ -123,8 +123,9 @@ export async function importFromHtml(
     linkedomStyles = parsed.linkedomStyles;
     cssVars = parsed.cssVars;
     mediaRules = parsed.mediaRules;
+    pseudoRules = parsed.pseudoRules;
     ctx = {
-      graph, stats, cssVars, linkedomStyles, mediaRules,
+      graph, stats, cssVars, linkedomStyles, mediaRules, pseudoRules,
       defaultWidth: ctx.defaultWidth, defaultHeight: ctx.defaultHeight,
       stableIds: ctx.stableIds, usedIds: ctx.usedIds,
     };
@@ -530,6 +531,14 @@ async function parseWithLinkedom(html: string): Promise<{
   cssVars: Map<string, string>;
   /** Responsive rules extracted from @media queries: idx → list of {maxWidth, props} */
   mediaRules: Map<string, Array<{ maxWidth: number; properties: Record<string, string> }>>;
+  /**
+   * Pseudo-class state rules: idx → list of {state, properties}. State is
+   * one of 'hover' | 'focus' | 'active' | 'disabled'. Fed into the target
+   * node's `overrides.states` at build time, parallel to how mediaRules
+   * feeds `overrides.responsive`. Closes the previously-🟡 import pseudo-
+   * class smell row from `designer-qa/SKILL.md`.
+   */
+  pseudoRules: Map<string, Array<{ state: string; properties: Record<string, string> }>>;
 }> {
   const parseHTML = await getParseHTML();
   const { document } = parseHTML(html);
@@ -537,6 +546,8 @@ async function parseWithLinkedom(html: string): Promise<{
   // ── Build style map (CSS specificity + combinators) ──
   const linkedomStyles = new Map<string, Record<string, string>>();
   const mediaRules = new Map<string, Array<{ maxWidth: number; properties: Record<string, string> }>>();
+  const pseudoRules = new Map<string, Array<{ state: string; properties: Record<string, string> }>>();
+  const PSEUDO_RE = /:(hover|focus|active|disabled)\b/;
 
   // Tag every element for cross-referencing
   const allEls = document.querySelectorAll('*');
@@ -589,7 +600,30 @@ async function parseWithLinkedom(html: string): Promise<{
       const selectors = m[1].split(',').map(s => s.trim()).filter(Boolean);
       const properties = parseInlineStyle(m[2]);
       for (const selector of selectors) {
-        if (selector.includes(':') && !selector.includes('[')) continue;
+        if (selector.includes(':') && !selector.includes('[')) {
+          // Pseudo-class route: capture `:hover/:focus/:active/:disabled`
+          // state overrides. Strip the pseudo suffix, match the BASE
+          // selector to nodes, record the properties against the nodes'
+          // idx so override-building later can write them into
+          // `node.states`. Attribute-selectors with brackets go through
+          // the base-match path above (they're non-pseudo).
+          const pseudoMatch = selector.match(PSEUDO_RE);
+          if (!pseudoMatch) continue;
+          const state = pseudoMatch[1];
+          const base = selector.replace(PSEUDO_RE, '').trim();
+          if (!base) continue;
+          try {
+            const matched = document.querySelectorAll(base);
+            for (const el of Array.from(matched) as any[]) {
+              const idx = el.getAttribute('data-reframe-idx');
+              if (!idx) continue;
+              const list = pseudoRules.get(idx) ?? [];
+              list.push({ state, properties });
+              pseudoRules.set(idx, list);
+            }
+          } catch { /* invalid base selector — skip */ }
+          continue;
+        }
         cssRules.push({ selector, properties, specificity: calcSpecificity(selector) });
       }
     }
@@ -652,7 +686,7 @@ async function parseWithLinkedom(html: string): Promise<{
     dom.attrs._droppedTags = [...idx.droppedTags].join(',');
   }
 
-  return { dom, linkedomStyles, cssVars, mediaRules };
+  return { dom, linkedomStyles, cssVars, mediaRules, pseudoRules };
 }
 
 /**
@@ -1400,6 +1434,7 @@ interface ConvertContext {
   cssVars: Map<string, string>;
   linkedomStyles: Map<string, Record<string, string>>;
   mediaRules: Map<string, Array<{ maxWidth: number; properties: Record<string, string> }>>;
+  pseudoRules: Map<string, Array<{ state: string; properties: Record<string, string> }>>;
   defaultWidth: number;
   defaultHeight: number;
   /** When true, emit deterministic h:<hash> ids derived from the DOM path. */
@@ -1854,6 +1889,25 @@ function cssToResponsiveProps(
     o.layoutMode = css['flex-direction'] === 'column' || css['flex-direction'] === 'column-reverse'
       ? 'VERTICAL'
       : 'HORIZONTAL';
+  }
+  // Color-style props — background/color map to fills[0]. Essential for
+  // `:hover/:focus/:active` state overrides where designers most commonly
+  // shift fill/text colors. Without this, pseudo-class rules like
+  // `.btn:hover { background: #254edb }` round-trip as empty states.
+  if (css.background || css['background-color']) {
+    const c = parseColor(css.background || css['background-color']);
+    if (c) o.fills = [{ type: 'SOLID', color: c, opacity: c.a ?? 1, visible: true }];
+  }
+  if (css.color) {
+    const c = parseColor(css.color);
+    // `color` on a text node maps to its fills; on a wrapper it's still a
+    // legitimate state override for nested text inheritance. Same target
+    // field either way — the state-applier resolves context at render time.
+    if (c) o.fills = [{ type: 'SOLID', color: c, opacity: c.a ?? 1, visible: true }];
+  }
+  if (css['border-radius']) {
+    const v = parseUnit(css['border-radius']);
+    if (Number.isFinite(v)) o.cornerRadius = v;
   }
   return Object.keys(o).length > 0 ? o : null;
 }
@@ -2369,6 +2423,24 @@ function convertElement(
         rules.sort((a, b) => b.maxWidth - a.maxWidth);
         (overrides as any).responsive = rules;
       }
+    }
+  }
+
+  // Pseudo-class rules → states. Parallel path to mediaRules/responsive.
+  // Converts captured `:hover/:focus/:active/:disabled` CSS properties
+  // into the INode `states` shape — same reuse of `cssToResponsiveProps`
+  // because the allowed prop subset overlaps (fills, fontSize, opacity,
+  // cornerRadius, etc.). Closes the 🟡 import-pseudo-class-states-lost
+  // smell row; renderer + exporter already consume `node.states`.
+  if (rfIdx && ctx.pseudoRules.size > 0) {
+    const entries = ctx.pseudoRules.get(rfIdx);
+    if (entries && entries.length > 0) {
+      const states: Record<string, Record<string, unknown>> = {};
+      for (const { state, properties } of entries) {
+        const props = cssToResponsiveProps(properties);
+        if (props) states[state] = { ...(states[state] ?? {}), ...props };
+      }
+      if (Object.keys(states).length > 0) (overrides as any).states = states;
     }
   }
 
@@ -3437,6 +3509,22 @@ function cssToOverrides(
 
     // scale() / scaleX() / scaleY() — CSS transforms are visual-only and do NOT
     // affect the layout box. Intentionally do not mutate width/height here.
+    // BUT: negative scale on a single axis is a mirror flip — routes to
+    // INode flipX / flipY so the visual survives round-trip. Without this,
+    // `transform: scaleX(-1)` imports silently into flipX=false → exporter
+    // emits no transform → the flip disappears.
+    const scaleXMatch = tf.match(/scaleX\(([^)]+)\)/);
+    if (scaleXMatch && parseFloat(scaleXMatch[1]) < 0) o.flipX = true;
+    const scaleYMatch = tf.match(/scaleY\(([^)]+)\)/);
+    if (scaleYMatch && parseFloat(scaleYMatch[1]) < 0) o.flipY = true;
+    const scaleMatch = tf.match(/scale\(([^)]+)\)/);
+    if (scaleMatch) {
+      const parts = scaleMatch[1].split(',').map(s => parseFloat(s.trim()));
+      const sx = parts[0] ?? 1;
+      const sy = parts[1] ?? sx;
+      if (sx < 0) o.flipX = true;
+      if (sy < 0) o.flipY = true;
+    }
 
     // translate() / translateX() / translateY()
     const translateMatch = tf.match(/translate\(([^)]+)\)/);
@@ -3476,10 +3564,34 @@ function cssToOverrides(
       const angle = Math.atan2(b, a) * (180 / Math.PI);
       if (Math.abs(angle) > 0.1) o.rotation = angle;
       // Scale components of the matrix are visual-only; do not mutate layout box.
+      // But negative determinant on a single axis = flip → preserve as flipX/flipY.
+      const sx = Math.hypot(a, b);
+      const sy = Math.hypot(c, d);
+      if (sx > 0 && a / sx < 0) o.flipX = true;
+      if (sy > 0 && d / sy < 0) o.flipY = true;
       // Extract translation
       if (tx) o.x = (o.x ?? 0) + tx;
       if (ty) o.y = (o.y ?? 0) + ty;
     }
+  }
+
+  // ── Blend mode ──
+  // CSS `mix-blend-mode: multiply` → INode `blendMode: 'MULTIPLY'`. Without
+  // this, any designer-intended blend effect silently collapses to NORMAL on
+  // re-export. Inverts the map used by exporters/html.ts `blendModeToCSS`.
+  if (styles['mix-blend-mode']) {
+    const mbm = styles['mix-blend-mode'].trim().toLowerCase();
+    const blendMap: Record<string, string> = {
+      'multiply': 'MULTIPLY', 'screen': 'SCREEN', 'overlay': 'OVERLAY',
+      'darken': 'DARKEN', 'lighten': 'LIGHTEN',
+      'color-dodge': 'COLOR_DODGE', 'color-burn': 'COLOR_BURN',
+      'hard-light': 'HARD_LIGHT', 'soft-light': 'SOFT_LIGHT',
+      'difference': 'DIFFERENCE', 'exclusion': 'EXCLUSION',
+      'hue': 'HUE', 'saturation': 'SATURATION',
+      'color': 'COLOR', 'luminosity': 'LUMINOSITY',
+    };
+    const mapped = blendMap[mbm];
+    if (mapped) (o as any).blendMode = mapped;
   }
 
   // ── Clip path ──
