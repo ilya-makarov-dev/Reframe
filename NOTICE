@@ -9,3 +9,38 @@ AGPL terms. See COMMERCIAL_LICENSE.md for details.
 
 Project:    https://github.com/ilya-makarov-dev/Reframe
 Maintainer: Ilya Makarov <https://github.com/ilya-makarov-dev>
+
+─── Third-party attributions ────────────────────────────────────────────
+
+OpenPencil (MIT License)
+  https://github.com/open-pencil/open-pencil
+  Portions of `packages/core/src/engine/types.ts` and
+  `packages/core/src/engine/scene-graph.ts` are adapted from OpenPencil's
+  SceneNode and SceneGraph. Those adapted portions retain the original MIT
+  license. Substantial rework for the reframe architecture is part of
+  reframe and licensed under AGPL-3.0-or-later.
+
+Hyperframes (Apache License 2.0)
+  https://github.com/heygen-com/hyperframes
+  The following skill directories were imported 2026-04-22 from the
+  hyperframes `skills/` tree:
+    - `.claude/skills/hyperframes/`
+    - `.claude/skills/gsap/`
+    - `.claude/skills/hyperframes-registry/`
+  Those directories, including any local modifications, remain under the
+  Apache License 2.0. reframe uses hyperframes as the video-render backend
+  (via `@hyperframes/core`, `@hyperframes/producer`, `@hyperframes/engine`
+  npm packages and the `hyperframes` CLI) — those remain plain npm
+  dependencies, not vendored into this repository. The `reframe-motion`
+  skill at `.claude/skills/reframe-motion/` is original to reframe and
+  licensed under AGPL-3.0-or-later.
+
+─── Trademarks ──────────────────────────────────────────────────────────
+
+Brand names and trademarks referenced in brand catalogs (fetched via the
+`getdesign` npm package into `.reframe/brands/<slug>/DESIGN.md`) — including
+but not limited to Stripe, Linear, Airbnb, Vercel, Notion, GitHub, Apple,
+Figma, Ferrari — are property of their respective owners. Their inclusion
+is nominative fair use for design-reference and compatibility purposes.
+Reframe is not affiliated with, endorsed by, or sponsored by these
+companies.

@@ -34,7 +34,6 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "@open-pencil/core": "^0.11.6",
     "flowbite": "^4.0.1",
     "sortablejs": "^1.15.7",
     "tw-to-css": "^0.0.12"

@@ -2,7 +2,11 @@
  * Reframe Standalone Engine — Scene Graph
  *
  * Map-based node tree with CRUD, clone, group, reparent, absolute position cache.
- * Based on OpenPencil's SceneGraph, adapted for reframe.
+ *
+ * Originally adapted from OpenPencil's SceneGraph (https://github.com/open-pencil/open-pencil),
+ * licensed under the MIT License. Reworked for the reframe architecture. Reframe modifications
+ * licensed under AGPL-3.0-or-later; the original OpenPencil portions remain under MIT — see
+ * `NOTICE` in the repository root.
  */
 
 import type {

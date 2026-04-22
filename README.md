@@ -17,6 +17,33 @@
 
 reframe is an open-source design tool built for the era where agents write UI and humans direct it. Instead of opaque vector graphs (Figma) or proprietary runtimes (Framer), reframe works on **HTML + INode AST** — the same language your browser already speaks. Every surface is structured content; every structure is editable, auditable, exportable, animatable, renderable.
 
+<br>
+
+<h2 align="center">✦&nbsp;&nbsp;Created in reframe&nbsp;&nbsp;✦</h2>
+<p align="center"><sub>every pixel below — scenes, screenshots, and the GIF stitch — authored end-to-end by the same pipeline reframe ships with.</sub></p>
+
+<p align="center">
+  <img src=".github/demo.gif" alt="reframe demo — three Ferrari-branded scenes on one canvas, authored by an agent" width="100%">
+</p>
+
+## How this demo was made
+
+The GIF above wasn't screen-recorded from a staged session — it was **authored end-to-end by the same `reframe_design → reframe_compile → reframe_export → Playwright → ffmpeg` pipeline the tool ships with.** The brief was three lines:
+
+> *"Make a demo of reframe — 3 sites on one canvas, pick a cool brand, sell the product."*
+
+Here's what the agent actually did:
+
+1. **Load brand** — `reframe_design action=extract brand=ferrari` → 300-line DESIGN.md (absolute black, editorial chiaroscuro, Ferrari Red reserved for one CTA per scene, FerrariSans typography, 2px radius — razor precision).
+2. **Write one scene, three frames** — `4440×900` root with three 1440×900 child frames side-by-side: *Hero* (cinematic black + Icona series), *Lineup* (white editorial, three models, single red Configure CTA), *Performance* (black stats block: 2.9s · 830cv · 330 km/h).
+3. **Compile** — `reframe_compile` → INode AST of 84 nodes, **32-rule audit PASS** with 0 errors, **83% aesthetic score**, semantic classification (3 titles, 4 buttons, 3 backgrounds).
+4. **Screenshot per frame** — Playwright opens the compiled HTML at 4440×900 and clips three `1440×900` PNGs to disk (no MCP payload — large images bypass the chat context).
+5. **Build the product page** — a single `demo.html` with Fraunces + Inter Tight + JetBrains Mono typography, a scripted 14-beat timeline (`opener → prompts → scenes → proof chip → formats → outro`), CSS animations triggered by `window.advanceTo(ms)` so Playwright can step the scene deterministically.
+6. **Capture 175 frames** — Playwright drives the timeline at 12 fps, writes `frame_0000.png … frame_0174.png` to disk.
+7. **Stitch** — `ffmpeg` two-pass with `palettegen` + `paletteuse` (Bayer dither, diff-mode rectangle) → **1.25 MB GIF**, 960×540, ~10 s.
+
+**All reproducible.** Swap `brand=ferrari` for any of the 60+ brands in the getdesign catalog, change the copy in `demo.html`, re-run `scripts/capture-ferrari-frames.mjs` + `scripts/capture-demo-frames.mjs` + the ffmpeg command — you get a different demo without writing new code. That's reframe: **describe the page, the engine turns it into a design — then into every format you need.**
+
 ```
   ╔═══════════════════════════════════════════════════════════════════════════════╗
   ║  reframe platform                              /platform/project/:slug :4100  ║

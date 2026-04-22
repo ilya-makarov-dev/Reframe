@@ -9,7 +9,7 @@ Browser-native DOM canvas. 37-rule quality engine. 7 export formats (html / reac
 
 ## When running as the in-app agent
 
-When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right sidebar), you're inside an open reframe session talking to a designer — not a developer. Every intent routes through exactly one of the 7 skills below. Each skill is written as **role + sensitive surfaces + smell table + canonical flows**, not as a procedure — the engine handles procedure, skills carry the taste + failure-pattern memory the engine can't encode.
+When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right sidebar), you're inside an open reframe session talking to a designer — not a developer. Every intent routes through exactly one of the 8 reframe skills below. Each skill is written as **role + sensitive surfaces + smell table + canonical flows**, not as a procedure — the engine handles procedure, skills carry the taste + failure-pattern memory the engine can't encode.
 
 | User intent | Skill | First move |
 |---|---|---|
@@ -19,11 +19,14 @@ When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right
 | Vague / mood-only / ≤ 10 words ("a landing page", "something nice") | `reframe-enhance` | Rewrite into structured brief (DESIGN SYSTEM + sections + audience + must/nice), hand off |
 | "how does this look?" / "review" / "make it better" / "polish" | `reframe-critic` | Read `reframe_inspect` + DESIGN.md, ≤3 concrete fixes with engine citations |
 | "export to React" / "give me TSX" / "ship as components" | `reframe-to-react` | Ask stack once, map to `reactTarget`, call `reframe_export reactTree=true`, relay verbatim |
-| "test the UI" / "QA the platform" / "find bugs" / "cross-layer debug" (dev-side) | `designer-qa` | **Orchestrator.** ASK or propose first (never auto-walk). Localize bug by layer, then dispatch — call `reframe-critic` for taste judgments, `reframe-design` for HTML fixes, `reframe-brand` for fidelity verification, `reframe-to-react` for export-shape issues; patch engine + UI + exporters + tool handlers; write regression tests in `packages/core/src/tests/` when warranted; re-verify; log recurring patterns to smell tables. See § Orchestration. |
+| "animate / make it move / fade in / stagger / shader transition / TTS / captions / promo video / render MP4" | `reframe-motion` | Consult decision table — stay in INode-space for simple motion, drop to raw hyperframes HTML for complex (shaders / TTS / multi-scene); bridge `.reframe/brands/<slug>/DESIGN.md` into their HARD-GATE; never expose composition HTML to the designer |
+| "test the UI" / "QA the platform" / "find bugs" / "cross-layer debug" (dev-side) | `designer-qa` | **Orchestrator.** ASK or propose first (never auto-walk). Localize bug by layer, then dispatch — call `reframe-critic` for taste judgments, `reframe-design` for HTML fixes, `reframe-brand` for fidelity verification, `reframe-to-react` for export-shape issues, `reframe-motion` for animation regressions; patch engine + UI + exporters + tool handlers; write regression tests in `packages/core/src/tests/` when warranted; re-verify; log recurring patterns to smell tables. See § Orchestration. |
 
 **The costume, not the CLI.** You have the full reframe MCP (6 core pipeline tools + `reframe_ui` for Playwright-backed browser automation) plus all normal Claude Code tools. But the user in the browser doesn't want a dev session — they want scene changes. Prefer `reframe_edit` over regeneration when the ask fits an INode property. Keep tool chatter short. Show your work in the preview, not in words.
 
-**All 7 skills share the same shape** — role frame + sensitive surfaces + smell table + canonical flows + anti-patterns + tools to reach for. The smell tables GROW: when you catch a failure pattern the engine can't encode (brand drift, slop signature, site-level cross-page regression, export determinism gap, etc.), add a row. The next session catches the same pattern in seconds rather than rediscovering it.
+**All 8 reframe skills share the same shape** — role frame + sensitive surfaces + smell table + canonical flows + anti-patterns + tools to reach for. The smell tables GROW: when you catch a failure pattern the engine can't encode (brand drift, slop signature, site-level cross-page regression, export determinism gap, motion slop etc.), add a row. The next session catches the same pattern in seconds rather than rediscovering it.
+
+**Plus 3 mirrored skills** from [heygen-com/hyperframes](https://github.com/heygen-com/hyperframes): `hyperframes`, `gsap`, `hyperframes-registry` — byte-verbatim copies under `.claude/skills/`. These are NEVER routed to directly — only `reframe-motion` delegates to them when its decision table lands on "raw hyperframes". Re-sync quarterly via sparse git clone (see `reframe-motion` skill footer for the command). Never hand-edit — would break upstream merge.
 
 **The engine is deterministic; the skills are the memory the engine lacks.** 37-rule audit + 8 aesthetic metrics + brandFidelity measure structure. Smell tables catch what structural measurement misses: genericness, fake content, fake logos, tone mismatch, gradient inflation, corner inflation, brand type weight collapse, site nav drift, centered-hero-with-5-elements. That's the moat.
 
@@ -43,7 +46,7 @@ When you're spawned by `/api/agent/chat` (the Platform UI's bottom chat or right
 
 ## Orchestration — one agent, many skills
 
-Six of the seven skills are **specialists** — one mental model each. One skill is an **orchestrator** — `designer-qa`. This section names the boundary so the agent doesn't either (a) treat every task as orchestration, bloating simple asks, or (b) stay in a specialist silo when a bug genuinely spans layers.
+Seven of the eight reframe skills are **specialists** — one mental model each. One skill is an **orchestrator** — `designer-qa`. One skill (`reframe-motion`) is a **level-decider** that delegates downward to mirrored hyperframes skills. This section names the boundaries so the agent doesn't either (a) treat every task as orchestration, bloating simple asks, or (b) stay in a specialist silo when a bug genuinely spans layers.
 
 ### Role matrix
 
@@ -51,13 +54,14 @@ Six of the seven skills are **specialists** — one mental model each. One skill
 |---|---|---|---|
 | `designer-qa` | **Orchestrator** | Yes — any specialist | Debug, test, fix across engine · UI · export · brand · tests |
 | `reframe-site-loop` | **Site-scoped coordinator** | Yes — brand, enhance, design, critic, per turn | Multi-page generation only, one page per turn, baton-driven |
+| `reframe-motion` | **Level-decider** | Yes — delegates DOWN to mirrored `hyperframes` / `gsap` / `hyperframes-registry` for raw-composition work | One motion intent, INode-space vs raw-hyperframes routing |
 | `reframe-design` | Specialist — write HTML | Reads brand DESIGN.md; hands off to critic at end | One scene, taste + smell table |
 | `reframe-brand` | Specialist — parse & bind tokens | Patches `parser.ts` inline (Auto-diff) | One brand load, etalon enrichment |
 | `reframe-critic` | Specialist — ≤3-item review | Hands off to design on "apply?" | One compiled scene, translate numbers → taste |
-| `reframe-enhance` | Specialist — brief-writer | Hands off to design or site-loop | One vague intent → structured brief |
+| `reframe-enhance` | Specialist — brief-writer | Hands off to design, site-loop, or motion | One vague intent → structured brief |
 | `reframe-to-react` | Specialist — stack translator | None | One scene → TSX, byte-deterministic |
 
-Two orchestrators exist. They don't overlap: `reframe-site-loop` **builds** across pages; `designer-qa` **debugs & fixes** across layers.
+Two orchestrators exist. They don't overlap: `reframe-site-loop` **builds** across pages; `designer-qa` **debugs & fixes** across layers. `reframe-motion` is a third coordinator kind — it **delegates downward** to externally-authored skills (the mirrored hyperframes trio) and translates their output back into reframe artifacts; it doesn't orchestrate sibling reframe specialists. Summoning is one-way: reframe → hyperframes, never the reverse.
 
 ### When `designer-qa` enters orchestrator mode
 
@@ -192,7 +196,7 @@ node packages/editor/src/bridge/bridge.integration.test.mjs  # editor integratio
 
 ```
 packages/core      @reframe/core    — headless engine: SceneGraph, audit (37 rules), tokens, resize, variations, 8 exporters, HTML import, animation
-packages/mcp       @reframe/mcp     — MCP server (8 tools including reframe_block) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
+packages/mcp       @reframe/mcp     — MCP server (7 tools — reframe_block folded into design/edit) + HTTP sidecar (:4100) + Platform UI + REST API + SSE
 packages/editor    @reframe/editor  — DOM canvas editor: iframe + HTML exporter + CSS 3D transforms + selection overlay + present mode (~32 KB bundled)
 packages/cli       @reframe/cli     — CLI: init/build/test
 ```

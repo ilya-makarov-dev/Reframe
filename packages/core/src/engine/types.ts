@@ -2,7 +2,12 @@
  * Reframe Standalone Engine — Core Types
  *
  * Core type definitions for SceneNode and related types.
- * Based on OpenPencil, adapted for the reframe architecture.
+ *
+ * Originally adapted from the OpenPencil project (https://github.com/open-pencil/open-pencil),
+ * licensed under the MIT License. Substantial rework and additions for the reframe architecture
+ * (semanticRole, states, responsive, meta, tokenBindings, contentSlots, fontFeatureSettings).
+ * Reframe modifications licensed under AGPL-3.0-or-later; the original OpenPencil portions
+ * remain under MIT — see `NOTICE` in the repository root.
  */
 
 // ─── Node Types ─────────────────────────────────────────────────

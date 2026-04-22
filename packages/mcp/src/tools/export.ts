@@ -81,17 +81,33 @@ export const exportInputSchema = {
     presets: z.array(z.object({
       nodeName: z.string(),
       preset: z.string(),
-      delay: z.number().optional(),
-      duration: z.number().optional(),
+      delay: z.number().optional().describe('ms before animation starts'),
+      duration: z.number().optional().describe('ms duration override'),
+      easing: z.string().optional().describe('EasingPreset override — e.g. "ease-out-cubic", "ease-out-back", "ease-out-elastic", "ease-out-expo", or any named preset in EasingPreset. Passed through to preset keyframes.'),
+      distance: z.number().optional().describe('px distance override for slide/reveal presets (slideInLeft/Right/Up/Down, revealLeft/Up). Ignored by non-translate presets.'),
     })).optional(),
     stagger: z.object({
       nodeNames: z.array(z.string()),
       preset: z.string(),
       staggerDelay: z.number().optional().default(100),
+      duration: z.number().optional().describe('ms duration override applied to every staggered node'),
+      easing: z.string().optional().describe('EasingPreset override applied to every staggered node'),
+      distance: z.number().optional().describe('px distance override for slide/reveal presets'),
     }).optional(),
+    sequences: z.array(z.object({
+      nodeName: z.string(),
+      chain: z.array(z.object({
+        preset: z.string(),
+        duration: z.number().optional(),
+        easing: z.string().optional(),
+        distance: z.number().optional(),
+      })).min(2).describe('Two or more presets played back-to-back on the same node. Next step starts after previous ends (minus overlap).'),
+      delay: z.number().optional().describe('ms before the first step starts'),
+      overlap: z.number().optional().default(0).describe('ms of overlap between consecutive steps. 0 = pure sequence (next starts when previous ends). 200 = 200ms cross-over. Negative allowed for gap.'),
+    })).optional().describe('Compose multiple presets per node. Common uses: `[fadeIn, pulse]` for "enter then attract attention", `[slideInUp, shake]` for "enter then punch". Cumulative delays computed automatically.'),
     loop: z.boolean().optional().default(false),
     speed: z.number().optional().default(1),
-  }).optional().describe('Animation config — required for `format: lottie`. For `format: html`, passing this config makes the output animated HTML (GSAP + timeline scrub); omit for plain static HTML.'),
+  }).optional().describe('Animation config — required for `format: lottie`. For `format: html`, passing this config makes the output animated HTML (GSAP + timeline scrub); omit for plain static HTML. Three composition modes: `presets[]` (single preset per node), `stagger` (same preset across N nodes with delay), `sequences[]` (multiple presets per node with cumulative timing).'),
 
   controls: z.boolean().optional().default(true).describe('Include play/pause controls when `format: html` has an `animate` config.'),
 
@@ -109,8 +125,14 @@ function buildTimeline(
   graph: SceneGraph,
   rootId: string,
   animateConfig: {
-    presets?: Array<{ nodeName: string; preset: string; delay?: number; duration?: number }>;
-    stagger?: { nodeNames: string[]; preset: string; staggerDelay?: number };
+    presets?: Array<{ nodeName: string; preset: string; delay?: number; duration?: number; easing?: string; distance?: number }>;
+    stagger?: { nodeNames: string[]; preset: string; staggerDelay?: number; duration?: number; easing?: string; distance?: number };
+    sequences?: Array<{
+      nodeName: string;
+      chain: Array<{ preset: string; duration?: number; easing?: string; distance?: number }>;
+      delay?: number;
+      overlap?: number;
+    }>;
     loop?: boolean;
     speed?: number;
   },
@@ -139,6 +161,15 @@ function buildTimeline(
     return nodeId;
   }
 
+  // Helper: pack preset-create config from shared override fields
+  function buildCreateConfig(opts: { duration?: number; easing?: string; distance?: number }): Record<string, any> {
+    const cfg: Record<string, any> = {};
+    if (opts.duration !== undefined) cfg.duration = opts.duration;
+    if (opts.easing !== undefined) cfg.easing = opts.easing;
+    if (opts.distance !== undefined) cfg.distance = opts.distance;
+    return cfg;
+  }
+
   // Preset animations
   if (animateConfig.presets) {
     for (const p of animateConfig.presets) {
@@ -148,7 +179,7 @@ function buildTimeline(
         continue;
       }
       const nodeId = resolveNode(p.nodeName);
-      const anim = presetDef.create(p.duration ? { duration: p.duration } : undefined);
+      const anim = presetDef.create(buildCreateConfig(p));
       animations.push({
         ...anim,
         nodeId,
@@ -176,13 +207,45 @@ function buildTimeline(
         }
       }
       if (ids.length > 0) {
+        const staggerConfig = buildCreateConfig(s);
         const staggered = staggerFn(ids, s.preset, {
           staggerDelay: s.staggerDelay ?? 100,
+          // staggerFn accepts `duration` top-level AND `config` passthrough.
+          // Top-level duration wins in its impl; we also pass through easing/distance via config.
+          ...(s.duration !== undefined && { duration: s.duration }),
+          config: staggerConfig,
         });
         for (let i = 0; i < staggered.length; i++) {
           (staggered[i] as any).nodeName = resolvedNames[i];
         }
         animations.push(...(staggered as INodeAnimation[]));
+      }
+    }
+  }
+
+  // Sequences — compose N presets per node with cumulative delay.
+  // Sequential composition: step i starts at `baseDelay + sum(step_0..step_{i-1}.duration) - overlap*i`.
+  // Overlap=0 = pure back-to-back; positive = cross-over; negative = gap.
+  if (animateConfig.sequences) {
+    for (const seq of animateConfig.sequences) {
+      const nodeId = resolveNode(seq.nodeName);
+      const baseDelay = seq.delay ?? 0;
+      const overlap = seq.overlap ?? 0;
+      let cumulativeDelay = baseDelay;
+      for (const step of seq.chain) {
+        const presetDef = presets[step.preset];
+        if (!presetDef) {
+          warnings.push(`Sequence on "${seq.nodeName}": unknown preset "${step.preset}". Available: ${availablePresets.join(', ')}`);
+          continue;
+        }
+        const anim = presetDef.create(buildCreateConfig(step));
+        animations.push({
+          ...anim,
+          nodeId,
+          nodeName: seq.nodeName,
+          delay: cumulativeDelay,
+        });
+        cumulativeDelay += anim.duration - overlap;
       }
     }
   }

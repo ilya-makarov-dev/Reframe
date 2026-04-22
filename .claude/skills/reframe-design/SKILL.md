@@ -84,7 +84,7 @@ When you find a new smell: **add a row**. The table is the memory across session
 - `reframe_compile` — HTML → scene + audit. Prefer `file: ".reframe/src/<name>.html"` (source-persisted) over inline `html:`.
 - `reframe_inspect` — audit + 8 aesthetic scores + brandFidelity. Call without `sceneId` for design-language reference.
 - `reframe_edit` — all mutations. Structural (`update`/`add`/`delete`/`clone`/`resize`/`move`), theming (`defineTokens`/`setMode`), variation (`scaleSpacing`/`rotateColors`/`typographyPreset`), flow (`iterate`/`adapt`/`vary`).
-- `reframe_export` — 8 formats when the user wants to ship.
+- `reframe_export` — 7 formats (html / react / svg / png / pdf / lottie / video) when the user wants to ship.
 - `reframe_ui` — eyeball the rendered scene in a real browser when audit doesn't tell the full story. Use `scene` action for tree+audit+selection in one call.
 
 ## Non-negotiable HTML rules

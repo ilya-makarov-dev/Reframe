@@ -27,6 +27,7 @@ The brief shape is NOT universal. Each specialist needs different fields:
 - `reframe-critic` — scene-to-review + brand context + severity mode (brief / deep) + deliverable shape
 - `reframe-to-react` — stack + section-split expectation + typescript? + output location
 - `reframe-brand` — target surfaces + rebrand-or-apply + fidelity bar
+- `reframe-motion` — motion intent (entrance / state / transition / multi-scene) + scope (scene-level vs composition-level) + preview expectation (instant iframe vs ~30-60 s render) + brand motion inheritance (read Motion section of active DESIGN.md, or flag absence)
 
 **Before writing a brief for a non-design target, open the target's SKILL.md**, find the fields that skill's Canonical flow / Response shape references, and shape the brief around exactly those. Don't invent fields; don't drop fields the specialist needs.
 
