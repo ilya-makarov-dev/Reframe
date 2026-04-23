@@ -209,6 +209,28 @@ export interface INode {
   /** Responsive breakpoint rules — property overrides at different widths */
   responsive?: Array<{ maxWidth: number; props: Record<string, unknown> }>;
 
+  // ── Agent-Operable (Block A) ──────────────────
+  // Substrate extensions that let AI agents operate on INode. Host adapters
+  // proxy these from SceneNode fields of the same name; optional here so
+  // adapters not yet wired don't break the contract.
+  /** Stable dot-path from scene root, survives id regeneration across recompiles. */
+  semanticPath?: string | null;
+  /** Intent metadata — { role, purpose, editableBy, agentState }. */
+  intent?: {
+    role: string;
+    purpose?: string;
+    editableBy: 'agent' | 'user' | 'both' | 'locked';
+    agentState?: 'placeholder' | 'generating' | 'ready' | 'user-edited';
+  } | null;
+  /** Click gesture binding — MCP tool dispatched on click. */
+  onClick?: { tool: string; args: Record<string, unknown>; fastPath?: 'local-state' | 'optimistic-ui' | null } | null;
+  /** Input-value gesture binding — MCP tool dispatched on input change. */
+  onInput?: { tool: string; args: Record<string, unknown>; fastPath?: 'local-state' | 'optimistic-ui' | null } | null;
+  /** Keyboard-focusable marker. */
+  focusable?: boolean;
+  /** App-shell mount slot descriptor. */
+  mountSlot?: { name: string; accepts: string[] } | null;
+
   // ── Export ───────────────────────────────────
   exportSettings?: IExportSettings[];
 }

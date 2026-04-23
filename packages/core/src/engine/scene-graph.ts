@@ -151,6 +151,18 @@ export function createDefaultNode(type: NodeType, id: string): SceneNode {
     href: null,
     contentSlots: [],
 
+    // Agent-Operable (Block A) — all nullable / false by default so
+    // existing scenes stay behaviorally identical. Agents opt nodes in
+    // per-purpose; audit validates the pairings.
+    semanticPath: null,
+    intent: null,
+    onClick: null,
+    onInput: null,
+    focusable: false,
+    dragHandle: null,
+    keybinding: null,
+    mountSlot: null,
+
     states: {},
     responsive: [],
 

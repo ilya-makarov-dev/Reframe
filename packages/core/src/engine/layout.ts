@@ -10,6 +10,7 @@
 
 import type { SceneGraph } from './scene-graph';
 import type { SceneNode, GridTrack } from './types';
+import { computeSemanticPaths } from './semantic-path';
 
 // ─── Yoga Provider Interface ────────────────────────────────────
 
@@ -950,6 +951,13 @@ export function ensureSceneLayout(graph: SceneGraph, scopeId?: string): void {
     computeAllLayouts(graph, scopeId);
   } catch {
     /* best-effort */
+  }
+  // Refresh agent-operable semantic paths after every structural mutation.
+  // O(n) walk; stable addresses survive id regeneration across recompiles.
+  try {
+    computeSemanticPaths(graph);
+  } catch {
+    /* best-effort — paths are advisory, missing them shouldn't break layout */
   }
 }
 

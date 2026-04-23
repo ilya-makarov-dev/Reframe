@@ -2054,6 +2054,57 @@ export function semanticLandmarkPresence(): AuditRule {
   });
 }
 
+/**
+ * Interaction compliance — enforces agent-operable semantic invariants.
+ *
+ * Rationale: when an INode declares intent via `semanticRole`, the engine
+ * promises the user can interact with it. But nothing wires the promise
+ * to a handler unless the agent set `onClick` / `onInput`. This rule
+ * catches the gap at audit time so agent-composed panels don't ship with
+ * dead buttons.
+ *
+ * Also validates the inverse: nodes with gestures (`onClick`) should
+ * carry an interactive semanticRole so screen readers + keyboard nav see
+ * the affordance. Agent authoring either field without the other is a
+ * smell.
+ */
+export function interactionCompliance(): AuditRule {
+  const INTERACTIVE_ROLES = new Set(['button', 'link', 'cta', 'input', 'checkbox', 'radio', 'select']);
+  return rule('interaction-compliance', (node, _ctx) => {
+    const issues: AuditIssue[] = [];
+    const role = node.semanticRole as string | undefined;
+    const hasClick = !!(node as any).onClick;
+    const hasInput = !!(node as any).onInput;
+    const hasHref = !!(node as any).href;
+    const intent = (node as any).intent as { editableBy?: string } | null | undefined;
+    const locked = intent?.editableBy === 'locked';
+
+    // Role declares interactivity but no handler attached.
+    if (role && INTERACTIVE_ROLES.has(role) && !hasClick && !hasInput && !hasHref && !locked) {
+      issues.push({
+        rule: 'interaction-compliance',
+        severity: 'warning',
+        message: `${role} lacks an onClick/onInput handler or href — users can't interact with it.`,
+        nodeId: node.id,
+        nodeName: node.name,
+      });
+    }
+
+    // Handler attached but role missing / non-interactive — a11y regression.
+    if ((hasClick || hasInput) && (!role || !INTERACTIVE_ROLES.has(role))) {
+      issues.push({
+        rule: 'interaction-compliance',
+        severity: 'info',
+        message: `Node has gesture binding but no interactive semanticRole. Screen readers will miss the affordance.`,
+        nodeId: node.id,
+        nodeName: node.name,
+      });
+    }
+
+    return issues;
+  });
+}
+
 // ─── Helpers ───────────────────────────────────────────────────
 
 /** Collect all text nodes in a tree. */

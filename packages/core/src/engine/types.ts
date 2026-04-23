@@ -245,6 +245,67 @@ export type BlendMode =
   | 'DIFFERENCE' | 'EXCLUSION'
   | 'HUE' | 'SATURATION' | 'COLOR' | 'LUMINOSITY';
 
+// ─── Agent-Operable Block A ─────────────────────────────────────
+// Substrate extensions that let agents operate on INode the same way
+// they operate on code: stable addressing, interaction primitives,
+// intent annotations, mount slots. Same primitives that compose user
+// designs also compose reframe's own UI surfaces — INode describes
+// itself.
+
+export interface NodeIntent {
+  /** Canonical role string in namespace convention — e.g. 'brand-palette/swatch', 'panel/close', 'token-editor/hex-input'. Agents use this to reason about node purpose. */
+  role: string;
+  /** Human-readable why this node exists. Passed to agents as reasoning context. */
+  purpose?: string;
+  /** Who may mutate this node. 'locked' rejects all gesture + MCP edits; audit enforces. */
+  editableBy: 'agent' | 'user' | 'both' | 'locked';
+  /** Lifecycle state from the agent's perspective. Advisory — does not block edits. */
+  agentState?: 'placeholder' | 'generating' | 'ready' | 'user-edited';
+}
+
+export interface AgentGesture {
+  /** MCP tool name (e.g. 'reframe_edit', 'reframe_ui'). */
+  tool: string;
+  /**
+   * Tool args template. String values may contain {placeholders}:
+   *   {value} — current input value (onInput only)
+   *   {path}  — this node's semanticPath
+   *   {id}    — this node's id
+   * Substitution happens at gesture dispatch time, not at render time.
+   */
+  args: Record<string, unknown>;
+  /**
+   * Latency hint. 'local-state' = apply to local store without roundtrip,
+   * 'optimistic-ui' = patch DOM before roundtrip confirms, null = fully synchronous.
+   * Exporters emit this as a data attribute for the runtime dispatcher.
+   */
+  fastPath?: 'local-state' | 'optimistic-ui' | null;
+}
+
+export interface DragHandleSpec {
+  /** Which bounding box the drag moves. */
+  scope: 'self' | 'parent' | 'scene';
+  /** Constrained axis; both when omitted. */
+  axis?: 'x' | 'y' | 'both';
+}
+
+export interface KeybindingSpec {
+  /** Human-readable combo: 'cmd+z', 'shift+/', 'escape'. Modifier order flexible, case-insensitive. */
+  combo: string;
+  /** MCP tool name fired on combo match. */
+  tool: string;
+  args: Record<string, unknown>;
+  /** When true, bound globally regardless of focus. Default = bound only while this node or descendant is focused. */
+  global?: boolean;
+}
+
+export interface MountSlotSpec {
+  /** Slot name unique within a scene — e.g. 'right-panel', 'inspector', 'toolbar'. */
+  name: string;
+  /** Panel kinds this slot accepts; empty = any. Used by agent to filter valid mount targets. */
+  accepts: string[];
+}
+
 // ─── SceneNode ──────────────────────────────────────────────────
 
 export interface SceneNode {
@@ -427,10 +488,41 @@ export interface SceneNode {
 
   // Semantic
   semanticRole: SemanticRole | null;
-  slot: string | null;                            // content slot name
+  slot: string | null;                            // content slot name (component instances)
   /** URL or slug for link-like nodes (semantic HTML export). */
   href: string | null;
   contentSlots: ContentSlot[];                    // what slots this node exposes
+
+  // Agent-Operable (Block A)
+  /**
+   * Stable dot-separated path from scene root, computed on compile from
+   * nodeName (with sibling index when names collide under same parent:
+   * `home/features/card:2`). Survives id regeneration across recompiles
+   * — agents reference by path in gesture bindings and patch ops so their
+   * instructions stay valid through the edit cycle. null on the root node
+   * and transiently during graph mutation (recomputed by
+   * `computeSemanticPaths(graph)` after every structural change).
+   */
+  semanticPath: string | null;
+  /** Intent metadata: role, purpose, editableBy, agentState. See NodeIntent. */
+  intent: NodeIntent | null;
+  /** Click gesture — exporter emits data-gesture-click; delegator routes to MCP tool. */
+  onClick: AgentGesture | null;
+  /** Input-value gesture for text/number/slider inputs — fires on change with {value} substitution. */
+  onInput: AgentGesture | null;
+  /** Keyboard-focusable marker. Maps to HTML tabindex="0". */
+  focusable: boolean;
+  /** Drag handle descriptor — canvas drag system handles without agent roundtrip. */
+  dragHandle: DragHandleSpec | null;
+  /** Keybinding — global or scoped to this node's focus subtree. */
+  keybinding: KeybindingSpec | null;
+  /**
+   * App-shell mount slot — this node is a named drop zone for
+   * agent-rendered panel manifests. Distinct from `slot` which is
+   * component-content slot; this one is for whole-panel mounting via
+   * reframe_ui action=mount.
+   */
+  mountSlot: MountSlotSpec | null;
 
   // Behavior
   states: Partial<Record<InteractionState, StateOverride>>;

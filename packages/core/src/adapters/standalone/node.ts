@@ -490,6 +490,19 @@ export class StandaloneNode implements INode {
     this.graph.updateNode(this.raw.id, { href: v ?? null } as any);
   }
 
+  // ── Agent-Operable (Block A) proxies ──────────
+  // Exposes SceneNode fields to INode consumers (audit rules, exporters).
+  // Read-only for now — agent-issued mutations go through MCP tools which
+  // update the raw SceneNode directly, bypassing adapter setters.
+  get semanticPath(): string | null | undefined {
+    return (this.raw as any).semanticPath ?? null;
+  }
+  get intent(): any { return (this.raw as any).intent ?? null; }
+  get onClick(): any { return (this.raw as any).onClick ?? null; }
+  get onInput(): any { return (this.raw as any).onInput ?? null; }
+  get focusable(): boolean { return !!(this.raw as any).focusable; }
+  get mountSlot(): any { return (this.raw as any).mountSlot ?? null; }
+
   /**
    * Phase 1/3 provenance + token binding metadata. The raw SceneNode carries
    * this on `node.meta`; exposing it through the adapter lets exporters (html,

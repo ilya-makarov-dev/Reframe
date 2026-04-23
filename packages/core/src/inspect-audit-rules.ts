@@ -37,6 +37,7 @@ import {
   semanticCaptionReadability,
   semanticTouchTarget,
   semanticLandmarkPresence,
+  interactionCompliance,
   aestheticAlignment,
   aestheticWhitespace,
   aestheticHarmony,
@@ -93,6 +94,8 @@ export function buildInspectAuditRules(
     semanticCaptionReadability(),
     semanticTouchTarget(),
     semanticLandmarkPresence(),
+    // Agent-operable (Block A) — enforces gesture wiring for interactive roles
+    interactionCompliance(),
     // Aesthetic quality rules (info severity — advisory)
     aestheticAlignment(),
     aestheticWhitespace(),

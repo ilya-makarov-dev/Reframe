@@ -441,6 +441,25 @@ export type {
 // ── Scene graph + standalone adapter (for CLI and downstream consumers) ──
 export { SceneGraph } from './engine/scene-graph';
 export type { SceneNode } from './engine/types';
+export type {
+  NodeIntent,
+  AgentGesture,
+  DragHandleSpec,
+  KeybindingSpec,
+  MountSlotSpec,
+} from './engine/types';
+export {
+  computeSemanticPaths,
+  findNodeByPath,
+  substituteGestureArgs,
+} from './engine/semantic-path';
+
+// ── Agent-operable reference panels (Phase 0) ──
+export {
+  composeBrandPalettePanel,
+  type PaletteEntry,
+  type BrandPaletteOptions,
+} from './panels/brand-palette';
 export { StandaloneHost } from './adapters/standalone/adapter';
 export { StandaloneNode } from './adapters/standalone/node';
 

@@ -498,6 +498,46 @@ export function exportToHtml(
       attrs.push(`data-reframe-inode="${node.id}"`);
     }
 
+    // ─── Agent-Operable attrs (Block A) ───────────────
+    // Stable semantic path + gesture bindings the runtime delegator
+    // dispatches to MCP tools. Emitted unconditionally when set so that
+    // even export modes without `dataAttributes` produce agent-operable
+    // output — the whole "UI = agent" story depends on these surviving
+    // into the rendered DOM.
+    if (node.semanticPath) {
+      attrs.push(`data-semantic-path="${escapeHtml(node.semanticPath)}"`);
+    }
+    if (node.intent) {
+      attrs.push(`data-intent-role="${escapeHtml(node.intent.role)}"`);
+      attrs.push(`data-intent-editable="${node.intent.editableBy}"`);
+      if (node.intent.agentState) {
+        attrs.push(`data-intent-state="${node.intent.agentState}"`);
+      }
+    }
+    if (node.onClick) {
+      attrs.push(`data-gesture-click="${escapeHtml(JSON.stringify(node.onClick))}"`);
+    }
+    if (node.onInput) {
+      attrs.push(`data-gesture-input="${escapeHtml(JSON.stringify(node.onInput))}"`);
+    }
+    if (node.focusable) {
+      attrs.push(`tabindex="0"`);
+      attrs.push(`data-focusable="true"`);
+    }
+    if (node.dragHandle) {
+      attrs.push(`data-drag-scope="${node.dragHandle.scope}"`);
+      if (node.dragHandle.axis) attrs.push(`data-drag-axis="${node.dragHandle.axis}"`);
+    }
+    if (node.keybinding) {
+      attrs.push(`data-keybinding="${escapeHtml(JSON.stringify(node.keybinding))}"`);
+    }
+    if (node.mountSlot) {
+      attrs.push(`data-mount-slot="${escapeHtml(node.mountSlot.name)}"`);
+      if (node.mountSlot.accepts.length > 0) {
+        attrs.push(`data-mount-accepts="${escapeHtml(node.mountSlot.accepts.join(','))}"`);
+      }
+    }
+
     const attrStr = attrs.join(' ');
 
     // Text node
