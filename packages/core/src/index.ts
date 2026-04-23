@@ -454,12 +454,17 @@ export {
   substituteGestureArgs,
 } from './engine/semantic-path';
 
-// ── Agent-operable reference panels (Phase 0) ──
+// ── Agent-operable reference panels (Phase 0 + 2A) ──
 export {
   composeBrandPalettePanel,
   type PaletteEntry,
   type BrandPaletteOptions,
 } from './panels/brand-palette';
+export {
+  composeVariantPickerPanel,
+  type VariantEntry,
+  type VariantPickerOptions,
+} from './panels/variant-picker';
 export { StandaloneHost } from './adapters/standalone/adapter';
 export { StandaloneNode } from './adapters/standalone/node';
 

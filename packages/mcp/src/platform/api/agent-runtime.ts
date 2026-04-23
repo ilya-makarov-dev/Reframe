@@ -107,54 +107,132 @@ interface GestureDispatchBody {
   id?: string;
 }
 
+interface DispatchResult {
+  ok: boolean;
+  tool: string;
+  handled: boolean;
+  note?: string;
+  /** Tool-specific echo — variantId applied, new token value, panel mounted. */
+  result?: Record<string, unknown>;
+}
+
+type ToolHandler = (
+  args: Record<string, any>,
+  body: GestureDispatchBody,
+  ctx: PlatformContext,
+) => Promise<DispatchResult>;
+
+// Tool-handler registry — Phase 2A MCP bridge. Extendable map of tool name
+// → handler. Each handler takes (args, body, ctx), returns a DispatchResult,
+// emits any SSE events it needs via emitProjectEvent. Contract is one-way:
+// HTTP dispatcher → handler → SSE broadcast. Full MCP tool invocation (with
+// audit loops, scene-graph lifecycle) is Phase 3 — these handlers are
+// intentionally side-effect-light so Phase 2A stays testable without spinning
+// up a live MCP session.
+const TOOL_HANDLERS: Map<string, ToolHandler> = new Map();
+
+// ── brand.setToken — live brand-token write + SSE fast-path (Phase 1) ─
+const brandSetTokenHandler: ToolHandler = async (args, body, ctx) => {
+  if (!ctx.projectDir) return { ok: false, tool: 'brand.setToken', handled: true, note: 'No project open.' };
+  const brandSlug = String(args.brand ?? '');
+  const tokenName = String(args.name ?? '');
+  const value = String(args.value ?? body.value ?? '');
+  if (!brandSlug || !tokenName || !value) {
+    return { ok: false, tool: 'brand.setToken', handled: true, note: 'brand + name + value required' };
+  }
+  emitProjectEvent({ type: 'token:changed', brand: brandSlug, tokenName, value });
+  try {
+    const loaded = loadBrandFromProject(ctx.projectDir, brandSlug);
+    if (loaded) {
+      const patched = patchTokenInDesignMd(loaded.content, tokenName, value);
+      if (patched) {
+        registerBrand(ctx.projectDir, brandSlug, patched, { setActive: false });
+      }
+    }
+  } catch { /* telemetry only — live patch already shipped */ }
+  return { ok: true, tool: 'brand.setToken', handled: true, result: { brand: brandSlug, tokenName, value } };
+};
+TOOL_HANDLERS.set('brand.setToken', brandSetTokenHandler);
+
+// ── reframe_ui — mount/unmount actions (Phase 1 semantics, now via registry) ─
+TOOL_HANDLERS.set('reframe_ui', async (args) => {
+  const action = String(args.action ?? '');
+  if (action === 'unmount') {
+    const panelName = String(args.panel ?? '');
+    const slot = String(args.slot ?? 'right-panel');
+    if (!panelName) return { ok: false, tool: 'reframe_ui', handled: true, note: 'panel name required' };
+    emitProjectEvent({ type: 'panel:unmount', slot, panelName });
+    return { ok: true, tool: 'reframe_ui', handled: true, result: { action, panel: panelName, slot } };
+  }
+  if (action === 'mount') {
+    const panelName = String(args.panel ?? '');
+    const slot = String(args.slot ?? 'right-panel');
+    const config = (args.config ?? {}) as Record<string, unknown>;
+    if (!panelName) return { ok: false, tool: 'reframe_ui', handled: true, note: 'panel name required' };
+    try {
+      const rendered = renderPanel(panelName, config);
+      emitProjectEvent({
+        type: 'panel:mount',
+        slot,
+        panelName: rendered.panelName,
+        html: rendered.html,
+        nodeCount: rendered.nodeCount,
+      });
+      return { ok: true, tool: 'reframe_ui', handled: true, result: { action, panel: rendered.panelName, slot, nodeCount: rendered.nodeCount } };
+    } catch (e: any) {
+      return { ok: false, tool: 'reframe_ui', handled: true, note: String(e?.message ?? e) };
+    }
+  }
+  return { ok: true, tool: 'reframe_ui', handled: false, note: `reframe_ui action "${action}" not routable via HTTP bridge` };
+});
+
+// ── reframe_edit — Phase 2A MCP bridge for variant-picker + token setter ─
+// Supports two ops:
+//   applyVariant — broadcasts scene:session-changed + auto-unmounts picker.
+//                  Does NOT touch the scene graph — Phase 3 will replace this
+//                  stub with a real handleEdit invocation once session-bridging
+//                  is solved.
+//   setToken     — normalized path to brand.setToken, so reframe_edit becomes
+//                  the single HTTP entry point for all scene mutations.
+// Unknown ops fall through to "handled: false" so the dispatcher can record
+// telemetry without crashing.
+TOOL_HANDLERS.set('reframe_edit', async (args, body, ctx) => {
+  const op = String(args.op ?? '');
+  if (op === 'applyVariant') {
+    const sceneId = String(args.sceneId ?? '');
+    const variantId = String(args.variantId ?? '');
+    const targetPath = String(args.targetPath ?? body.path ?? '');
+    if (!variantId) {
+      return { ok: false, tool: 'reframe_edit', handled: true, note: 'variantId required' };
+    }
+    if (sceneId) {
+      emitProjectEvent({ type: 'scene:session-changed', sceneId, revision: Date.now() });
+    }
+    // Auto-unmount the picker so the user sees the resulting scene —
+    // mirrors agent-UI "take the action, get out of the way" instinct.
+    emitProjectEvent({ type: 'panel:unmount', slot: 'right-panel', panelName: 'variant-picker' });
+    return { ok: true, tool: 'reframe_edit', handled: true, result: { op, sceneId, variantId, targetPath } };
+  }
+  if (op === 'setToken') {
+    return brandSetTokenHandler(args, body, ctx);
+  }
+  return { ok: true, tool: 'reframe_edit', handled: false, note: `reframe_edit op "${op}" not yet routable via HTTP bridge (Phase 3 target)` };
+});
+
 async function dispatchAgentGesture(
   body: GestureDispatchBody,
   ctx: PlatformContext,
-): Promise<{ ok: boolean; tool: string; handled: boolean; note?: string }> {
-  const tool = body.tool;
-  const args = body.args ?? {};
-
-  // ── brand.setToken — the only mutation the brand-palette panel makes.
-  if (tool === 'brand.setToken' || (tool === 'reframe_edit' && args.op === 'setToken')) {
-    if (!ctx.projectDir) return { ok: false, tool, handled: true, note: 'No project open.' };
-    const brandSlug = String(args.brand ?? '');
-    const tokenName = String(args.name ?? '');
-    const value = String(args.value ?? body.value ?? '');
-    if (!brandSlug || !tokenName || !value) {
-      return { ok: false, tool, handled: true, note: 'brand + name + value required' };
-    }
-
-    // Fast-path SSE first — all clients repaint immediately.
-    emitProjectEvent({ type: 'token:changed', brand: brandSlug, tokenName, value });
-
-    // Persist to disk best-effort. Failures are advisory — the live patch
-    // already shipped to clients.
-    try {
-      const loaded = loadBrandFromProject(ctx.projectDir, brandSlug);
-      if (loaded) {
-        const patched = patchTokenInDesignMd(loaded.content, tokenName, value);
-        if (patched) {
-          registerBrand(ctx.projectDir, brandSlug, patched, { setActive: false });
-        }
-      }
-    } catch {
-      /* telemetry only */
-    }
-
-    return { ok: true, tool, handled: true };
+): Promise<DispatchResult> {
+  const handler = TOOL_HANDLERS.get(body.tool);
+  if (!handler) {
+    return {
+      ok: true,
+      tool: body.tool,
+      handled: false,
+      note: `tool "${body.tool}" not handled by HTTP dispatcher (not in registry)`,
+    };
   }
-
-  // ── reframe_ui.unmount — agent-triggered panel close from inside a panel.
-  if (tool === 'reframe_ui' && args.action === 'unmount') {
-    const panelName = String(args.panel ?? '');
-    const slot = String(args.slot ?? 'right-panel');
-    if (!panelName) return { ok: false, tool, handled: true, note: 'panel name required' };
-    emitProjectEvent({ type: 'panel:unmount', slot, panelName });
-    return { ok: true, tool, handled: true };
-  }
-
-  // Unknown tool — logged, not failed. Phase 2 adds full MCP invocation.
-  return { ok: true, tool, handled: false, note: 'tool not handled by HTTP dispatcher (Phase 1 subset)' };
+  return handler(body.args ?? {}, body, ctx);
 }
 
 // ─── Route handler ───────────────────────────────────────────────

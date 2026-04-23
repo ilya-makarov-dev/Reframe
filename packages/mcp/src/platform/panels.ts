@@ -24,7 +24,10 @@ import {
   ensureSceneLayout,
   exportToHtml,
   composeBrandPalettePanel,
+  composeVariantPickerPanel,
   type PaletteEntry,
+  type VariantEntry,
+  type DesignSystem,
 } from '@reframe/core';
 
 export interface PanelConfig {
@@ -40,45 +43,113 @@ export interface PanelRenderResult {
   nodeCount: number;
 }
 
-type PanelComposer = (config: PanelConfig) => SceneGraph;
-
 // ─── Composers registry ──────────────────────────────────────────
 // Each entry is name → composer that accepts loosely-typed config and
-// returns a SceneGraph. Validation happens inside the composer — the
-// registry is type-erased so new panels can register without touching
-// the central type.
+// returns a composed panel (SceneGraph + optional DesignSystem for token
+// binding). Validation happens inside the composer — the registry is
+// type-erased so new panels can register without touching the central type.
 
-const COMPOSERS: Map<string, PanelComposer> = new Map();
+interface ComposedPanel {
+  graph: SceneGraph;
+  /** Optional DesignSystem passed to the exporter so nodes with
+   *  `meta.tokenBindings` emit `var(--color-<role>)` + a :root var block.
+   *  Required for the Phase 1 token:changed SSE fast-path to visibly repaint. */
+  designSystem?: DesignSystem;
+}
+
+type PanelComposerExt = (config: PanelConfig) => ComposedPanel;
+const COMPOSERS_EXT: Map<string, PanelComposerExt> = new Map();
 
 // brand-palette — edits active brand's color tokens with live SSE patching.
-COMPOSERS.set('brand-palette', (config) => {
+COMPOSERS_EXT.set('brand-palette', (config) => {
   const brandSlug = String(config.brandSlug ?? 'default');
   const entries = Array.isArray(config.entries)
     ? (config.entries as PaletteEntry[])
     : defaultPaletteEntries();
-  return composeBrandPalettePanel({ brandSlug, entries });
+  const graph = composeBrandPalettePanel({ brandSlug, entries });
+  const designSystem = buildMinimalDesignSystem(brandSlug, entries);
+  return { graph, designSystem };
 });
+
+// variant-picker — offer N variants of a target section with click-to-apply.
+// When `variants` is absent, ships a demo set so the panel is inspectable
+// without waiting for a full engine-side variant generator to land.
+COMPOSERS_EXT.set('variant-picker', (config) => {
+  const sceneId = typeof config.sceneId === 'string' ? config.sceneId : undefined;
+  const targetPath = typeof config.targetPath === 'string' ? config.targetPath : undefined;
+  const variants = Array.isArray(config.variants)
+    ? (config.variants as VariantEntry[])
+    : defaultVariants(sceneId, targetPath);
+  const graph = composeVariantPickerPanel({ sceneId, targetPath, variants });
+  return { graph };
+});
+
+function defaultVariants(sceneId?: string, targetPath?: string): VariantEntry[] {
+  // Demo variants — real production use supplies them via config. Each
+  // apply gesture routes through the MCP bridge (dispatchAgentGesture)
+  // which forwards to reframe_edit with the concrete args.
+  const baseArgs = (variantId: string) => ({
+    op: 'applyVariant',
+    sceneId: sceneId ?? '',
+    targetPath: targetPath ?? '',
+    variantId,
+  });
+  return [
+    { id: 'default',  label: 'Default',  description: 'Current design',
+      colorStrip: ['#0B0B13', '#635BFF', '#FFFFFF', '#9B9BA5'],
+      apply: { tool: 'reframe_edit', args: baseArgs('default') } },
+    { id: 'editorial', label: 'Editorial', description: 'Serif display · asymmetric grid',
+      colorStrip: ['#FBF7F2', '#1A1510', '#C4553A', '#6B7A62'],
+      apply: { tool: 'reframe_edit', args: baseArgs('editorial') } },
+    { id: 'brutalist', label: 'Brutalist', description: 'Stark type · raw blocks',
+      colorStrip: ['#000000', '#FFFFFF', '#FFFF00', '#FF0000'],
+      apply: { tool: 'reframe_edit', args: baseArgs('brutalist') } },
+    { id: 'nocturne', label: 'Nocturne', description: 'Low-light · cinematic contrast',
+      colorStrip: ['#0A0A0F', '#1B1B26', '#A78BFA', '#64748B'],
+      apply: { tool: 'reframe_edit', args: baseArgs('nocturne') } },
+  ];
+}
+
+function buildMinimalDesignSystem(brand: string, entries: PaletteEntry[]): DesignSystem {
+  const roles = new Map<string, string>();
+  for (const e of entries) {
+    const role = e.tokenName.replace(/^color\./, '');
+    roles.set(role, e.hex);
+  }
+  return {
+    brand,
+    colors: { roles },
+    typography: { hierarchy: [] },
+    components: {} as any,
+    layout: {} as any,
+    responsive: {} as any,
+  };
+}
 
 // ─── Render API ──────────────────────────────────────────────────
 
 export function renderPanel(name: string, config: PanelConfig): PanelRenderResult {
-  const composer = COMPOSERS.get(name);
+  const composer = COMPOSERS_EXT.get(name);
   if (!composer) {
     throw new Error(
-      `Unknown panel: ${name}. Registered: ${Array.from(COMPOSERS.keys()).join(', ') || '(none)'}`,
+      `Unknown panel: ${name}. Registered: ${Array.from(COMPOSERS_EXT.keys()).join(', ') || '(none)'}`,
     );
   }
-  const graph = composer(config);
+  const { graph, designSystem } = composer(config);
   ensureSceneLayout(graph, graph.rootId);
   const html = exportToHtml(graph, graph.rootId, {
     fullDocument: false,
     dataAttributes: true,
+    // Passing DesignSystem unlocks the Phase 3b token-var codepath — nodes
+    // with meta.tokenBindings emit `var(--color-<role>)` + a :root block.
+    // Critical for live repaint via the token:changed SSE fast-path.
+    designSystem,
   });
   return { html, panelName: name, nodeCount: graph.nodes.size };
 }
 
 export function listRegisteredPanels(): string[] {
-  return Array.from(COMPOSERS.keys());
+  return Array.from(COMPOSERS_EXT.keys());
 }
 
 // ─── Defaults ────────────────────────────────────────────────────

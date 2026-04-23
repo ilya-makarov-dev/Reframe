@@ -136,7 +136,12 @@ function composeSwatch(
     intent: intentOf('brand-palette/swatch', `Edit ${entry.tokenName}`, 'both', 'ready'),
   } as any);
 
-  // Color preview — click picks color, visualizes current hex.
+  // Color preview — click picks color, visualizes current hex. The
+  // meta.tokenBindings.fill → role binding lets the HTML exporter emit
+  // `background: var(--color-<role>)` instead of a hardcoded hex, so the
+  // Phase 1 token:changed SSE fast-path (which patches --color-<role>
+  // on documentElement) repaints the swatch live without re-compile.
+  const colorRole = entry.tokenName.replace(/^color\./, '');
   graph.createNode('FRAME' as any, row.id, {
     name: 'color-preview',
     width: 60,
@@ -151,6 +156,7 @@ function composeSwatch(
       current: entry.hex,
     }, 'optimistic-ui'),
     intent: intentOf('brand-palette/color-preview', `Open color picker for ${entry.tokenName}`, 'both'),
+    meta: { tokenBindings: { fill: colorRole } },
   } as any);
 
   // Labels + hex input column.
