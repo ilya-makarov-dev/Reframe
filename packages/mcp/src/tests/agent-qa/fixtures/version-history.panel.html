@@ -1,0 +1,18 @@
+<div style="width:320px; padding:16px; background:#0f0f14; color:#e8e8ec; font-family:'Inter',system-ui,sans-serif"
+     data-intent-role="version-history/root"
+     data-mount-slot="right-panel"
+     data-panel-accepts="version-history">
+  <h3 style="margin:0 0 12px; font-size:13px; letter-spacing:0.02em; text-transform:uppercase; color:#9b9ba5"
+      data-intent-role="version-history/title"
+      data-bind-text="title">Version history</h3>
+  <div style="display:flex; flex-direction:column; gap:8px">
+    <div data-bind-each="versions"
+         style="display:flex; justify-content:space-between; padding:10px 12px; background:#16161d; border:1px solid #23232b; border-radius:6px; cursor:pointer"
+         data-intent-role="version-history/entry"
+         data-bind-attr="data-version-id:id"
+         data-gesture-click='{"tool":"reframe_edit","args":{"op":"restoreVersion","versionId":"{id}"}}'>
+      <span style="font-weight:500" data-bind-text="label">Version</span>
+      <span style="color:#72727a; font-size:12px" data-bind-text="timestamp">time</span>
+    </div>
+  </div>
+</div>

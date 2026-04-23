@@ -1,0 +1,27 @@
+# Smoke workflow — exercises adapter discovery + DAG resolution
+# without touching real scenes. Every step calls browser.* pseudo-
+# adapters which always succeed; purpose is to validate the runner
+# wires up correctly.
+
+reframe: "1"
+id: smoke
+name: Smoke test for the workflow runtime
+
+steps:
+  - id: nav
+    adapter: browser.navigate
+    inputs: { path: "/platform" }
+
+  - id: dl
+    adapter: browser.download
+    needs: [nav]
+    inputs:
+      url: "/preview/s1"
+      filename: "smoke-{{nav.output.dispatched}}.html"
+
+  - id: reload
+    adapter: browser.reload
+    needs: [dl]
+
+outputs:
+  triggered: "{{reload.output.dispatched}}"

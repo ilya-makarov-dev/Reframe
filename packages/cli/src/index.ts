@@ -16,6 +16,12 @@ import { parseArgs } from './args';
 import { buildCommand } from './commands/build';
 import { testCommand } from './commands/test';
 import { initCommand } from './commands/init';
+import { newCommand } from './commands/new';
+import { serveCommand } from './commands/serve';
+import { addCommand } from './commands/add';
+import { shipCommand } from './commands/ship';
+import { stateCommand } from './commands/state';
+import { runCommand } from './commands/run';
 import { adapt } from './commands/adapt';
 import { inspect } from './commands/inspect';
 import { info } from './commands/info';
@@ -27,9 +33,17 @@ import { exportHtml } from './commands/export-html';
 import { initYoga } from './engine-bridge';
 
 const HELP = `
-  reframe — Programmable Design Engine
+  reframe — Design Operating System
 
-  BUILD SYSTEM:
+  PROJECT:
+    new <name>          Scaffold a new reframe project (.reframe/ + manifest)
+    serve               Boot sidecar + open shell in browser (dev mode)
+    add <path>          Install a pack (brand / panel / recipe) into .reframe/packs/
+    ship                Build every scene to .reframe/dist/
+    run <workflow.yml>  Execute a .rfx.yml workflow (headless; no sidecar needed)
+    state <sub>         Persistent KV  (set / get / list / delete / clear)
+
+  BUILD SYSTEM (legacy-compat):
     init                Scaffold reframe.config.json + design.md
     build [config]      Compile all scenes from config → .reframe/dist/
     test  [config]      Run design assertions on all scenes
@@ -87,6 +101,24 @@ async function main(): Promise<void> {
 
   try {
     switch (command) {
+      case 'new':
+        await newCommand(args._.slice(1), args);
+        break;
+      case 'serve':
+        await serveCommand(args._.slice(1), args);
+        break;
+      case 'add':
+        await addCommand(args._.slice(1), args);
+        break;
+      case 'ship':
+        await shipCommand(args._.slice(1), args);
+        break;
+      case 'run':
+        await runCommand(args._.slice(1), args);
+        break;
+      case 'state':
+        await stateCommand(args._.slice(1));
+        break;
       case 'init':
         await initCommand(args._.slice(1));
         break;

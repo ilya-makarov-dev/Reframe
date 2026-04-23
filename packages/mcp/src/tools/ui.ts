@@ -142,6 +142,7 @@ export const uiInputSchema = {
     'open', 'act', 'probe', 'screenshot', 'wait', 'close', 'list',
     'setViewport', 'state', 'reload', 'scene',
     'mount', 'unmount',
+    'authorList', 'authorRead', 'authorCommit', 'authorDelete',
   ]).describe(
     'open = launch browser session, navigate to path. ' +
     'act = run a sequence of interaction steps (click/type/press/scroll/hover/wait/goto/clickAt/dragAt/drag/select/upload/reload). ' +
@@ -154,7 +155,11 @@ export const uiInputSchema = {
     'reload = refresh the current page. ' +
     'scene = dump the active Platform scene: SceneGraph tree, live audit, selected node, brand, viewport tag. One call to understand "what the user is looking at" — no DOM digging required. ' +
     'mount = compose a registered INode panel by name + config and broadcast it via SSE so every connected browser injects it into the named slot. No Playwright session required — works against any user looking at Platform UI. ' +
-    'unmount = reverse of mount — broadcast removal of a panel from a slot.',
+    'unmount = reverse of mount — broadcast removal of a panel from a slot. ' +
+    'authorList = list all panels available to mount (both code-shipped composers and disk-backed .reframe/ui/<name>.panel.html artifacts). ' +
+    'authorRead = return the raw HTML source of a disk artifact panel — used before authorCommit diff workflows. ' +
+    'authorCommit = write HTML to .reframe/ui/<name>.panel.html; next mount of <name> renders from the artifact. Connected clients receive panel:catalog-changed SSE so already-mounted panels refresh. ' +
+    'authorDelete = remove a disk artifact. Code-shipped panels of the same name become active again (artifact overrides code while present).',
   ),
   sessionId: z.string().optional().describe(
     'Required for act/probe/screenshot/wait/close. Returned by open.',
@@ -222,6 +227,19 @@ export const uiInputSchema = {
   })).optional().describe(
     'state only — for op=set: cookie objects written via browser context.',
   ),
+  // authoring actions (artifact panels — Phase 6)
+  name: z.string().optional().describe(
+    'author* only — artifact panel name (kebab-case, no .panel.html suffix).',
+  ),
+  html: z.string().optional().describe(
+    'authorCommit only — full HTML source of the artifact. May use data-bind-each, data-bind-text, data-bind-attr + {path} tokens against runtime config.',
+  ),
+  projectDir: z.string().optional().describe(
+    'author* / mount only — explicit project directory. Defaults to the sidecar\'s active project (.reframe/project.json-bearing dir).',
+  ),
+  keepOnFailure: z.boolean().optional().describe(
+    'authorCommit only — when true, keep the artifact on disk even if the dry-run render fails. Default false: bad HTML rolls back so the registry never carries a broken panel.',
+  ),
 };
 
 type StepDef = z.infer<typeof stepSchema>;
@@ -229,7 +247,8 @@ type StepDef = z.infer<typeof stepSchema>;
 type UiInput = {
   action: 'open' | 'act' | 'probe' | 'screenshot' | 'wait' | 'close' | 'list'
         | 'setViewport' | 'state' | 'reload' | 'scene'
-        | 'mount' | 'unmount';
+        | 'mount' | 'unmount'
+        | 'authorList' | 'authorRead' | 'authorCommit' | 'authorDelete';
   sessionId?: string;
   path?: string;
   viewport?: { width: number; height: number };
@@ -257,6 +276,14 @@ type UiInput = {
   slot?: string;
   /** mount — config passed to the panel composer. */
   config?: Record<string, unknown>;
+  /** authorCommit / authorRead / authorDelete — artifact name (no .panel.html suffix). */
+  name?: string;
+  /** authorCommit — full HTML source of the artifact. */
+  html?: string;
+  /** author* — project directory. Defaults to the session's active project. */
+  projectDir?: string;
+  /** authorCommit — when true and rendering fails, keep the file on disk anyway (default false = rollback). */
+  keepOnFailure?: boolean;
 };
 
 // ─── Handler ─────────────────────────────────────────────────
@@ -277,6 +304,10 @@ export async function handleUi(input: UiInput) {
       case 'scene':       return await doScene(input);
       case 'mount':       return await doMount(input);
       case 'unmount':     return await doUnmount(input);
+      case 'authorList':    return await doAuthorList(input);
+      case 'authorRead':    return await doAuthorRead(input);
+      case 'authorCommit':  return await doAuthorCommit(input);
+      case 'authorDelete':  return await doAuthorDelete(input);
     }
   } catch (e: any) {
     return text(`reframe_ui ${input.action} ERROR: ${e?.message ?? e}`);
@@ -454,6 +485,129 @@ async function doUnmount(input: UiInput) {
   } catch (e: any) {
     return text(`unmount FAILED: ${e?.message ?? e}`);
   }
+}
+
+// ─── Panel artifact authoring (Phase 6) ─────────────────────
+//
+// These actions manage disk-backed panel sources (.reframe/ui/<name>.panel.html).
+// They share one tool with browser automation on purpose: authoring a
+// panel and then QA'ing it via Playwright is the same loop (write →
+// mount → screenshot → iterate) and should not be split across two
+// tool names the agent has to juggle.
+
+function resolveProjectDirOr(input: UiInput): string {
+  if (input.projectDir) return input.projectDir;
+  // Lazy-require to avoid circular import (project.ts imports from many core modules).
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { getProjectDir } = require('./project.js');
+  const dir = getProjectDir();
+  if (dir) return dir;
+  throw new Error('No active project — pass projectDir or run reframe_project init first.');
+}
+
+async function doAuthorList(input: UiInput) {
+  const projectDir = resolveProjectDirOr(input);
+  const { loadPanelArtifacts, listAllPanels } = await import('../platform/panel-registry.js');
+  loadPanelArtifacts(projectDir);
+  const { code, artifact } = listAllPanels(projectDir);
+  const lines = [
+    `Panels available in ${projectDir}:`,
+    '',
+    `  Artifacts (disk, hot-reloadable) — ${artifact.length}:`,
+    ...(artifact.length === 0 ? ['    (none)'] : artifact.map(n => `    · ${n}   .reframe/ui/${n}.panel.html`)),
+    '',
+    `  Code-shipped — ${code.length}:`,
+    ...code.map(n => `    · ${n}`),
+    '',
+    'Note: on a name clash, artifact overrides code.',
+  ];
+  return text(lines.join('\n'));
+}
+
+async function doAuthorRead(input: UiInput) {
+  const projectDir = resolveProjectDirOr(input);
+  const name = input.name;
+  if (!name) return text('authorRead: name required');
+  const { loadPanelArtifacts, getArtifactSource } = await import('../platform/panel-registry.js');
+  loadPanelArtifacts(projectDir);
+  const html = getArtifactSource(projectDir, name);
+  if (!html) return text(`authorRead: no artifact named "${name}" in ${projectDir}/.reframe/ui/`);
+  return text(`# ${name}.panel.html (${html.length} bytes)\n\n${html}`);
+}
+
+async function doAuthorCommit(input: UiInput) {
+  const projectDir = resolveProjectDirOr(input);
+  const name = input.name;
+  const html = input.html;
+  if (!name) return text('authorCommit: name required');
+  if (!html) return text('authorCommit: html required');
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) {
+    return text(`authorCommit: name must be kebab-case [a-z0-9-], got "${name}"`);
+  }
+  const {
+    writeArtifact, deleteArtifact, renderPanelFromArtifact,
+  } = await import('../platform/panel-registry.js');
+
+  // Preserve the pre-commit source so we can roll back on render failure.
+  const { getArtifactSource, loadPanelArtifacts } = await import('../platform/panel-registry.js');
+  loadPanelArtifacts(projectDir);
+  const priorHtml = getArtifactSource(projectDir, name);
+
+  const full = writeArtifact(projectDir, name, html);
+
+  // Dry-run render with empty config — proves the bindings parse and the
+  // resulting HTML imports cleanly. An artifact that renders with `{}` is
+  // a safe baseline; more elaborate configs can still fail per-call and
+  // surface at mount time with a clear error.
+  try {
+    const rendered = await renderPanelFromArtifact(projectDir, name, {});
+    // Broadcast catalog change so any client with this panel open refreshes.
+    try {
+      const { emitProjectEvent } = await import('../events.js');
+      emitProjectEvent({
+        type: 'panel:catalog-changed',
+        kind: priorHtml === undefined ? 'add' : 'change',
+        name,
+        projectDir,
+      } as any);
+    } catch { /* non-fatal */ }
+    return text([
+      `authorCommit OK: ${full}`,
+      `  bytes: ${html.length}`,
+      `  dry-run render: nodeCount=${rendered.nodeCount}, htmlBytes=${rendered.html.length}`,
+      `  next mount of "${name}" will use this artifact.`,
+    ].join('\n'));
+  } catch (e: any) {
+    if (!input.keepOnFailure) {
+      // Roll back to whatever the registry had before (or delete the fresh file).
+      if (priorHtml !== undefined) {
+        writeArtifact(projectDir, name, priorHtml);
+      } else {
+        deleteArtifact(projectDir, name);
+      }
+      return text(`authorCommit FAILED (rolled back): ${e?.message ?? e}`);
+    }
+    return text(`authorCommit FAILED (kept on disk per keepOnFailure=true): ${e?.message ?? e}`);
+  }
+}
+
+async function doAuthorDelete(input: UiInput) {
+  const projectDir = resolveProjectDirOr(input);
+  const name = input.name;
+  if (!name) return text('authorDelete: name required');
+  const { deleteArtifact } = await import('../platform/panel-registry.js');
+  const removed = deleteArtifact(projectDir, name);
+  if (!removed) return text(`authorDelete: no artifact named "${name}"`);
+  try {
+    const { emitProjectEvent } = await import('../events.js');
+    emitProjectEvent({
+      type: 'panel:catalog-changed',
+      kind: 'unlink',
+      name,
+      projectDir,
+    } as any);
+  } catch { /* non-fatal */ }
+  return text(`authorDelete OK: ${name} removed. Code-shipped panel of same name (if any) is now active again.`);
 }
 
 async function doSetViewport(input: UiInput) {

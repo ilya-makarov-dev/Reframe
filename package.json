@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "start": "node packages/mcp/dist/mcp/src/http-server.js",
-    "dev": "npx tsx watch --clear-screen=false packages/mcp/src/tests/start-sidecar.ts",
+    "dev": "cross-env REFRAME_HTTP_FORCE=1 npx tsx watch --clear-screen=false packages/mcp/src/tests/start-sidecar.ts",
     "dev:ui": "node scripts/copy-platform-assets.mjs && npx chokidar-cli \"packages/mcp/src/platform/ui/**/*.js\" \"packages/mcp/src/platform/platform-ui.css\" -c \"node scripts/copy-platform-assets.mjs\"",
     "build": "npm run build:core && npm run build:cli && npm run build:mcp && npm run build:editor && npm run build:editor-bundle",
     "build:editor": "npm run build -w packages/editor",
@@ -32,11 +32,14 @@
     "node": ">=18"
   },
   "devDependencies": {
+    "cross-env": "^10.1.0",
     "playwright": "^1.59.1",
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "@types/js-yaml": "^4.0.9",
     "flowbite": "^4.0.1",
+    "js-yaml": "^4.1.1",
     "sortablejs": "^1.15.7",
     "tw-to-css": "^0.0.12"
   }

@@ -16,8 +16,8 @@
 // Usage:
 //   npx tsx packages/mcp/src/tests/agent-qa/runner.ts <scenario.md>
 
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { resolve, dirname, join } from 'path';
 
 type StepOk = { ok: true; step: string; elapsed: number; note?: string };
 type StepFail = { ok: false; step: string; elapsed: number; reason: string };
@@ -30,6 +30,8 @@ interface ScenarioContext {
   lastBody?: any;
   /** Last HTML snapshot from fetch. */
   lastHtml?: string;
+  /** Artifacts written by the scenario — cleaned up at end on PASS. */
+  authoredArtifacts?: string[];
 }
 
 async function fetchJson(url: string, opts: RequestInit = {}): Promise<any> {
@@ -117,6 +119,57 @@ function doAssertRole(ctx: ScenarioContext, role: string): StepResult {
   return { ok: false, step: `assert-role ${role}`, elapsed: 0, reason: 'intent role not found' };
 }
 
+// ─── Artifact authoring steps (Phase 6.4) ───────────────────────
+//
+// `author-write <name> <fixture-file>` — resolves the fixture relative
+// to the scenario file, copies its bytes into `<projectDir>/.reframe/ui/
+// <name>.panel.html`, and waits briefly so the chokidar watcher can
+// refresh the registry before the next step fires.
+//
+// `author-delete <name>` — unlinks the artifact. If not present, no-op.
+
+function projectUiDir(): string {
+  const root = process.env.REFRAME_QA_PROJECT_DIR ?? process.cwd();
+  return join(root, '.reframe', 'ui');
+}
+
+async function doAuthorWrite(
+  ctx: ScenarioContext,
+  args: string,
+  scenarioDir: string,
+): Promise<StepResult> {
+  const t0 = performance.now();
+  const parts = args.trim().split(/\s+/);
+  const name = parts[0];
+  const fixture = parts[1];
+  if (!name || !fixture) {
+    return { ok: false, step: `author-write ${args}`, elapsed: 0, reason: 'usage: author-write <name> <fixture-relative-path>' };
+  }
+  const fixturePath = resolve(scenarioDir, fixture);
+  let html: string;
+  try { html = readFileSync(fixturePath, 'utf-8'); }
+  catch (e: any) {
+    return { ok: false, step: `author-write ${args}`, elapsed: 0, reason: `fixture not readable: ${fixturePath}` };
+  }
+  const dir = projectUiDir();
+  mkdirSync(dir, { recursive: true });
+  const full = join(dir, `${name}.panel.html`);
+  writeFileSync(full, html, 'utf-8');
+  ctx.authoredArtifacts = ctx.authoredArtifacts ?? [];
+  ctx.authoredArtifacts.push(full);
+  // Let chokidar settle + sidecar refresh cache.
+  await new Promise(r => setTimeout(r, 250));
+  const elapsed = performance.now() - t0;
+  return { ok: true, step: `author-write ${args}`, elapsed, note: `${html.length} bytes → ${full}` };
+}
+
+function doAuthorDelete(ctx: ScenarioContext, name: string): StepResult {
+  const full = join(projectUiDir(), `${name.trim()}.panel.html`);
+  if (!existsSync(full)) return { ok: true, step: `author-delete ${name}`, elapsed: 0, note: 'nothing to remove' };
+  unlinkSync(full);
+  return { ok: true, step: `author-delete ${name}`, elapsed: 0 };
+}
+
 function doAssertPanelMounted(ctx: ScenarioContext, panel: string): StepResult {
   if (!ctx.lastBody) return { ok: false, step: `mounted ${panel}`, elapsed: 0, reason: 'no last body' };
   if (ctx.lastBody.panel === panel.trim()) return { ok: true, step: `mounted ${panel}`, elapsed: 0 };
@@ -137,7 +190,7 @@ function parseScenario(md: string): Scenario {
   for (const line of lines) {
     const title = line.match(/^#\s+(.+)$/);
     if (title) { name = title[1].trim(); continue; }
-    const step = line.match(/^-\s+(navigate|mount|gesture|assert|assert-role|mounted)\s+(.+)$/);
+    const step = line.match(/^-\s+(navigate|mount|gesture|assert|assert-role|mounted|author-write|author-delete)\s+(.+)$/);
     if (step) steps.push({ kind: step[1], arg: step[2].trim(), raw: line });
   }
   return { name, steps };
@@ -148,6 +201,7 @@ function parseScenario(md: string): Scenario {
 async function run(scenarioPath: string) {
   const md = readFileSync(scenarioPath, 'utf-8');
   const scenario = parseScenario(md);
+  const scenarioDir = dirname(scenarioPath);
   const ctx: ScenarioContext = {
     baseUrl: process.env.REFRAME_QA_URL ?? 'http://localhost:4100',
   };
@@ -162,13 +216,15 @@ async function run(scenarioPath: string) {
   for (const step of scenario.steps) {
     let res: StepResult;
     switch (step.kind) {
-      case 'navigate':      res = await doNavigate(ctx, step.arg); break;
-      case 'mount':         res = await doMount(ctx, step.arg); break;
-      case 'gesture':       res = await doGesture(ctx, step.arg); break;
-      case 'assert':        res = doAssertPath(ctx, step.arg); break;
-      case 'assert-role':   res = doAssertRole(ctx, step.arg); break;
-      case 'mounted':       res = doAssertPanelMounted(ctx, step.arg); break;
-      default:              res = { ok: false, step: step.raw, elapsed: 0, reason: `unknown step kind ${step.kind}` };
+      case 'navigate':       res = await doNavigate(ctx, step.arg); break;
+      case 'mount':          res = await doMount(ctx, step.arg); break;
+      case 'gesture':        res = await doGesture(ctx, step.arg); break;
+      case 'assert':         res = doAssertPath(ctx, step.arg); break;
+      case 'assert-role':    res = doAssertRole(ctx, step.arg); break;
+      case 'mounted':        res = doAssertPanelMounted(ctx, step.arg); break;
+      case 'author-write':   res = await doAuthorWrite(ctx, step.arg, scenarioDir); break;
+      case 'author-delete':  res = doAuthorDelete(ctx, step.arg); break;
+      default:               res = { ok: false, step: step.raw, elapsed: 0, reason: `unknown step kind ${step.kind}` };
     }
     const mark = res.ok ? '🟢' : '🔴';
     const latency = res.elapsed > 0 ? `${res.elapsed.toFixed(2)}ms` : '';

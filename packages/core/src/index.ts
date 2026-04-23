@@ -522,6 +522,17 @@ export {
   type BuildGridOpts,
   type BuildTextOpts,
 } from './panels/helpers';
+
+// ── Panel artifacts (Phase 6) — HTML-on-disk panels ──
+export {
+  resolveBindings,
+  interpolateString,
+  compilePanel,
+  type PanelConfig,
+  type CompilePanelOptions,
+  type CompilePanelResult,
+} from './ui-artifacts';
+
 export { StandaloneHost } from './adapters/standalone/adapter';
 export { StandaloneNode } from './adapters/standalone/node';
 
@@ -544,3 +555,30 @@ export { initYoga, setLayoutBackend, getLayoutBackend, type LayoutBackend } from
 // ── Config types (CLI logger interfaces) ──
 export type { BuildLogger } from './config/build';
 export type { TestLogger } from './config/test';
+
+// ── Phase 11: Adapter contract + Workflow runtime (BBX-inspired) ──
+export {
+  registerAdapter,
+  getAdapter,
+  listAdapters,
+  clearAdapters,
+  invokeAdapter,
+  validateInputs,
+  formatAdapter,
+} from './adapter';
+export type {
+  AdapterKind,
+  AdapterSchema,
+  AdapterSchemaField,
+  AdapterContext,
+  AdapterHandler,
+  AdapterResult,
+  AdapterRegistration,
+} from './adapter';
+export { parseWorkflowYaml, readWorkflow, runWorkflow } from './workflow';
+export type {
+  WorkflowDef,
+  WorkflowStep,
+  WorkflowRunResult,
+  StepRunResult,
+} from './workflow';

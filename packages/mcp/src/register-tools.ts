@@ -244,6 +244,18 @@ Actions:
 
 - list: enumerate active sessions with age + idle time. Use to recover a sessionId you lost, or to check whether a previous session is still warm.
 
+Panel authoring (Phase 6 — Platform UI as artifacts):
+
+- authorList: enumerate both disk artifacts (.reframe/ui/<name>.panel.html) and code-shipped panels. Panels authored on disk override code-shipped ones of the same name.
+
+- authorRead: return the raw HTML source of a disk artifact. Use before authorCommit to avoid clobbering prior work on the same name.
+
+- authorCommit: persist HTML to .reframe/ui/<name>.panel.html and dry-run render it to prove bindings parse. On parse failure the file is rolled back (unless keepOnFailure=true). HTML may use data-bind-each / data-bind-text / data-bind-attr + {path} tokens for per-mount config interpolation. The next mount of <name> picks up the new source; connected clients receive a panel:catalog-changed SSE.
+
+- authorDelete: remove a disk artifact. If a code-shipped panel of the same name exists, it becomes active again.
+
+Panel authoring is the mechanism that makes new UI shippable WITHOUT a code change — agents and users can drop an HTML panel into the project, mount it, iterate on it, all without rebuilding core. Mount a newly authored panel via action=mount right after authorCommit.
+
 Local convenience: paths starting with '/' resolve against the local sidecar (default http://localhost:4100, override via REFRAME_HTTP_PORT / REFRAME_HTTP_HOST env). Absolute URLs are passed through unchanged.`,
     uiInputSchema,
     handleUi,

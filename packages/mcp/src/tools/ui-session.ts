@@ -241,16 +241,17 @@ function pushBounded<T>(buf: T[], item: T): void {
 
 function ensureGc(): void {
   if (gcTimer) return;
-  gcTimer = setInterval(() => {
+  const handle = setInterval(() => {
     const now = Date.now();
     const expired: string[] = [];
     for (const [id, s] of sessions) {
       if (now - s.lastActiveAt > IDLE_TIMEOUT_MS) expired.push(id);
     }
     for (const id of expired) { closeSession(id).catch(() => {}); }
-  }, 60_000);
+  }, 60_000) as unknown as NodeJS.Timeout;
+  gcTimer = handle;
   // Don't keep the Node process alive just for the GC ticker.
-  if (gcTimer.unref) gcTimer.unref();
+  if (typeof handle.unref === 'function') handle.unref();
 }
 
 export function formatLogs(logs: DrainedLogs): string {

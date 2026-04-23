@@ -270,6 +270,11 @@ function invalidatePreviewCacheForScene(sceneId: string): void {
   }
 }
 
+// Side-effect import — registers all built-in adapters with the
+// @reframe/core adapter registry on first touch of this module.
+// Safe to call many times; the registry is idempotent.
+import './platform/adapter-bindings.js';
+
 export function buildPlatformContext(): PlatformContext {
   const now = Date.now();
   if (platformContextCache && now - platformContextCache.builtAt < PLATFORM_CTX_TTL_MS) {
@@ -327,6 +332,20 @@ export function buildPlatformContext(): PlatformContext {
     getAuditScore: () => undefined,
   };
   platformContextCache = { ctx, builtAt: now };
+
+  // Phase 6.2 — disk-backed panel artifacts. Idempotent; first call loads
+  // .reframe/ui/*.panel.html into the registry and starts a watcher that
+  // emits panel:catalog-changed SSE on disk changes.
+  if (dir) {
+    void (async () => {
+      try {
+        const { ensurePanelArtifactsInitialized } = await import('./platform/panel-registry.js');
+        const { emitProjectEvent } = await import('./events.js');
+        await ensurePanelArtifactsInitialized(dir!, (event) => emitProjectEvent(event as any));
+      } catch { /* artifacts are optional — sidecar stays up either way */ }
+    })();
+  }
+
   return ctx;
 }
 
@@ -933,6 +952,35 @@ export function startHttpSidecar(port = 4100): void {
   const isWildcard = listenHost === '::' || listenHost === '0.0.0.0';
   const displayHost = isWildcard ? 'localhost' : listenHost;
 
+  // Coexistence check — if another reframe sidecar is already serving on
+  // this port, DON'T fight for it. Prior behavior killed the incumbent
+  // and took over, which produced the "two reframe processes ping-ponging
+  // on :4100" race whenever `npm run dev` and the Claude Code-spawned MCP
+  // stdio server both tried to bind. Healthy probe returns fast (<50ms
+  // in practice) and fails-open on timeout so a truly stuck port still
+  // triggers the takeover retry path below.
+  //
+  // Opt out via REFRAME_HTTP_FORCE=1 — `npm run dev` sets this so a
+  // developer explicitly running the dev sidecar always wins the port,
+  // evicting the stale MCP-spawned dist sidecar from before they ran
+  // npm run dev. Without the force, starting `npm run dev` AFTER
+  // Claude Code already spawned its stdio MCP would leave the user
+  // watching dist code instead of their live src edits.
+  const forceBind = process.env.REFRAME_HTTP_FORCE === '1';
+  if (forceBind) {
+    tryListen();
+  } else {
+    probeExistingSidecar(port).then((owned) => {
+      if (owned) {
+        process.stderr.write(
+          `reframe HTTP: sidecar already healthy on :${port} — skipping bind (stdio MCP only)\n`,
+        );
+        return;
+      }
+      tryListen();
+    });
+  }
+
   function tryListen(): void {
     httpServer.listen(port, listenHost, () => {
       process.stderr.write(
@@ -1007,7 +1055,35 @@ export function startHttpSidecar(port = 4100): void {
     }
   });
 
-  tryListen();
+  // tryListen() is kicked off inside the probeExistingSidecar() handler
+  // above once we've confirmed nobody else is already serving this port.
+}
+
+/**
+ * Probe the target port for an existing reframe sidecar. Returns true
+ * only when the port responds to `/health` with the reframe response
+ * shape — in that case the caller should NOT bind. Returns false on
+ * connection refused, non-reframe response, malformed JSON, or timeout;
+ * those land the caller in the existing EADDRINUSE/retry path so truly
+ * stuck occupants still get evicted.
+ */
+async function probeExistingSidecar(port: number): Promise<boolean> {
+  const host = httpListenHost() === '::' || httpListenHost() === '0.0.0.0' ? '127.0.0.1' : httpListenHost();
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 350);
+  try {
+    const res = await fetch(`http://${host}:${port}/health`, { signal: ctrl.signal });
+    if (!res.ok) return false;
+    const body = await res.json() as { status?: string; mode?: string };
+    // `/health` returns `{ status: 'ok', mode: 'sidecar', ... }` on a
+    // real reframe sidecar. Anything else = foreign occupant, let the
+    // takeover path handle it.
+    return body?.status === 'ok' && typeof body?.mode === 'string';
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 // ─── Standalone entry point ──────────────────────────────────

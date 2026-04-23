@@ -544,8 +544,9 @@ export function exportToHtml(
     }
     if (node.mountSlot) {
       attrs.push(`data-mount-slot="${escapeHtml(node.mountSlot.name)}"`);
-      if (node.mountSlot.accepts.length > 0) {
-        attrs.push(`data-mount-accepts="${escapeHtml(node.mountSlot.accepts.join(','))}"`);
+      const accepts = node.mountSlot.accepts;
+      if (accepts && accepts.length > 0) {
+        attrs.push(`data-mount-accepts="${escapeHtml(accepts.join(','))}"`);
       }
     }
 

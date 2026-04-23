@@ -2457,6 +2457,45 @@ function convertElement(
     (overrides as any).id = candidate;
   }
 
+  // Block A substrate import — the HTML exporter emits these attributes
+  // on interactive nodes (`data-gesture-click`, `data-intent-role`,
+  // `data-mount-slot`, `data-semantic-path`, `data-keybinding`,
+  // `data-focusable`). Without reading them back, round-trip loses
+  // agent-operability — which matters for panel artifacts (Phase 6)
+  // where the HTML IS the source of truth for interaction shape.
+  const a = el.attrs;
+  if (a['data-semantic-path']) (overrides as any).semanticPath = a['data-semantic-path'];
+  if (a['data-intent-role']) {
+    (overrides as any).intent = {
+      role: a['data-intent-role'],
+      purpose: a['data-intent-purpose'] || '',
+      editableBy: (a['data-intent-editable-by'] as any) || 'locked',
+    };
+  }
+  for (const [attr, key] of [
+    ['data-gesture-click', 'onClick'],
+    ['data-gesture-input', 'onInput'],
+  ] as const) {
+    if (a[attr]) {
+      try { (overrides as any)[key] = JSON.parse(a[attr]); }
+      catch { /* malformed gesture JSON — author bug, silently drop */ }
+    }
+  }
+  if (a['data-mount-slot']) {
+    const accepts = a['data-panel-accepts'];
+    (overrides as any).mountSlot = {
+      name: a['data-mount-slot'],
+      ...(accepts ? { accepts: accepts.split(',').map(s => s.trim()).filter(Boolean) } : {}),
+    };
+  }
+  if (a['data-keybinding']) (overrides as any).keybinding = a['data-keybinding'];
+  if (a['data-focusable'] === 'true' || a['data-focusable'] === '') {
+    (overrides as any).focusable = true;
+  }
+  if (a['data-drag-handle'] === 'true' || a['data-drag-handle'] === '') {
+    (overrides as any).dragHandle = true;
+  }
+
   const node = ctx.graph.createNode(nodeType, parentId, overrides);
 
   // Stash the deferred offsets on the raw graph node so

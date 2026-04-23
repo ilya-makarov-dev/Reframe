@@ -189,6 +189,70 @@ Same steps 1-3. No page renderer needed.
 - **`reframe_ui action=mount`** — compose + SSE broadcast. The agent-UI way to trigger a panel without going through the chat.
 - **`reframe_ui action=act`** — click + type + press a sequence of steps. Use to verify gestures roundtrip end-to-end.
 
+## Authoring artifacts vs composing in code (Phase 6)
+
+Panels now come in two forms. **Same substrate, same pipeline, different authoring surface.** Pick the right one per task; they coexist in the same registry.
+
+| | Code composer | Disk artifact |
+|---|---|---|
+| **Where** | `packages/core/src/panels/<name>.ts` | `<projectDir>/.reframe/ui/<name>.panel.html` |
+| **Output** | `SceneGraph` returned from a function | HTML + `data-bind-*` bindings |
+| **Hot-reload** | Needs rebuild + MCP reconnect | File write → chokidar → SSE `panel:catalog-changed` → remount |
+| **When to reach for it** | Ship-in-core defaults used by every project; anything perf-critical; panels that need typed config objects and complex per-field logic | Everything else: per-project customizations, agent-authored one-offs, fast iteration, variants for a specific design session |
+| **Override** | Used as fallback | Wins on name clash — drops into `<projectDir>/.reframe/ui/dashboard.panel.html` to override the ship-in-core `dashboard` |
+
+**Rule of thumb:** if the panel ships to every user of `@reframe/core`, write a composer. If it exists because *this* project or *this* session needs it, write an artifact. Agents authoring new panels default to artifacts; a composer is worth promoting only after a panel earns its place across multiple projects.
+
+### Artifact format — three binding attributes, one interpolation rule
+
+```html
+<div style="width:320px; padding:16px"
+     data-intent-role="version-history/root"
+     data-mount-slot="right-panel"
+     data-panel-accepts="version-history">
+  <h3 data-bind-text="title">Title fallback</h3>
+
+  <div data-bind-each="versions">
+    <div data-intent-role="version-history/entry"
+         data-bind-attr="data-version-id:id;data-author:author"
+         data-gesture-click='{"tool":"reframe_edit","args":{"op":"restoreVersion","versionId":"{id}"}}'>
+      <span data-bind-text="label">Version N</span>
+      <span data-bind-text="timestamp">time ago</span>
+    </div>
+  </div>
+</div>
+```
+
+- **`data-bind-each="<path>"`** repeats the element for every item in `config.<path>`. Nested bindings inside resolve against the row. Use `data-bind-each-as="row"` to rename the scope variable (default is `item` + the row's own object fields merged flat).
+- **`data-bind-text="<path>"`** replaces `textContent`. Drops any child nodes (they were authoring placeholders).
+- **`data-bind-attr="attrA:pathA;attrB:pathB"`** sets multiple attributes from config.
+- **`{path}` interpolation** works in every attribute value — including JSON gesture args. Conservative syntax (`{alpha.numeric_dash[0]}` only) so JSON braces like `{"tool":...}` don't get parsed as tokens.
+
+`.` references the current row scope (`{.}` inside `data-bind-each="items"` on a string array resolves to the current string).
+
+Missing paths silently resolve to empty. Empty arrays render zero rows — that's valid, not a crash.
+
+### Canonical flow: intent → draft → commit → mount → iterate
+
+1. **Intent.** User says "show me version history with restore buttons." Identify the role path, mount slot, gesture tool.
+2. **Draft HTML.** Write the artifact. Respect the same taste rules as scene authoring (no pure black, max one high-sat accent, proper sizing). Include at least one working `data-bind-each` + `data-bind-text` so the template-vs-data split is obvious.
+3. **Commit via `reframe_ui action=authorCommit name=<kebab> html=<string>`.** The tool writes to disk AND runs a dry-run render with empty config. If parse fails, it rolls back (unless `keepOnFailure=true`). A successful commit reports `nodeCount` — non-trivial number means the bindings expanded as expected.
+4. **Mount via `reframe_ui action=mount panel=<kebab> config={...}`.** Verify the panel renders in the browser with actual data. Use `reframe_ui action=probe` to confirm `data-intent-role` and `data-mount-slot` survived.
+5. **Iterate.** Re-commit the HTML as needed; the watcher + SSE remount open clients automatically. No sidecar restart, no MCP reconnect.
+6. **Delete when done** (for throwaway panels): `reframe_ui action=authorDelete name=<kebab>`. If a code-shipped panel of the same name exists, it becomes active again.
+
+### Artifact-specific smell table
+
+| Smell | Why it's a bug | Fix |
+|---|---|---|
+| **Config shape lives only in the agent's head** | Next session re-opens the panel and guesses field names. | Put a comment block at the top of the artifact listing every `data-bind-*` path the panel expects. |
+| **`{value}` substitution inside JSON** | Agents confuse `{value}` (runtime gesture placeholder) with `{config.path}` (author-time binding). | Binding tokens only resolve against the author's config. Use `{path}` from the runtime substitutions for gesture-time values. |
+| **Hard-coded brand colors in an artifact** | Panel stops tracking `token:changed` SSE repaints. | Use CSS vars — `color: var(--color-text)` — just like the exporter emits for token-bound scenes. |
+| **Artifact authored without any `data-intent-role`** | Agents can't address it with `semanticPath`, breaking QA scenarios. | Every interactive + labelled element gets an intent role. Chrome containers at minimum need one on the root. |
+| **Overriding a code panel by accident** | Dropping `dashboard.panel.html` into `.reframe/ui/` invisibly overrides the ship-in-core dashboard. | `reframe_ui action=authorList` shows "artifact wins" annotations. If you want additive, pick a different name. |
+| **Multiple `data-bind-each` siblings at the same level** | Expansion is well-defined but visual order becomes load-bearing on a template that looks innocent. | When in doubt, wrap each `each` in its own semantic container. |
+| **Forgetting `data-panel-accepts`** | Shell slot may reject mounting a panel of the wrong kind. | Declare `data-panel-accepts="<kind>"` on the root when the panel is scoped to a specific shell slot kind. |
+
 ## When NOT to use this skill
 
 - Designing a user scene → `reframe-design`

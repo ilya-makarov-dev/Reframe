@@ -99,6 +99,30 @@ export async function handlePlatformRequest(
     res.end(PLATFORM_JS);
     return true;
   }
+  // Phase 8.0 — individual ui/*.js file serving. Feed + catalogs pull
+  // only the agent-runtime dispatcher, not the legacy widget bundle
+  // (which includes the Edit Mode floater scoped to the old editor).
+  if (pathname.startsWith('/platform/ui/') && pathname.endsWith('.js') && req.method === 'GET') {
+    try {
+      const { readFileSync, existsSync } = await import('fs');
+      const { join, resolve: resolvePath } = await import('path');
+      const fname = pathname.slice('/platform/ui/'.length);
+      // Guard: only allow safe filenames to avoid path traversal.
+      if (!/^[a-z0-9][a-z0-9._-]{0,120}\.js$/i.test(fname)) {
+        send(res, 404, 'text/plain', 'not allowed');
+        return true;
+      }
+      const srcPath = resolvePath(join(process.cwd(), 'packages', 'mcp', 'src', 'platform', 'ui', fname));
+      if (existsSync(srcPath)) {
+        res.writeHead(200, {
+          'Content-Type': 'application/javascript; charset=utf-8',
+          'Cache-Control': STATIC_CACHE,
+        });
+        res.end(readFileSync(srcPath));
+        return true;
+      }
+    } catch { /* fall through */ }
+  }
   // Tiny theme-init script — reads localStorage and applies data-theme
   // to <html> BEFORE body renders, preventing a flash of wrong palette.
   // Served as an external file (not inlined) so strict CSP doesn't
@@ -325,6 +349,73 @@ export default async function(o){
 
   // ── Pages (compiled scene → hydrate, fallback → TypeScript renderer) ──
   const forceFallback = url.searchParams.get('fallback') === '1';
+
+  // Phase 8.0 — Feed is THE entry point of reframe. MJ-shape composite:
+  // hero-prompt + jobs-ticker + heterogeneous card grid. No sidebar,
+  // no threads, no dashboard-style nav. Everything the user made is
+  // in one global feed. Old entry points (dashboard, thread-space)
+  // remain reachable via `?fallback=1` for debugging.
+
+  // ── Shell dispatch ─────────────────────────────────────────
+  //
+  // The shell is a REPLACEABLE surface layer over the kernel. Which one
+  // runs is declared in `.reframe/project.json` → `shell` field. If the
+  // manifest is absent or the shell name is unknown, we fall back to
+  // `studio` — the MJ-shape feed + catalogs + drilldown.
+  //
+  // Strip `/platform` from the pathname before handing it to the shell
+  // so shell code reasons in its own coordinate space ('/', '/brands',
+  // '/card/s1') rather than in reframe-platform-scoped urls.
+  if (pathname === '/platform' || pathname === '/platform/' || pathname.startsWith('/platform/')) {
+    if (!forceFallback) {
+      const { getShell, DEFAULT_SHELL } = await import('./shell-registry.js');
+      // Load shell-registry side-effects (registerShell calls) before
+      // resolving. The import above runs the studio registration.
+      let shellName = DEFAULT_SHELL;
+      try {
+        const { readManifest } = await import('./project-manifest.js');
+        const m = ctx.projectDir ? readManifest(ctx.projectDir) : null;
+        if (m?.shell) shellName = m.shell;
+      } catch { /* manifest optional */ }
+
+      let shell = getShell(shellName);
+      if (!shell) {
+        shell = getShell(DEFAULT_SHELL);
+        if (shellName !== DEFAULT_SHELL) {
+          process.stderr.write(`[reframe] shell "${shellName}" not registered — falling back to "${DEFAULT_SHELL}"\n`);
+        }
+      }
+      if (shell) {
+        const subpath = pathname === '/platform' ? '/' : pathname.slice('/platform'.length) || '/';
+        if (shell.match(subpath)) {
+          try {
+            const result = await shell.dispatch({ ctx, subpath, url, req });
+            send(res, result.status ?? 200, 'text/html', result.html);
+            return true;
+          } catch (e: any) {
+            process.stderr.write(`[reframe] shell "${shell.name}" dispatch error: ${e?.message ?? e}\n`);
+            // fall through — legacy routes below may still claim the path
+          }
+        }
+      }
+    }
+  }
+
+  // Legacy thread-space entry (Phase 7.0) — still reachable for a beat
+  // but no longer the default. Remove once feed is proven in the wild.
+  if (
+    pathname === '/platform/thread' ||
+    pathname === '/platform/thread/' ||
+    pathname.startsWith('/platform/thread/')
+  ) {
+    const threadId = pathname === '/platform/thread' || pathname === '/platform/thread/'
+      ? 'main'
+      : pathname.slice('/platform/thread/'.length);
+    const { renderThreadPage } = await import('./pages/thread.js');
+    const html = await renderThreadPage(ctx, threadId);
+    send(res, 200, 'text/html', html);
+    return true;
+  }
 
   if (pathname === '/platform' || pathname === '/platform/') {
     // Self-heal: re-sync scenes from disk before rendering. The

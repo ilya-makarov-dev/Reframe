@@ -1,0 +1,47 @@
+# Example workflow — compile → inspect → export as React.
+#
+# Demonstrates the `.rfx.yml` format + adapter system + dependency
+# resolution via `{{step-id.output.*}}` refs. Run with:
+#
+#   reframe run examples/ship-as-react.rfx.yml --file src/landing.html
+
+reframe: "1"
+id: ship-as-react
+name: Ship a compiled scene as React TSX
+version: "1.0"
+
+inputs:
+  file:
+    type: string
+    description: HTML source to compile
+    default: "src/landing.html"
+
+steps:
+  - id: compile
+    adapter: reframe.compile
+    name: Compile HTML to scene
+    inputs:
+      file: "{{inputs.file}}"
+      name: ship-demo
+
+  - id: inspect
+    adapter: reframe.inspect
+    name: Audit the freshly-compiled scene
+    inputs:
+      sceneId: "{{compile.output.sceneId}}"
+      aesthetic: true
+    needs: [compile]
+    continueOnError: true
+
+  - id: export
+    adapter: reframe.export
+    name: Export as React .tsx
+    inputs:
+      sceneId: "{{compile.output.sceneId}}"
+      format: react
+    needs: [compile]
+
+outputs:
+  scene: "{{compile.output.sceneId}}"
+  audit: "{{inspect.output.raw}}"
+  tsx: "{{export.output.path}}"

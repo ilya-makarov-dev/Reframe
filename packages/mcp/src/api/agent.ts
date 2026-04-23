@@ -89,7 +89,7 @@ function openSse(res: ServerResponse): NodeJS.Timeout {
     try { res.write(`: ping ${Date.now()}\n\n`); }
     catch { /* writable stream torn down — ignore */ }
   }, 15_000);
-  return heartbeat;
+  return heartbeat as unknown as NodeJS.Timeout;
 }
 
 function sendSseEvent(res: ServerResponse, eventName: string, data: unknown): void {

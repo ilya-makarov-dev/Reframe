@@ -23,6 +23,10 @@ import type { PlatformContext } from '../router.js';
 import { emitProjectEvent } from '../../events.js';
 import { renderPanel, listRegisteredPanels } from '../panels.js';
 import {
+  renderPanelAsync,
+  listAllPanels,
+} from '../panel-registry.js';
+import {
   registerBrand,
   loadBrandFromProject,
 } from '../../../../core/src/project/io.js';
@@ -228,7 +232,7 @@ TOOL_HANDLERS.set('reframe_ui', async (args, _body, ctx) => {
     const config = (args.config ?? {}) as Record<string, unknown>;
     if (!panelName) return { ok: false, tool: 'reframe_ui', handled: true, note: 'panel name required' };
     try {
-      const rendered = renderPanel(panelName, config, { projectDir: ctx.projectDir ?? undefined });
+      const rendered = await renderPanelAsync(panelName, config, { projectDir: ctx.projectDir ?? undefined });
       emitProjectEvent({
         type: 'panel:mount',
         slot,
@@ -387,7 +391,7 @@ export async function handleAgentRuntimeApi(
     }
     try {
       const t0 = performance.now();
-      const rendered = renderPanel(panelName, config, { projectDir: ctx.projectDir ?? undefined });
+      const rendered = await renderPanelAsync(panelName, config, { projectDir: ctx.projectDir ?? undefined });
       const composeMs = performance.now() - t0;
       emitProjectEvent({
         type: 'panel:mount',
