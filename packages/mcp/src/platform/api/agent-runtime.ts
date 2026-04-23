@@ -26,6 +26,15 @@ import {
   registerBrand,
   loadBrandFromProject,
 } from '../../../../core/src/project/io.js';
+import { getScene } from '../../store.js';
+// Import from source (not @reframe/core) — store.ts references
+// ../../core/src/engine/scene-graph.js directly, so the SceneGraph type
+// in StoredScene is the SOURCE version. Importing findNodeByPath /
+// ensureSceneLayout via @reframe/core (dist) creates a second type identity
+// that TS rejects as incompatible (separate private 'listeners' field on
+// Emitter). Keeping the import path aligned dodges the duplicate-type trap.
+import { findNodeByPath } from '../../../../core/src/engine/semantic-path.js';
+import { ensureSceneLayout } from '../../../../core/src/engine/layout.js';
 
 // ─── HTTP helpers ────────────────────────────────────────────────
 
@@ -257,15 +266,81 @@ TOOL_HANDLERS.set('reframe_edit', async (args, body, ctx) => {
     if (sceneId) {
       emitProjectEvent({ type: 'scene:session-changed', sceneId, revision: Date.now() });
     }
-    // Auto-unmount the picker so the user sees the resulting scene —
-    // mirrors agent-UI "take the action, get out of the way" instinct.
     emitProjectEvent({ type: 'panel:unmount', slot: 'right-panel', panelName: 'variant-picker' });
     return { ok: true, tool: 'reframe_edit', handled: true, result: { op, sceneId, variantId, targetPath } };
   }
   if (op === 'setToken') {
     return brandSetTokenHandler(args, body, ctx);
   }
-  return { ok: true, tool: 'reframe_edit', handled: false, note: `reframe_edit op "${op}" not yet routable via HTTP bridge (Phase 3 target)` };
+
+  // Phase 3.2 — inspector-driven mutations. Real scene graph edits against
+  // the live MCP session store. sceneId resolves either by session id (s1,
+  // s2) or slug. targetPath is the stable semanticPath from the inspector.
+  const sceneId = String(args.sceneId ?? '');
+  const targetPath = String(args.targetPath ?? body.path ?? '');
+  if (op === 'rename' || op === 'clone' || op === 'delete' || op === 'setTokenBinding') {
+    if (!sceneId) return { ok: false, tool: 'reframe_edit', handled: true, note: 'sceneId required' };
+    if (!targetPath) return { ok: false, tool: 'reframe_edit', handled: true, note: 'targetPath required' };
+    const stored = getScene(sceneId);
+    if (!stored) return { ok: false, tool: 'reframe_edit', handled: true, note: `scene ${sceneId} not found` };
+    const target = findNodeByPath(stored.graph, targetPath);
+    if (!target) return { ok: false, tool: 'reframe_edit', handled: true, note: `node at ${targetPath} not found` };
+
+    if (op === 'rename') {
+      const name = String(args.name ?? body.value ?? '').trim();
+      if (!name) return { ok: false, tool: 'reframe_edit', handled: true, note: 'name required' };
+      stored.graph.updateNode(target.id, { name });
+      ensureSceneLayout(stored.graph, stored.rootId);
+      emitProjectEvent({ type: 'scene:session-changed', sceneId, revision: Date.now() });
+      return { ok: true, tool: 'reframe_edit', handled: true, result: { op, sceneId, targetPath, name } };
+    }
+
+    if (op === 'setTokenBinding') {
+      const field = String(args.field ?? '');
+      const role = String(args.role ?? '');
+      const validFields = new Set(['fill', 'stroke', 'fontSize', 'fontFamily', 'cornerRadius']);
+      if (!validFields.has(field)) {
+        return { ok: false, tool: 'reframe_edit', handled: true, note: `invalid field ${field}` };
+      }
+      if (!role) return { ok: false, tool: 'reframe_edit', handled: true, note: 'role required' };
+      const meta = { ...((target as any).meta ?? {}) };
+      meta.tokenBindings = { ...(meta.tokenBindings ?? {}), [field]: role };
+      stored.graph.updateNode(target.id, { meta } as any);
+      emitProjectEvent({ type: 'scene:session-changed', sceneId, revision: Date.now() });
+      return { ok: true, tool: 'reframe_edit', handled: true, result: { op, sceneId, targetPath, field, role } };
+    }
+
+    if (op === 'clone') {
+      // Clone as a sibling immediately after the target.
+      const parentId = (target as any).parentId as string | null;
+      if (!parentId) {
+        return { ok: false, tool: 'reframe_edit', handled: true, note: 'cannot clone root' };
+      }
+      const parent = stored.graph.getNode(parentId);
+      if (!parent) return { ok: false, tool: 'reframe_edit', handled: true, note: 'parent missing' };
+      const clone = stored.graph.cloneTree(target.id, parentId);
+      if (!clone) {
+        return { ok: false, tool: 'reframe_edit', handled: true, note: 'clone failed' };
+      }
+      ensureSceneLayout(stored.graph, stored.rootId);
+      emitProjectEvent({ type: 'scene:session-changed', sceneId, revision: Date.now() });
+      return { ok: true, tool: 'reframe_edit', handled: true, result: { op, sceneId, targetPath, cloneId: clone.id } };
+    }
+
+    if (op === 'delete') {
+      if (target.id === stored.rootId) {
+        return { ok: false, tool: 'reframe_edit', handled: true, note: 'cannot delete root' };
+      }
+      stored.graph.deleteNode(target.id);
+      ensureSceneLayout(stored.graph, stored.rootId);
+      emitProjectEvent({ type: 'scene:session-changed', sceneId, revision: Date.now() });
+      // Unmount inspector — selected node no longer exists.
+      emitProjectEvent({ type: 'panel:unmount', slot: 'right-panel', panelName: 'inspector' });
+      return { ok: true, tool: 'reframe_edit', handled: true, result: { op, sceneId, targetPath } };
+    }
+  }
+
+  return { ok: true, tool: 'reframe_edit', handled: false, note: `reframe_edit op "${op}" not yet routable via HTTP bridge` };
 });
 
 async function dispatchAgentGesture(

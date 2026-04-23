@@ -471,6 +471,13 @@ export {
   type GalleryTypographyEntry,
   type BrandGalleryOptions,
 } from './panels/brand-gallery';
+export {
+  composeInspectorPanel,
+  type InspectorTarget,
+  type InspectorTokenBinding,
+  type InspectorAuditIssue,
+  type InspectorOptions,
+} from './panels/inspector';
 export { StandaloneHost } from './adapters/standalone/adapter';
 export { StandaloneNode } from './adapters/standalone/node';
 

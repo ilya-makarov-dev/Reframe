@@ -26,11 +26,13 @@ import {
   composeBrandPalettePanel,
   composeVariantPickerPanel,
   composeBrandGalleryPanel,
+  composeInspectorPanel,
   parseDesignMd,
   type PaletteEntry,
   type VariantEntry,
   type GalleryColorEntry,
   type GalleryTypographyEntry,
+  type InspectorTarget,
   type DesignSystem,
 } from '@reframe/core';
 import { loadBrandFromProject, loadProject } from '../../../core/src/project/io.js';
@@ -82,6 +84,33 @@ COMPOSERS_EXT.set('brand-palette', (config, ctx) => {
   const designSystem = buildMinimalDesignSystem(brandSlug, entries);
   return { graph, designSystem };
 });
+
+// inspector — selected-node inspector: identity + intent + geometry +
+// token bindings (with swap-role pills) + audit issues + action row.
+// Brand-locked: no per-node color/font/spacing pickers — those live in
+// brand-palette. Inspector edits STRUCTURE + SEMANTICS, brand stays
+// authoritative.
+COMPOSERS_EXT.set('inspector', (config, ctx) => {
+  const target = (config.target as InspectorTarget | null | undefined) ?? null;
+  const sceneId = typeof config.sceneId === 'string' ? config.sceneId : undefined;
+  const explicitRoles = Array.isArray(config.availableRoles) ? (config.availableRoles as string[]) : undefined;
+  const brandSlug = typeof config.brandSlug === 'string' ? config.brandSlug : activeBrandOf(ctx.projectDir);
+  // Derive role palette from active brand if caller didn't supply one —
+  // makes the inspector work out-of-the-box in the right-panel.
+  const availableRoles = explicitRoles ?? inferAvailableRoles(ctx.projectDir, brandSlug);
+  const graph = composeInspectorPanel({ target, sceneId, availableRoles });
+  // Panel chrome doesn't use tokenBindings (solid hex surfaces); but we
+  // still pass DesignSystem so pill colors could extend to var(--color-*)
+  // if needed by future iterations.
+  const designSystem = loadDesignSystem(ctx.projectDir, brandSlug) ?? undefined;
+  return { graph, designSystem };
+});
+
+function inferAvailableRoles(projectDir: string | undefined, brandSlug: string | undefined): string[] {
+  const ds = loadDesignSystem(projectDir, brandSlug);
+  if (!ds) return [];
+  return Array.from(ds.colors.roles.keys()).slice(0, 12);
+}
 
 // brand-gallery — FULL self-host of /platform/design-system. Visualizes
 // the active brand's palette + typography + radius scale as one INode
