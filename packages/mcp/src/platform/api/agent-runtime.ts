@@ -67,8 +67,24 @@ function patchTokenInDesignMd(
   tokenName: string,
   value: string,
 ): string | null {
-  // Heuristic label extraction: 'color.primary' → try 'primary', 'Primary',
-  // 'Primary Color'; 'color.accent' → 'accent', 'Accent', 'Accent Color'.
+  // Heuristic label extraction. Brands vary wildly in DESIGN.md format:
+  //   - `Primary: #635BFF`                     (simple key:value)
+  //   - `- **Primary**: #635BFF`               (bold label)
+  //   - `- **Pure White** (`#FFFFFF`): ...`    (Ferrari — bold + parens)
+  //   - `--f-color-ui-0 / #FFFFFF`             (tokens-with-slashes)
+  // For now we cover the first three. The Ferrari-style uses bold label
+  // as semantic role (e.g. "Pure White" is the role name, not "Primary"),
+  // so we can't auto-patch it by token name — agent should have issued
+  // setToken against the actual bold label, not 'color.primary'.
+  //
+  // Strategy:
+  //   1. Try simple `Label: #hex` form for canonical role candidates.
+  //   2. Try bold form `**Label**: #hex`.
+  //   3. Try bold-parens form `**Label** (\`#hex\`)` — replace the hex
+  //      inside the backticks, leave the rest of the line intact.
+  //   4. Last-chance: replace FIRST hex under the `## <role>` section
+  //      heading. Low confidence but useful for brands whose role is
+  //      expressed as `### Primary` followed by bullet-list colors.
   const base = tokenName.replace(/^color\./, '');
   const candidates = [
     base,
@@ -77,20 +93,53 @@ function patchTokenInDesignMd(
     tokenName,
   ];
   const hexRe = /#[0-9A-Fa-f]{3,8}\b/;
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-  // Match `- Label: #hex` or `Label: #hex` or `**Label**: #hex`.
+  // (1) + (2) simple / bold forms combined — label followed by : hex.
   for (const label of candidates) {
-    const esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const esc = escapeRe(label);
     const pattern = new RegExp(
       String.raw`(^|\n)(\s*[-*]?\s*(?:\*\*)?)(${esc})(?:\*\*)?\s*[:=]\s*` + hexRe.source,
       'gm',
     );
     if (pattern.test(designMd)) {
-      return designMd.replace(pattern, (_m, pre, bullet, _name) =>
-        `${pre}${bullet}${_name}: ${value}`,
+      return designMd.replace(pattern, (_m, pre, bullet, name) =>
+        `${pre}${bullet}${name}: ${value}`,
       );
     }
   }
+
+  // (3) bold-parens form: `**Label** (`#HEX`)` or `**Label** (#HEX)`.
+  // Here the label is descriptive ("Pure White") not the role, but the
+  // hex inside the parens is the authoritative color. We match on any
+  // bold label whose hex occupies the parens — updating the hex without
+  // touching the descriptive label.
+  for (const label of candidates) {
+    const esc = escapeRe(label);
+    const boldParens = new RegExp(
+      String.raw`(\*\*${esc}\*\*\s*\(\s*\`?)(` + hexRe.source + String.raw`)(\`?\s*\))`,
+      'gi',
+    );
+    if (boldParens.test(designMd)) {
+      return designMd.replace(boldParens, (_m, pre, _hex, post) => `${pre}${value}${post}`);
+    }
+  }
+
+  // (4) section-heading fallback. `### Primary` → replace first hex in
+  // the section (until next `##` or EOF). Uses the base role name so
+  // `color.accent` matches `### Accent` headers. Case-insensitive so
+  // `primary` candidate matches `### Primary` heading.
+  const heading = candidates.find(c => new RegExp(String.raw`^#{1,6}\s+${escapeRe(c)}\s*$`, 'mi').test(designMd));
+  if (heading) {
+    const headRe = new RegExp(
+      String.raw`(^#{1,6}\s+${escapeRe(heading)}\s*$[\s\S]*?)(` + hexRe.source + String.raw`)`,
+      'mi',
+    );
+    if (headRe.test(designMd)) {
+      return designMd.replace(headRe, (_m, pre, _hex) => `${pre}${value}`);
+    }
+  }
+
   return null;
 }
 
@@ -155,7 +204,7 @@ const brandSetTokenHandler: ToolHandler = async (args, body, ctx) => {
 TOOL_HANDLERS.set('brand.setToken', brandSetTokenHandler);
 
 // ── reframe_ui — mount/unmount actions (Phase 1 semantics, now via registry) ─
-TOOL_HANDLERS.set('reframe_ui', async (args) => {
+TOOL_HANDLERS.set('reframe_ui', async (args, _body, ctx) => {
   const action = String(args.action ?? '');
   if (action === 'unmount') {
     const panelName = String(args.panel ?? '');
@@ -170,7 +219,7 @@ TOOL_HANDLERS.set('reframe_ui', async (args) => {
     const config = (args.config ?? {}) as Record<string, unknown>;
     if (!panelName) return { ok: false, tool: 'reframe_ui', handled: true, note: 'panel name required' };
     try {
-      const rendered = renderPanel(panelName, config);
+      const rendered = renderPanel(panelName, config, { projectDir: ctx.projectDir ?? undefined });
       emitProjectEvent({
         type: 'panel:mount',
         slot,
@@ -263,7 +312,7 @@ export async function handleAgentRuntimeApi(
     }
     try {
       const t0 = performance.now();
-      const rendered = renderPanel(panelName, config);
+      const rendered = renderPanel(panelName, config, { projectDir: ctx.projectDir ?? undefined });
       const composeMs = performance.now() - t0;
       emitProjectEvent({
         type: 'panel:mount',

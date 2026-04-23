@@ -386,13 +386,18 @@ export function renderEditorShell(options: {
       </div>
     </main>
 
-    <aside id="panel">
+    <aside id="panel" data-mount-slot="right-panel">
       <!-- Single always-visible Properties pane. Right-panel tabs are gone:
            Agent moved to a floating prompt (right-click on canvas / Cmd+K),
            block insertion moved to the floating block palette (Cmd+P). The
            panel content is updated by scripts.ts on canvas-select events
            (showPropsForNode). data-panel="design" + class .properties is
-           kept so existing scripts.ts selectors still resolve. -->
+           kept so existing scripts.ts selectors still resolve.
+
+           data-mount-slot="right-panel" — Phase 1 anchor for the
+           agent-operable runtime. When an INode panel mounts via SSE,
+           055-agent-runtime.js injects the compiled HTML here, stashing
+           the prior content so panel:unmount can restore properties. -->
       <div data-panel="design" class="properties" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:0 12px;min-width:0;">
         <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
           Select a node to inspect

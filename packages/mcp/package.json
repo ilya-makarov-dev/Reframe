@@ -8,7 +8,7 @@
   },
   "main": "dist/mcp/src/index.js",
   "scripts": {
-    "build": "tsc && node ../../scripts/copy-platform-assets.mjs",
+    "build": "tsc && node ../../scripts/fix-dist-extensions.mjs packages/mcp/dist && node ../../scripts/copy-platform-assets.mjs",
     "typecheck": "tsc --noEmit",
     "start": "node dist/mcp/src/index.js",
     "start:http": "node dist/mcp/src/http-server.js"

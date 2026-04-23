@@ -16,7 +16,7 @@
     "./adapters/standalone": "./dist/adapters/standalone/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node ../../scripts/fix-dist-extensions.mjs packages/core/dist",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

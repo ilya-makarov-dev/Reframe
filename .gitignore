@@ -71,6 +71,13 @@ scripts/*
 # for @reframe/mcp (copies platform-ui.js / platform-ui.css into dist).
 # It MUST ship — the npm build breaks without it.
 !scripts/copy-platform-assets.mjs
+# Exception: fix-dist-extensions.mjs is a permanent post-tsc step for
+# @reframe/core and @reframe/mcp — adds `.js` extensions to relative
+# imports in compiled output (the root tsconfig uses `moduleResolution:
+# bundler`, which preserves extensionless specifiers that Node's ESM
+# resolver rejects with ERR_MODULE_NOT_FOUND). Without this, a clean
+# `npm run build` produces a dist/ that crashes immediately under `node`.
+!scripts/fix-dist-extensions.mjs
 # Exceptions: permanent test runners referenced by root `npm test`.
 # Without these the first `npm test` after clone fails out of the box.
 !scripts/test-pipeline.ts

@@ -25,13 +25,20 @@ import {
   exportToHtml,
   composeBrandPalettePanel,
   composeVariantPickerPanel,
+  parseDesignMd,
   type PaletteEntry,
   type VariantEntry,
   type DesignSystem,
 } from '@reframe/core';
+import { loadBrandFromProject } from '../../../core/src/project/io.js';
 
 export interface PanelConfig {
   [key: string]: unknown;
+}
+
+export interface PanelContext {
+  /** Active project dir — lets composers load real brand DESIGN.md from disk. */
+  projectDir?: string;
 }
 
 export interface PanelRenderResult {
@@ -57,15 +64,17 @@ interface ComposedPanel {
   designSystem?: DesignSystem;
 }
 
-type PanelComposerExt = (config: PanelConfig) => ComposedPanel;
+type PanelComposerExt = (config: PanelConfig, ctx: PanelContext) => ComposedPanel;
 const COMPOSERS_EXT: Map<string, PanelComposerExt> = new Map();
 
 // brand-palette — edits active brand's color tokens with live SSE patching.
-COMPOSERS_EXT.set('brand-palette', (config) => {
+// Resolution order for entries (first hit wins):
+//   1. config.entries — explicit PaletteEntry[] (agent pre-populated)
+//   2. (ctx.projectDir + config.brandSlug) — load real DESIGN.md from disk
+//   3. demo defaults — when no project / unknown slug / parse error
+COMPOSERS_EXT.set('brand-palette', (config, ctx) => {
   const brandSlug = String(config.brandSlug ?? 'default');
-  const entries = Array.isArray(config.entries)
-    ? (config.entries as PaletteEntry[])
-    : defaultPaletteEntries();
+  const entries = resolvePaletteEntries(config, ctx, brandSlug);
   const graph = composeBrandPalettePanel({ brandSlug, entries });
   const designSystem = buildMinimalDesignSystem(brandSlug, entries);
   return { graph, designSystem };
@@ -83,6 +92,58 @@ COMPOSERS_EXT.set('variant-picker', (config) => {
   const graph = composeVariantPickerPanel({ sceneId, targetPath, variants });
   return { graph };
 });
+
+function resolvePaletteEntries(config: PanelConfig, ctx: PanelContext, brandSlug: string): PaletteEntry[] {
+  if (Array.isArray(config.entries)) return config.entries as PaletteEntry[];
+  if (ctx.projectDir && brandSlug && brandSlug !== 'default') {
+    try {
+      const loaded = loadBrandFromProject(ctx.projectDir, brandSlug);
+      if (loaded) {
+        const ds = parseDesignMd(loaded.content);
+        const entries = designSystemToPaletteEntries(ds);
+        if (entries.length > 0) return entries;
+      }
+    } catch { /* fall through to defaults */ }
+  }
+  return defaultPaletteEntries();
+}
+
+/**
+ * DesignSystem → PaletteEntry list. Picks the canonical role set first
+ * (primary / background / surface / text / muted / accent) in that order
+ * so the most important colors show at the top of the panel, then
+ * appends any additional roles the brand defines (for brands with
+ * richer palettes like Ferrari's ~12 roles). Caps at 10 entries to keep
+ * the panel under the right-panel's height budget.
+ */
+function designSystemToPaletteEntries(ds: DesignSystem): PaletteEntry[] {
+  const CANONICAL_ORDER = ['primary', 'background', 'surface', 'text', 'muted', 'accent'];
+  const roles = ds.colors?.roles;
+  if (!roles || roles.size === 0) return [];
+  const out: PaletteEntry[] = [];
+  const seen = new Set<string>();
+  for (const role of CANONICAL_ORDER) {
+    const hex = roles.get(role);
+    if (hex) {
+      out.push({ tokenName: `color.${role}`, hex, label: humanizeRole(role) });
+      seen.add(role);
+    }
+  }
+  for (const [role, hex] of roles) {
+    if (seen.has(role)) continue;
+    if (out.length >= 10) break;
+    out.push({ tokenName: `color.${role}`, hex, label: humanizeRole(role) });
+  }
+  return out;
+}
+
+function humanizeRole(role: string): string {
+  return role
+    .replace(/[-_]+/g, ' ')
+    .split(' ')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
 
 function defaultVariants(sceneId?: string, targetPath?: string): VariantEntry[] {
   // Demo variants — real production use supplies them via config. Each
@@ -128,14 +189,14 @@ function buildMinimalDesignSystem(brand: string, entries: PaletteEntry[]): Desig
 
 // ─── Render API ──────────────────────────────────────────────────
 
-export function renderPanel(name: string, config: PanelConfig): PanelRenderResult {
+export function renderPanel(name: string, config: PanelConfig, ctx: PanelContext = {}): PanelRenderResult {
   const composer = COMPOSERS_EXT.get(name);
   if (!composer) {
     throw new Error(
       `Unknown panel: ${name}. Registered: ${Array.from(COMPOSERS_EXT.keys()).join(', ') || '(none)'}`,
     );
   }
-  const { graph, designSystem } = composer(config);
+  const { graph, designSystem } = composer(config, ctx);
   ensureSceneLayout(graph, graph.rootId);
   const html = exportToHtml(graph, graph.rootId, {
     fullDocument: false,
