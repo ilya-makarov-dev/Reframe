@@ -53,6 +53,18 @@
         selectionTag: state.selection && state.selection.tag,
       }));
     } catch (_) {}
+    // Phase 4.0 — expose current selection on a stable global so the
+    // inspector-autolaunch module (055-agent-runtime neighbor) can
+    // subscribe. Reading state.selection.inode requires access to the
+    // IIFE-scoped `state`; the global is the only seam.
+    try {
+      var frameEl = document.querySelector('.viewport-frame') || document.getElementById('reframe-viewport');
+      var sceneSessionId = frameEl ? (frameEl.getAttribute('data-session') || (frameEl.dataset && frameEl.dataset.session)) : null;
+      window.__reframeSelection = {
+        inode: state.selection && state.selection.inode,
+        sceneId: sceneSessionId,
+      };
+    } catch (_) {}
     // Let the chip bar (and any other passive UI watchers) redraw
     // without having to wire a bespoke callback into every caller. Any
     // module that cares can subscribe to `reframe:ui-state-changed`.

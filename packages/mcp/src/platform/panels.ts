@@ -90,9 +90,20 @@ COMPOSERS_EXT.set('brand-palette', (config, ctx) => {
 // Brand-locked: no per-node color/font/spacing pickers — those live in
 // brand-palette. Inspector edits STRUCTURE + SEMANTICS, brand stays
 // authoritative.
+//
+// Target resolution (Phase 4.0):
+//   1. config.target — explicit InspectorTarget (agent pre-computed)
+//   2. (config.sceneId + config.nodeId) — look up node in live scene
+//      store, build InspectorTarget from graph state + audit. This is
+//      the path the canvas selection listener takes — just send
+//      { sceneId, nodeId } and the composer does the resolution.
+//   3. Nothing → empty-state panel
 COMPOSERS_EXT.set('inspector', (config, ctx) => {
-  const target = (config.target as InspectorTarget | null | undefined) ?? null;
   const sceneId = typeof config.sceneId === 'string' ? config.sceneId : undefined;
+  const nodeId = typeof config.nodeId === 'string' ? config.nodeId : undefined;
+  const explicitTarget = config.target as InspectorTarget | null | undefined;
+  const target = explicitTarget ?? (sceneId && nodeId ? resolveInspectorTarget(sceneId, nodeId) : null);
+
   const explicitRoles = Array.isArray(config.availableRoles) ? (config.availableRoles as string[]) : undefined;
   const brandSlug = typeof config.brandSlug === 'string' ? config.brandSlug : activeBrandOf(ctx.projectDir);
   // Derive role palette from active brand if caller didn't supply one —
@@ -105,6 +116,48 @@ COMPOSERS_EXT.set('inspector', (config, ctx) => {
   const designSystem = loadDesignSystem(ctx.projectDir, brandSlug) ?? undefined;
   return { graph, designSystem };
 });
+
+function resolveInspectorTarget(sceneId: string, nodeId: string): InspectorTarget | null {
+  try {
+    // Lazy import to avoid cyclic init — store imports io, io imports
+    // types — keeping this inside the function makes module-load cheap.
+    const { getScene } = require('../store.js');
+    const stored = getScene(sceneId);
+    if (!stored) return null;
+    const node = stored.graph.getNode(nodeId);
+    if (!node) return null;
+
+    const tokenBindings: Array<{ field: 'fill' | 'stroke' | 'fontSize' | 'fontFamily' | 'cornerRadius'; role: string }> = [];
+    const meta = (node as any).meta ?? {};
+    const tb = meta.tokenBindings ?? {};
+    for (const field of ['fill', 'stroke', 'fontSize', 'fontFamily', 'cornerRadius'] as const) {
+      if (typeof tb[field] === 'string' && tb[field]) {
+        tokenBindings.push({ field, role: tb[field] });
+      }
+    }
+
+    return {
+      id: node.id,
+      name: node.name ?? '(unnamed)',
+      type: String(node.type),
+      semanticPath: (node as any).semanticPath ?? '',
+      semanticRole: (node as any).semanticRole ?? null,
+      intent: (node as any).intent ?? null,
+      bbox: {
+        x: node.x ?? 0,
+        y: node.y ?? 0,
+        width: node.width ?? 0,
+        height: node.height ?? 0,
+      },
+      tokenBindings,
+      // Audit issues — left empty for now; Phase 4.0 scope just needs
+      // the panel to mount with correct identity. Audit enrichment is
+      // Phase 4.0.1 (separate bench — run audit, find issues touching
+      // this node, include them). Shape is ready; data supplier isn't.
+      auditIssues: [],
+    };
+  } catch { return null; }
+}
 
 function inferAvailableRoles(projectDir: string | undefined, brandSlug: string | undefined): string[] {
   const ds = loadDesignSystem(projectDir, brandSlug);
