@@ -489,6 +489,10 @@ export {
   type LibraryGridOptions,
 } from './panels/library-grid';
 export {
+  composeEditorShellPanel,
+  type EditorShellOptions,
+} from './panels/editor-shell';
+export {
   buildPanel,
   buildSection,
   buildCard,

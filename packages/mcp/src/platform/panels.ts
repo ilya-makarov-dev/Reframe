@@ -29,6 +29,7 @@ import {
   composeInspectorPanel,
   composeDashboardPanel,
   composeLibraryGridPanel,
+  composeEditorShellPanel,
   parseDesignMd,
   type PaletteEntry,
   type VariantEntry,
@@ -168,6 +169,26 @@ function inferAvailableRoles(projectDir: string | undefined, brandSlug: string |
   if (!ds) return [];
   return Array.from(ds.colors.roles.keys()).slice(0, 12);
 }
+
+// editor-shell — FULL self-host of /platform/project/:slug. Composes
+// the editor chrome (header + sidebar + canvas area + right panel +
+// floating toolbar) as one INode tree. Dynamic content that can't be
+// INode-expressed (native <canvas>, client-populated layers tree, chat
+// pill, macro dropdowns, native selection overlays) is placed into
+// mount-slots that the page renderer hydrates server-side with the
+// required native HTML. Every shell button has an agent-operable
+// gesture + stable semantic path — the whole editor becomes QA-able
+// by an agent walking semantic paths.
+COMPOSERS_EXT.set('editor-shell', (config) => {
+  const graph = composeEditorShellPanel({
+    sceneSlug: String(config.sceneSlug ?? ''),
+    sceneIds: String(config.sceneIds ?? ''),
+    title: typeof config.title === 'string' ? config.title : undefined,
+    width: typeof config.width === 'number' ? config.width : undefined,
+    height: typeof config.height === 'number' ? config.height : undefined,
+  });
+  return { graph };
+});
 
 // components-library — FULL self-host of /platform/components. Cards
 // link to #<slug> anchors; library panel handles grid + empty state.
