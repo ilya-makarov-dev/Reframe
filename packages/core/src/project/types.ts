@@ -160,6 +160,18 @@ export type ProjectEvent =
   | { type: 'design-system:updated'; path: string }
   /** Snapshot of MCP session list (HTTP sidecar). Not persisted to disk. */
   | { type: 'session:scenes'; scenes: unknown[] }
+  /** Agent-operable UI: an INode-rendered panel mounted into a named shell slot. */
+  | { type: 'panel:mount'; slot: string; panelName: string; html: string; nodeCount?: number }
+  /** Agent-operable UI: panel removed from a named shell slot. */
+  | { type: 'panel:unmount'; slot: string; panelName: string }
+  /**
+   * Fast-path token change for live SSE re-paint without full scene re-compile.
+   * Emitted by the gesture dispatcher when brand.setToken is invoked so every
+   * connected client can patch the running document's CSS custom properties
+   * immediately, while the underlying DESIGN.md write + design-system:updated
+   * flow does its full-recompile work in the background.
+   */
+  | { type: 'token:changed'; brand: string; tokenName: string; value: string }
 
 // ─── Helpers ─────────────────────────────────────────────────
 

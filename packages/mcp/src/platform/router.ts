@@ -31,6 +31,7 @@ import { renderDesignSystemPage } from './pages/design-system.js';
 import { renderMacrosPage } from './pages/macros.js';
 import { handleIntentApi } from './api/intent.js';
 import { handleGestureApi } from './api/gesture.js';
+import { handleAgentRuntimeApi, isAgentRuntimePath } from './api/agent-runtime.js';
 import { handleNodeEditApi } from './api/node-edit.js';
 import { handleVariationsApi } from './api/variations.js';
 import { renderShell, renderSidebar } from './layout.js';
@@ -306,6 +307,12 @@ export default async function(o){
         pathname.startsWith('/platform/api/annotations/') ||
         pathname.startsWith('/platform/api/threads/')) {
       return handleGestureApi(req, res, ctx);
+    }
+    // Agent-operable runtime — panel mount/unmount + agent gesture dispatch.
+    // Distinct from the legacy /gesture endpoint above; this one drives the
+    // new `data-gesture-*` + INode-panel surface introduced in Phase 1.
+    if (isAgentRuntimePath(pathname)) {
+      return handleAgentRuntimeApi(req, res, ctx);
     }
     // Rebrand + variations (design space explorer) endpoints
     if (pathname === '/platform/api/rebrand/apply' ||

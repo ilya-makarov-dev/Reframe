@@ -94,9 +94,14 @@ export function renderShell(props: ShellProps): string {
   const sidebarEl = props.sidebar
     ? `<aside class="sidebar">${props.sidebar}</aside>`
     : '';
+  // `data-mount-slot="right-panel"` — Phase 1 anchor for the agent-runtime
+  // dispatcher. When an INode-rendered panel mounts via SSE `panel:mount`,
+  // the dispatcher swaps children into this aside and remembers the prior
+  // content so unmount restores it. Present on every page so any surface
+  // can host a panel when asked — empty otherwise.
   const rightEl = props.rightPanel
-    ? `<aside class="right">${props.rightPanel}</aside>`
-    : '';
+    ? `<aside class="right" data-mount-slot="right-panel">${props.rightPanel}</aside>`
+    : `<aside class="right rf-slot-empty" data-mount-slot="right-panel" hidden></aside>`;
 
   const bodyClass = props.wide
     ? 'body solo'

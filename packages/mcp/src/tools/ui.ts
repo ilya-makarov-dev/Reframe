@@ -141,6 +141,7 @@ export const uiInputSchema = {
   action: z.enum([
     'open', 'act', 'probe', 'screenshot', 'wait', 'close', 'list',
     'setViewport', 'state', 'reload', 'scene',
+    'mount', 'unmount',
   ]).describe(
     'open = launch browser session, navigate to path. ' +
     'act = run a sequence of interaction steps (click/type/press/scroll/hover/wait/goto/clickAt/dragAt/drag/select/upload/reload). ' +
@@ -151,7 +152,9 @@ export const uiInputSchema = {
     'setViewport = resize current session\'s viewport without reopening. ' +
     'state = read / write / clear localStorage + sessionStorage + cookies. ' +
     'reload = refresh the current page. ' +
-    'scene = dump the active Platform scene: SceneGraph tree, live audit, selected node, brand, viewport tag. One call to understand "what the user is looking at" — no DOM digging required.',
+    'scene = dump the active Platform scene: SceneGraph tree, live audit, selected node, brand, viewport tag. One call to understand "what the user is looking at" — no DOM digging required. ' +
+    'mount = compose a registered INode panel by name + config and broadcast it via SSE so every connected browser injects it into the named slot. No Playwright session required — works against any user looking at Platform UI. ' +
+    'unmount = reverse of mount — broadcast removal of a panel from a slot.',
   ),
   sessionId: z.string().optional().describe(
     'Required for act/probe/screenshot/wait/close. Returned by open.',
@@ -225,7 +228,8 @@ type StepDef = z.infer<typeof stepSchema>;
 
 type UiInput = {
   action: 'open' | 'act' | 'probe' | 'screenshot' | 'wait' | 'close' | 'list'
-        | 'setViewport' | 'state' | 'reload' | 'scene';
+        | 'setViewport' | 'state' | 'reload' | 'scene'
+        | 'mount' | 'unmount';
   sessionId?: string;
   path?: string;
   viewport?: { width: number; height: number };
@@ -247,6 +251,12 @@ type UiInput = {
     expires?: number; httpOnly?: boolean; secure?: boolean;
     sameSite?: 'Strict' | 'Lax' | 'None';
   }>;
+  /** mount/unmount — panel name registered in panels.ts. */
+  panel?: string;
+  /** mount/unmount — target shell slot. Default 'right-panel'. */
+  slot?: string;
+  /** mount — config passed to the panel composer. */
+  config?: Record<string, unknown>;
 };
 
 // ─── Handler ─────────────────────────────────────────────────
@@ -265,6 +275,8 @@ export async function handleUi(input: UiInput) {
       case 'state':       return await doState(input);
       case 'reload':      return await doReload(input);
       case 'scene':       return await doScene(input);
+      case 'mount':       return await doMount(input);
+      case 'unmount':     return await doUnmount(input);
     }
   } catch (e: any) {
     return text(`reframe_ui ${input.action} ERROR: ${e?.message ?? e}`);
@@ -399,6 +411,49 @@ async function doClose(input: UiInput) {
   if (!input.sessionId) return text('close: sessionId required');
   await closeSession(input.sessionId);
   return text(`session ${input.sessionId} closed`);
+}
+
+async function doMount(input: UiInput) {
+  const panel = input.panel;
+  if (!panel) return text('mount: panel name required');
+  const slot = input.slot ?? 'right-panel';
+  const config = input.config ?? {};
+  try {
+    const res = await fetch(resolveUrl('/platform/api/panel-mount'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ panel, slot, config }),
+    });
+    const body: any = await res.json().catch(() => ({}));
+    if (!res.ok || body?.ok === false) {
+      return text(`mount ERROR: ${body?.error ?? res.statusText}`);
+    }
+    return text(
+      `mounted panel=${body.panel} slot=${body.slot} nodes=${body.nodeCount} htmlBytes=${body.htmlBytes} composeMs=${body.composeMs}`,
+    );
+  } catch (e: any) {
+    return text(`mount FAILED: ${e?.message ?? e}. Is the HTTP sidecar running?`);
+  }
+}
+
+async function doUnmount(input: UiInput) {
+  const panel = input.panel;
+  if (!panel) return text('unmount: panel name required');
+  const slot = input.slot ?? 'right-panel';
+  try {
+    const res = await fetch(resolveUrl('/platform/api/panel-unmount'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ panel, slot }),
+    });
+    const body: any = await res.json().catch(() => ({}));
+    if (!res.ok || body?.ok === false) {
+      return text(`unmount ERROR: ${body?.error ?? res.statusText}`);
+    }
+    return text(`unmounted panel=${body.panel} slot=${body.slot}`);
+  } catch (e: any) {
+    return text(`unmount FAILED: ${e?.message ?? e}`);
+  }
 }
 
 async function doSetViewport(input: UiInput) {
