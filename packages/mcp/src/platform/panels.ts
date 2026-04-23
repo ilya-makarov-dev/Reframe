@@ -25,12 +25,15 @@ import {
   exportToHtml,
   composeBrandPalettePanel,
   composeVariantPickerPanel,
+  composeBrandGalleryPanel,
   parseDesignMd,
   type PaletteEntry,
   type VariantEntry,
+  type GalleryColorEntry,
+  type GalleryTypographyEntry,
   type DesignSystem,
 } from '@reframe/core';
-import { loadBrandFromProject } from '../../../core/src/project/io.js';
+import { loadBrandFromProject, loadProject } from '../../../core/src/project/io.js';
 
 export interface PanelConfig {
   [key: string]: unknown;
@@ -79,6 +82,55 @@ COMPOSERS_EXT.set('brand-palette', (config, ctx) => {
   const designSystem = buildMinimalDesignSystem(brandSlug, entries);
   return { graph, designSystem };
 });
+
+// brand-gallery — FULL self-host of /platform/design-system. Visualizes
+// the active brand's palette + typography + radius scale as one INode
+// tree. Zero hand-written HTML remains in the page renderer (Phase 3.1).
+// Export-DTCG button uses the client-side `browser.download` pseudo-tool
+// — no server roundtrip needed for a pure download trigger.
+COMPOSERS_EXT.set('brand-gallery', (config, ctx) => {
+  const explicitBrand = typeof config.brandSlug === 'string' ? config.brandSlug : undefined;
+  const brandSlug = explicitBrand ?? activeBrandOf(ctx.projectDir);
+  const designSystem = loadDesignSystem(ctx.projectDir, brandSlug);
+  const colors: GalleryColorEntry[] = designSystem
+    ? Array.from(designSystem.colors.roles.entries()).map(([role, hex]) => ({ role, hex }))
+    : [];
+  const typography: GalleryTypographyEntry[] = designSystem
+    ? (designSystem.typography.hierarchy ?? []).map(t => ({
+        role: t.role,
+        fontSize: t.fontSize,
+        fontWeight: t.fontWeight,
+        fontFamily: t.fontFamily,
+      }))
+    : [];
+  const graph = composeBrandGalleryPanel({
+    brand: designSystem?.brand,
+    brandSlug,
+    colors,
+    typography,
+    primaryFont: designSystem?.typography.primaryFont,
+    secondaryFont: designSystem?.typography.secondaryFont,
+    radiusScale: designSystem?.layout?.borderRadiusScale,
+  });
+  return { graph, designSystem: designSystem ?? undefined };
+});
+
+function activeBrandOf(projectDir: string | undefined): string | undefined {
+  if (!projectDir) return undefined;
+  try {
+    const manifest = loadProject(projectDir);
+    return manifest.activeBrand;
+  } catch { return undefined; }
+}
+
+function loadDesignSystem(projectDir: string | undefined, brandSlug: string | undefined): DesignSystem | null {
+  if (!projectDir || !brandSlug) return null;
+  try {
+    const loaded = loadBrandFromProject(projectDir, brandSlug);
+    if (!loaded) return null;
+    return parseDesignMd(loaded.content);
+  } catch { return null; }
+}
 
 // variant-picker — offer N variants of a target section with click-to-apply.
 // When `variants` is absent, ships a demo set so the panel is inspectable

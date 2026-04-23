@@ -714,41 +714,17 @@ function buildMacrosData(ctx: PlatformContext) {
 }
 
 function buildDesignSystemData(ctx: PlatformContext) {
+  // Phase 3.1 — page content is composed by the `brand-gallery` panel,
+  // which reads DESIGN.md from disk itself (via projectDir + brandSlug).
+  // The router no longer duplicates parsing here — we just pass through
+  // the minimum identity + sidebar data; the panel does the rest.
   const common = buildCommonSidebar(ctx);
-  const md = ctx.getDesignMd();
-  if (!md) return { brand: undefined, ...common };
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const mod = require('../../../core/src/design-system/index.js');
-    const ds = mod.parseDesignMd(md);
-    const colors: Array<{ name: string; hex: string }> = [];
-    if (ds.colors?.primary) colors.push({ name: 'primary', hex: ds.colors.primary });
-    if (ds.colors?.background) colors.push({ name: 'background', hex: ds.colors.background });
-    if (ds.colors?.text) colors.push({ name: 'text', hex: ds.colors.text });
-    if (ds.colors?.accent) colors.push({ name: 'accent', hex: ds.colors.accent });
-    if (ds.colors?.roles) {
-      for (const [name, hex] of ds.colors.roles) {
-        if (!colors.find(c => c.name === name)) colors.push({ name, hex });
-      }
-    }
-    const typography = (ds.typography?.hierarchy ?? []).map((t: any) => ({
-      role: t.role,
-      fontSize: t.fontSize,
-      fontWeight: t.fontWeight,
-      fontFamily: t.fontFamily,
-    }));
-    return {
-      brand: ds.brand,
-      colors,
-      typography,
-      primaryFont: ds.typography?.primaryFont,
-      secondaryFont: ds.typography?.secondaryFont,
-      radiusScale: ds.layout?.borderRadiusScale,
-      ...common,
-    };
-  } catch {
-    return { brand: undefined, ...common };
-  }
+  return {
+    brand: common.activeBrand,
+    brandSlug: common.activeBrand,
+    projectDir: ctx.projectDir ?? undefined,
+    ...common,
+  };
 }
 
 // ─── TTL memoization ──────────────────────────────────────

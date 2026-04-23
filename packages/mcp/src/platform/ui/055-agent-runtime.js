@@ -108,8 +108,19 @@
   }
 
   // ─── Global gesture delegator (click + input) ───────────────────
+  // Some gestures are handled entirely client-side (no MCP roundtrip):
+  //   browser.download — trigger an <a href download> click for a URL.
+  //                      Used by brand-gallery's Export DTCG button.
+  //   browser.navigate — window.location.assign a URL (future use).
+  //   browser.reload   — location.reload() (future use).
+  // Everything else POSTs to /platform/api/agent-gesture and the server-
+  // side TOOL_HANDLERS registry routes it.
   function dispatchGesture(tool, args, extras) {
     try {
+      if (tool && tool.indexOf('browser.') === 0) {
+        handleBrowserTool(tool, args || {});
+        return;
+      }
       fetch('/platform/api/agent-gesture', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -122,6 +133,35 @@
         }),
       }).catch(function() {});
     } catch (_) {}
+  }
+
+  function handleBrowserTool(tool, args) {
+    if (tool === 'browser.download') {
+      var url = typeof args.url === 'string' ? args.url : '';
+      if (!url) return;
+      var a = document.createElement('a');
+      a.href = url;
+      if (typeof args.filename === 'string' && args.filename) a.download = args.filename;
+      else a.download = '';  // hint; server Content-Disposition wins anyway
+      a.rel = 'noopener';
+      // Attach to DOM for Firefox parity, click, cleanup.
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function() {
+        try { document.body.removeChild(a); } catch (_) {}
+      }, 0);
+      return;
+    }
+    if (tool === 'browser.navigate' && typeof args.url === 'string') {
+      window.location.assign(args.url);
+      return;
+    }
+    if (tool === 'browser.reload') {
+      window.location.reload();
+      return;
+    }
+    // Unknown browser.* — silent no-op; server-side dispatcher will log
+    // if the agent actually expected handling there.
   }
 
   function substituteArgs(args, ctx) {

@@ -465,6 +465,12 @@ export {
   type VariantEntry,
   type VariantPickerOptions,
 } from './panels/variant-picker';
+export {
+  composeBrandGalleryPanel,
+  type GalleryColorEntry,
+  type GalleryTypographyEntry,
+  type BrandGalleryOptions,
+} from './panels/brand-gallery';
 export { StandaloneHost } from './adapters/standalone/adapter';
 export { StandaloneNode } from './adapters/standalone/node';
 
