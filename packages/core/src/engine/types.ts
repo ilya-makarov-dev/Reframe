@@ -595,6 +595,15 @@ export interface NodeMeta {
    */
   tokenBindings?: TokenBindings;
 
+  /**
+   * Background image URL applied via CSS `background-image: url(<url>)`
+   * on the node's rendered element. Used by panels that need thumbnails
+   * (dashboard project cards, components library previews) without
+   * requiring full IMAGE-fill support. Pair with `backgroundSize` /
+   * `backgroundPosition` defaults emitted by the exporter (cover/center).
+   */
+  backgroundImage?: string;
+
   // ── Project-as-INode metadata ──────────────────────────────
   // Used when the project manifest itself is stored as a SceneGraph.
   // Scene-ref nodes in the project graph carry these fields.

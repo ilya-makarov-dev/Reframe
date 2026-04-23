@@ -27,12 +27,16 @@ import {
   composeVariantPickerPanel,
   composeBrandGalleryPanel,
   composeInspectorPanel,
+  composeDashboardPanel,
+  composeLibraryGridPanel,
   parseDesignMd,
   type PaletteEntry,
   type VariantEntry,
   type GalleryColorEntry,
   type GalleryTypographyEntry,
   type InspectorTarget,
+  type DashboardProjectEntry,
+  type LibraryEntry,
   type DesignSystem,
 } from '@reframe/core';
 import { loadBrandFromProject, loadProject } from '../../../core/src/project/io.js';
@@ -164,6 +168,49 @@ function inferAvailableRoles(projectDir: string | undefined, brandSlug: string |
   if (!ds) return [];
   return Array.from(ds.colors.roles.keys()).slice(0, 12);
 }
+
+// components-library — FULL self-host of /platform/components. Cards
+// link to #<slug> anchors; library panel handles grid + empty state.
+COMPOSERS_EXT.set('components-library', (config) => {
+  const entries = Array.isArray(config.entries) ? (config.entries as LibraryEntry[]) : [];
+  const graph = composeLibraryGridPanel({
+    title: String(config.title ?? 'Library'),
+    lead: typeof config.lead === 'string' ? config.lead : undefined,
+    emptyText: typeof config.emptyText === 'string' ? config.emptyText : undefined,
+    entries,
+    width: typeof config.width === 'number' ? config.width : 1280,
+    role: 'components',
+  });
+  return { graph };
+});
+
+// macros-library — FULL self-host of /platform/macros. Cards fire
+// apply-macro gesture against the current scene via the MCP bridge.
+COMPOSERS_EXT.set('macros-library', (config) => {
+  const entries = Array.isArray(config.entries) ? (config.entries as LibraryEntry[]) : [];
+  const graph = composeLibraryGridPanel({
+    title: String(config.title ?? 'Recipes'),
+    lead: typeof config.lead === 'string' ? config.lead : undefined,
+    emptyText: typeof config.emptyText === 'string' ? config.emptyText : undefined,
+    entries,
+    width: typeof config.width === 'number' ? config.width : 1280,
+    role: 'macros',
+  });
+  return { graph };
+});
+
+// dashboard — FULL self-host of /platform. Project grid + greeting +
+// create-canvas action. Each card navigates to /platform/project/<slug>
+// via the browser.navigate pseudo-gesture. Thumbnails loaded through the
+// exporter's background-image support (meta.backgroundImage).
+COMPOSERS_EXT.set('dashboard', (config) => {
+  const greeting = String(config.greeting ?? 'Good afternoon.');
+  const sceneCount = typeof config.sceneCount === 'number' ? config.sceneCount : 0;
+  const projects = Array.isArray(config.projects) ? (config.projects as DashboardProjectEntry[]) : [];
+  const width = typeof config.width === 'number' ? config.width : 1280;
+  const graph = composeDashboardPanel({ greeting, sceneCount, projects, width });
+  return { graph };
+});
 
 // brand-gallery — FULL self-host of /platform/design-system. Visualizes
 // the active brand's palette + typography + radius scale as one INode

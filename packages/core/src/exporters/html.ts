@@ -447,7 +447,18 @@ export function exportToHtml(
     // Add transition CSS if this node has behavior states
     const behaviorCls = behaviorClassMap.get(node.id);
     const transitionCss = behaviorCls ? behaviorTransitions.get(behaviorCls) : undefined;
-    const fullStyles = transitionCss ? `${styles}; ${transitionCss}` : styles;
+    let fullStyles = transitionCss ? `${styles}; ${transitionCss}` : styles;
+
+    // Phase 4.2 — background-image support for panels with thumbnails
+    // (dashboard cards, components library). `meta.backgroundImage` is a
+    // URL string; we emit `background-image: url(...)` + cover/center
+    // defaults. Pairs with existing `fills` solid background for a
+    // raster-failure fallback.
+    const bgImg = node.meta?.backgroundImage;
+    if (bgImg && typeof bgImg === 'string') {
+      const safeUrl = bgImg.replace(/['"\\]/g, '');
+      fullStyles = `${fullStyles}; background-image: url('${safeUrl}'); background-size: cover; background-position: center`;
+    }
 
     const attrs: string[] = [];
 

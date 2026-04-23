@@ -478,6 +478,37 @@ export {
   type InspectorAuditIssue,
   type InspectorOptions,
 } from './panels/inspector';
+export {
+  composeDashboardPanel,
+  type DashboardProjectEntry,
+  type DashboardOptions,
+} from './panels/dashboard';
+export {
+  composeLibraryGridPanel,
+  type LibraryEntry,
+  type LibraryGridOptions,
+} from './panels/library-grid';
+export {
+  buildPanel,
+  buildSection,
+  buildCard,
+  buildButton,
+  buildGrid,
+  buildText,
+  solidFill,
+  solidStroke,
+  hexToRgba,
+  intent,
+  gesture,
+  PANEL_COLORS,
+  type TextStyle,
+  type BuildPanelOpts,
+  type BuildSectionOpts,
+  type BuildCardOpts,
+  type BuildButtonOpts,
+  type BuildGridOpts,
+  type BuildTextOpts,
+} from './panels/helpers';
 export { StandaloneHost } from './adapters/standalone/adapter';
 export { StandaloneNode } from './adapters/standalone/node';
 

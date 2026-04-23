@@ -338,8 +338,81 @@
       }
     }
 
+    // Phase 4.1 — chat intent shortcuts. Map simple keywords to immediate
+    // panel-mount calls without spinning up the full Claude/agent
+    // subprocess (5-60s cold start). Runs BEFORE streamChat's fetch;
+    // hit → short-circuit + return true. Narrow matches intentionally
+    // fall through when vague so the real agent still handles open-ended
+    // asks.
+    function tryChatIntent(prompt) {
+      var p = String(prompt || '').toLowerCase().trim();
+      if (!p) return false;
+
+      function mount(panel, config) {
+        appendBubble('user', prompt);
+        var bubble = appendBubble('assistant', 'Mounting ' + panel + '...');
+        fetch('/platform/api/panel-mount', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ panel: panel, slot: 'right-panel', config: config || {} }),
+        }).then(function(r) { return r.json(); }).then(function(res) {
+          bubble.textContent = res && res.ok
+            ? 'Mounted ' + panel + ' (' + (res.nodeCount || 0) + ' nodes, ' + (res.composeMs || 0) + 'ms)'
+            : 'Mount failed: ' + (res && res.error || 'unknown');
+        }).catch(function() { bubble.textContent = 'Mount failed (network)'; });
+      }
+
+      function unmount(panel) {
+        appendBubble('user', prompt);
+        var bubble = appendBubble('assistant', 'Unmounting ' + panel + '...');
+        fetch('/platform/api/panel-unmount', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ panel: panel, slot: 'right-panel' }),
+        }).then(function(r) { return r.json(); }).then(function() {
+          bubble.textContent = 'Unmounted ' + panel;
+        }).catch(function() { bubble.textContent = 'Unmount failed'; });
+      }
+
+      // brand-palette — "palette" / "edit brand" / "brand colors"
+      if (/\b(brand\s+palette|^palette$|palette\b|brand\s+colors?|edit\s+brand)\b/.test(p)) {
+        var activeBrand = window.__reframeActiveBrand || '';
+        mount('brand-palette', activeBrand ? { brandSlug: activeBrand } : {});
+        return true;
+      }
+      // variant-picker — "variants" / "variant picker"
+      if (/\b(variant\s+picker|variants?)\b/.test(p)) {
+        var sid = state.currentSceneId
+          || (document.querySelector('[data-session]') && document.querySelector('[data-session]').getAttribute('data-session'));
+        mount('variant-picker', sid ? { sceneId: sid } : {});
+        return true;
+      }
+      // inspector — "inspect" / "properties"
+      if (/\b(inspector|inspect\s+node|inspect|properties|props)\b/.test(p)) {
+        var sel = window.__reframeSelection || {};
+        mount('inspector', sel.inode && sel.sceneId ? { nodeId: sel.inode, sceneId: sel.sceneId } : {});
+        return true;
+      }
+      // close — "close panel" / "unmount X" / "hide palette"
+      var closeMatch = p.match(/\b(close|unmount|hide|dismiss)\s+(panel|inspector|palette|picker|variant|brand)/);
+      if (closeMatch) {
+        var which = closeMatch[2];
+        var target = which === 'palette' || which === 'brand' ? 'brand-palette'
+          : which === 'picker' || which === 'variant' ? 'variant-picker'
+          : 'inspector';
+        unmount(target);
+        return true;
+      }
+      return false;
+    }
+
     // ── SSE stream parser. EventSource can't POST, so fetch + ReadableStream. ──
     function streamChat(prompt) {
+      // Intent shortcut — fast path for mount/unmount commands; skips
+      // the Claude subprocess entirely. Falls through when the prompt
+      // isn't a recognized intent (most asks).
+      if (tryChatIntent(prompt)) return;
+
       setSending(true);
       appendBubble('user', prompt);
       pendingAssistantBubble = null;
@@ -351,6 +424,7 @@
       // by the first event handler below (text | tool_use | tool_result).
       thinkingBubble = appendBubble('assistant thinking', '\u2026');
       thinkingBubble.setAttribute('data-testid', 'chat-thinking');
+      // NB: intent-shortcut `tryChatIntent` runs BEFORE this \u2014 see above.
 
       var body = { prompt: prompt };
       if (state.agentSessionId) body.sessionId = state.agentSessionId;
