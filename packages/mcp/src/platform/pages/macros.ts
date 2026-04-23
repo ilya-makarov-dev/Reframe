@@ -1,14 +1,12 @@
 /**
  * Platform page: Macros gallery (/platform/macros).
  *
- * Phase 4.3 — FULL self-hosted via the `macros-library` panel. Cards
- * fire an apply-macro gesture against the currentSceneSlug via the
- * MCP bridge (reframe_edit op=applyMacro, to be handled by the
- * agent-runtime tool registry in a future pass).
+ * Phase 4.3 + 5.2 — fully self-hosted. Shell via app-shell composer.
  */
 
-import { renderShell, renderSidebar, type SidebarSceneItem, type SidebarComponentItem, type SidebarMacroItem } from '../layout.js';
 import { renderPanel } from '../panels.js';
+import { renderPlatformShellPage } from './shell-boot.js';
+import type { SidebarSceneItem, SidebarComponentItem, SidebarMacroItem } from '../layout.js';
 
 interface MacrosData {
   macros: Array<{
@@ -41,27 +39,21 @@ export function renderMacrosPage(data: MacrosData): string {
   }));
 
   const lead = data.macros.length === 0
-    ? 'A recipe is a saved sequence of transformations you can apply to any scene — "brutalize this", "appleify this", "give me the editorial treatment". Save one via reframe_project save_macro.'
-    : `${data.macros.length} recipe${data.macros.length === 1 ? '' : 's'} available. Click a card to apply its transformation sequence to the current scene.`;
+    ? 'A recipe is a saved sequence of transformations — "brutalize this", "give me the editorial treatment". Save one via reframe_project save_macro.'
+    : `${data.macros.length} recipe${data.macros.length === 1 ? '' : 's'}. Click a card to apply.`;
 
-  const rendered = renderPanel('macros-library', {
+  const pageRendered = renderPanel('macros-library', {
     title: 'Recipes',
     lead,
-    emptyText: 'No recipes yet. Save one via reframe_project save_macro to seed.',
+    emptyText: 'No recipes yet. Save one via reframe_project save_macro.',
     entries,
-    width: 1280,
+    width: 1220,
   }, {});
 
-  return renderShell({
+  return renderPlatformShellPage({
     title: 'reframe · macros',
-    main: rendered.html,
-    sidebar: renderSidebar({
-      current: 'macros',
-      scenes: data.sidebarScenes ?? [],
-      components: data.sidebarComponents ?? [],
-      macros: data.sidebarMacros ?? [],
-    }),
+    current: 'macros',
     activeBrand: data.activeBrand,
-    agentStatus: 'idle',
+    pageHtml: pageRendered.html,
   });
 }

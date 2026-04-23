@@ -30,6 +30,8 @@ import {
   composeDashboardPanel,
   composeLibraryGridPanel,
   composeEditorShellPanel,
+  composeAppShellPanel,
+  composeBottomChatPanel,
   parseDesignMd,
   type PaletteEntry,
   type VariantEntry,
@@ -169,6 +171,33 @@ function inferAvailableRoles(projectDir: string | undefined, brandSlug: string |
   if (!ds) return [];
   return Array.from(ds.colors.roles.keys()).slice(0, 12);
 }
+
+// bottom-chat — agent chat pill. Chrome is composer-emitted INode
+// (scope chips, input container, action row, send button); history
+// streaming + textarea remain hand-wired in platform-ui.js binder
+// via the chat-history + chat-input mount slots.
+COMPOSERS_EXT.set('bottom-chat', (config) => {
+  const graph = composeBottomChatPanel({
+    width: typeof config.width === 'number' ? config.width : undefined,
+    scopeChips: Array.isArray(config.scopeChips) ? (config.scopeChips as any[]) : undefined,
+    deepThink: typeof config.deepThink === 'boolean' ? config.deepThink : true,
+  });
+  return { graph };
+});
+
+// app-shell — chrome for non-editor pages (dashboard / components /
+// macros / design-system). Header + sidebar nav + main slot. Page
+// content injected into `app-main` slot via server-side hydration.
+COMPOSERS_EXT.set('app-shell', (config) => {
+  const graph = composeAppShellPanel({
+    title: typeof config.title === 'string' ? config.title : undefined,
+    activeBrand: typeof config.activeBrand === 'string' ? config.activeBrand : undefined,
+    sidebarItems: Array.isArray(config.sidebarItems) ? (config.sidebarItems as any[]) : [],
+    width: typeof config.width === 'number' ? config.width : undefined,
+    height: typeof config.height === 'number' ? config.height : undefined,
+  });
+  return { graph };
+});
 
 // editor-shell — FULL self-host of /platform/project/:slug. Composes
 // the editor chrome (header + sidebar + canvas area + right panel +

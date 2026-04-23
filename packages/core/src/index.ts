@@ -493,6 +493,15 @@ export {
   type EditorShellOptions,
 } from './panels/editor-shell';
 export {
+  composeAppShellPanel,
+  type AppShellOptions,
+  type AppShellSidebarItem,
+} from './panels/app-shell';
+export {
+  composeBottomChatPanel,
+  type BottomChatOptions,
+} from './panels/bottom-chat';
+export {
   buildPanel,
   buildSection,
   buildCard,

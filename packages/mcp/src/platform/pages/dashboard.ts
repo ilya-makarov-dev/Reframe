@@ -1,23 +1,17 @@
 /**
  * Platform page: Dashboard (/platform).
  *
- * Phase 4.2 — FULL self-hosted through INode. The `main` slot is
- * rendered by the `dashboard` panel composer via the panel registry.
- * Zero hand-written dashboard HTML remains in this file.
- *
- * The router's buildDashboardData populates { greeting, sceneCount,
- * projects } and the panel does the rest.
+ * Phase 4.2 + 5.2 — FULL self-hosted through INode. Both the shell
+ * (header + sidebar + chrome) AND the main content (project grid)
+ * are now composer-emitted. Zero hand-written HTML remains in this
+ * file — it's purely data mapping + two renderPanel calls + server-
+ * side slot hydration.
  */
 
-import {
-  renderShell,
-  renderSidebar,
-  type SidebarSceneItem,
-  type SidebarComponentItem,
-  type SidebarMacroItem,
-} from '../layout.js';
 import type { ProjectGroup } from '../project-grouping.js';
 import { renderPanel } from '../panels.js';
+import { escape as esc, renderPlatformShellPage } from './shell-boot.js';
+import type { SidebarSceneItem, SidebarComponentItem, SidebarMacroItem } from '../layout.js';
 
 interface DashboardData {
   scenes: Array<{
@@ -44,9 +38,6 @@ function greeting(): string {
   return 'Good evening.';
 }
 
-// Generic tag names the importer emits for unnamed-structural nodes.
-// When a project's header-name hits one of these, fall back to the slug
-// so cards read "qa-landing" instead of "Stack".
 const GENERIC_TAGS = new Set([
   'div', 'span', 'section', 'main', 'header', 'footer', 'article', 'aside', 'nav',
   'stack', 'row', 'column', 'group', 'frame', 'canvas', 'body', 'html',
@@ -70,20 +61,17 @@ export function renderDashboard(data: DashboardData): string {
     };
   });
 
-  const rendered = renderPanel('dashboard', {
+  const pageRendered = renderPanel('dashboard', {
     greeting: greeting(),
     sceneCount: data.scenes.length,
     projects,
-    width: 1280,
+    width: 1220,
   }, {});
 
-  return renderShell({
+  return renderPlatformShellPage({
     title: 'reframe',
-    main: rendered.html,
-    sidebar: renderSidebar({
-      current: 'home',
-      activeBrand: data.activeBrand,
-    }),
+    current: 'home',
     activeBrand: data.activeBrand,
+    pageHtml: pageRendered.html,
   });
 }

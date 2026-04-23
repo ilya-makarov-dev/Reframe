@@ -1,14 +1,12 @@
 /**
  * Platform page: Components gallery (/platform/components).
  *
- * Phase 4.3 — FULL self-hosted via the `components-library` panel.
- * Card entries link to #<slug> anchors (preserves the legacy deep-link
- * behavior). Router still builds the {components} list; this file just
- * maps it into LibraryEntry shape and hands to the panel registry.
+ * Phase 4.3 + 5.2 — fully self-hosted. Shell via app-shell composer.
  */
 
-import { renderShell, renderSidebar, type SidebarSceneItem, type SidebarComponentItem, type SidebarMacroItem } from '../layout.js';
 import { renderPanel } from '../panels.js';
+import { renderPlatformShellPage } from './shell-boot.js';
+import type { SidebarSceneItem, SidebarComponentItem, SidebarMacroItem } from '../layout.js';
 
 interface ComponentsData {
   components: Array<{
@@ -33,27 +31,21 @@ export function renderComponentsPage(data: ComponentsData): string {
   }));
 
   const lead = data.components.length === 0
-    ? 'Your reusable design pieces — headers, cards, pricing blocks, anything you drop into scenes without rebuilding. Extract a subtree from a scene to add it here.'
-    : `${data.components.length} reusable piece${data.components.length === 1 ? '' : 's'} in this project. Drop any of them into a scene with the instantiate intent — they keep their master reference so updates propagate automatically.`;
+    ? 'Reusable design pieces — headers, cards, pricing blocks. Extract a subtree from a scene to add it here.'
+    : `${data.components.length} reusable piece${data.components.length === 1 ? '' : 's'} in this project. Drop any into a scene with the instantiate intent.`;
 
-  const rendered = renderPanel('components-library', {
+  const pageRendered = renderPanel('components-library', {
     title: 'Library',
     lead,
     emptyText: 'No components yet. Extract one from any scene to seed the library.',
     entries,
-    width: 1280,
+    width: 1220,
   }, {});
 
-  return renderShell({
+  return renderPlatformShellPage({
     title: 'reframe · library',
-    main: rendered.html,
-    sidebar: renderSidebar({
-      current: 'components',
-      scenes: data.sidebarScenes ?? [],
-      components: data.sidebarComponents ?? [],
-      macros: data.sidebarMacros ?? [],
-    }),
+    current: 'components',
     activeBrand: data.activeBrand,
-    agentStatus: 'idle',
+    pageHtml: pageRendered.html,
   });
 }
