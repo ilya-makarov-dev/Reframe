@@ -132,6 +132,7 @@ export const projectInputSchema = {
       'export_tokens', 'import_tokens',
       'product_audit', 'detect_patterns', 'list_trash', 'restore', 'empty_trash',
       'extract_content', 'apply_content',
+      'launch_ui',
     ])
     .describe(
       'Action: init, open, save, load, list, status, delete, save_design, list_brands, set_active_brand, show_source, history, history_clear, add_variant, list_variants, refresh_variants, save_macro, list_macros, apply_macro, delete_macro, list_components (show every component master stored in the project), show_component (return a component master with its slots + revisions), delete_component (remove a component master from disk — scenes that reference it by name will show as missing on next load)',
@@ -149,6 +150,7 @@ export const projectInputSchema = {
   }).optional().describe('Target viewport (for add_variant)'),
   macroOps: z.array(z.any()).optional().describe('Op templates for save_macro. Each op may use $role:<role>[<index>?] as nodeId for placeholders.'),
   description: z.string().optional().describe('Human description (for save_macro)'),
+  port: z.number().optional().describe('TCP port for launch_ui (default 4100). Ignored by other actions.'),
 };
 
 // ─── Handler ─────────────────────────────────────────────────
@@ -164,6 +166,7 @@ export async function handleProject(input: {
   viewport?: { name: string; width: number; height: number };
   macroOps?: any[];
   description?: string;
+  port?: number;
 }) {
   try {
     switch (input.action) {
@@ -201,6 +204,7 @@ export async function handleProject(input: {
       case 'list_trash': return doListTrash();
       case 'restore': return doRestore(input);
       case 'empty_trash': return doEmptyTrash();
+      case 'launch_ui': return await doLaunchUi(input);
       default:
         return err(
           `Unknown action "${input.action}". Use: init, open, save, load, list, status, delete, save_design, list_brands, set_active_brand, show_source, history, history_clear, add_variant, list_variants, refresh_variants, save_macro, list_macros, apply_macro, delete_macro, list_components, show_component, delete_component, render_project, project_graph, product_audit, detect_patterns, extract_content, apply_content`,
@@ -1150,6 +1154,131 @@ function doEmptyTrash() {
     require('fs').unlinkSync(join(trashDir, f));
   }
   return ok(`Emptied trash (${files.length} files permanently deleted).`);
+}
+
+// ─── Launch UI ───────────────────────────────────────────────
+// Start the HTTP sidecar (Platform UI on :4100) from the agent.
+// Useful when the designer is working via Claude Code and wants to pop
+// open the live canvas without hunting for a spare terminal to run
+// `npm start` in. Probe-first: if a sibling reframe-sidecar is already
+// listening, we reuse it; if a foreign service holds the port, we
+// report back instead of taskkill-ing anything.
+//
+// Detachment: the spawned child uses { detached: true, stdio: 'ignore',
+// unref() } so it survives when this MCP subprocess exits. The caller
+// can close Claude Code and the sidecar stays up for the browser tab.
+//
+// Entry-point resolution: we resolve `packages/mcp/dist/mcp/src/http-
+// server.js` relative to the MCP distribution — works both from the
+// installed npm package and the monorepo checkout.
+
+async function doLaunchUi(input: { port?: number }) {
+  const port = typeof input.port === 'number' && input.port > 0 ? input.port : 4100;
+
+  // Probe first — avoid spawning a sibling that just exits on EADDRINUSE.
+  const occupant = await probePort(port);
+  if (occupant === 'reframe') {
+    return ok(
+      `Platform UI already running at http://localhost:${port}/platform — reframe-sidecar detected, reusing.`,
+    );
+  }
+  if (occupant === 'foreign') {
+    return err(
+      `Port ${port} is held by a non-reframe service. Pick a free port via { port: <n> } or free :${port} first.`,
+    );
+  }
+
+  // Resolve the sidecar entry point. In the monorepo checkout the
+  // compiled http-server lives 5 levels up from this file:
+  //   packages/mcp/dist/mcp/src/tools/project.js → ../../http-server.js
+  // When the package is installed as @reframe/mcp, the same relative
+  // layout is preserved inside node_modules/@reframe/mcp/dist/.
+  const path = await import('path');
+  const { existsSync } = await import('fs');
+  const here = __dirname;
+  const candidates = [
+    path.resolve(here, '..', 'http-server.js'),                        // inside tools/
+    path.resolve(here, '..', '..', 'http-server.js'),                  // edge case
+    path.resolve(process.cwd(), 'packages/mcp/dist/mcp/src/http-server.js'),
+  ];
+  let entry: string | null = null;
+  for (const c of candidates) {
+    if (existsSync(c)) { entry = c; break; }
+  }
+  if (!entry) {
+    return err(
+      `Could not locate http-server.js. Run \`npm run build\` from the repo root first, or launch with \`npm start\`.`,
+    );
+  }
+
+  try {
+    const { spawn } = await import('child_process');
+    const child = spawn(process.execPath, [entry], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        // The spawned process IS the sidecar — let it bind the port.
+        REFRAME_HTTP_PORT: String(port),
+      },
+    });
+    child.unref();
+
+    // Poll for readiness — up to 5 s. We don't want to return success
+    // before the port is actually listening, or the user's next click
+    // on /platform will 404. 50 × 100 ms keeps the UX snappy for the
+    // common <1 s startup while still covering a cold Yoga init.
+    let ready = false;
+    for (let i = 0; i < 50; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      const p = await probePort(port);
+      if (p === 'reframe') { ready = true; break; }
+    }
+    if (!ready) {
+      return err(
+        `Sidecar spawned (pid=${child.pid ?? '?'}) but port ${port} didn't go live within 5s. Check the terminal / dist/ is built.`,
+      );
+    }
+    return ok(
+      `Platform UI live at http://localhost:${port}/platform (sidecar pid=${child.pid ?? '?'}, detached — survives Claude Code close).`,
+    );
+  } catch (e: any) {
+    return err(`Failed to spawn sidecar: ${e?.message ?? e}`);
+  }
+}
+
+/**
+ * Probe a port for a reframe-sidecar contract. Inline mirror of the one
+ * in http-server.ts — kept separate so the project tool can probe
+ * without pulling the whole http-server module (and re-importing its
+ * EventSource / SSE side-effects) into the MCP stdio subprocess.
+ */
+async function probePort(port: number): Promise<'reframe' | 'foreign' | 'free'> {
+  const http = await import('http');
+  return new Promise((resolve) => {
+    const req = http.get({
+      host: '127.0.0.1',
+      port,
+      path: '/api/health',
+      timeout: 500,
+    }, (res) => {
+      let buf = '';
+      res.on('data', (c) => { buf += c.toString(); });
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(buf);
+          resolve(j && j.service === 'reframe-sidecar' ? 'reframe' : 'foreign');
+        } catch {
+          resolve('foreign');
+        }
+      });
+    });
+    req.on('error', (e: any) => {
+      resolve(e && (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND') ? 'free' : 'foreign');
+    });
+    req.on('timeout', () => { req.destroy(); resolve('foreign'); });
+  });
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
