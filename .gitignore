@@ -110,9 +110,12 @@ packages/studio/
 # package source + user actions.
 .reframe/
 
-# ─── MCP config (user-specific paths/api keys) ──────────
-.mcp.json
-!.mcp.json.example
+# MCP config lives in the repo at .mcp.json — committed so Claude Code /
+# Cursor / any MCP client picks up reframe automatically on clone. The
+# file only holds relative paths + an env flag, nothing user-specific.
+# If you need a personal override, use .mcp.local.json and a client
+# that reads both, or wrap this one via a parent config.
+.mcp.local.json
 
 # ─── Playwright ─────────────────────────────────────────
 # Browser binaries are installed globally, test results are ephemeral.

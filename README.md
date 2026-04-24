@@ -347,18 +347,22 @@ npm start             # :4100/platform — canvas editor + agent chat
 
 ### MCP endpoint for any agent
 
+The repo ships a ready-made [`.mcp.json`](./.mcp.json) at the project root. Claude Code picks it up automatically on the next start after `npm run build`. Nothing else to configure.
+
 ```json
 {
   "mcpServers": {
     "reframe": {
+      "type": "stdio",
       "command": "node",
-      "args": ["packages/mcp/dist/mcp/src/index.js"]
+      "args": ["packages/mcp/dist/mcp/src/index.js"],
+      "env": { "REFRAME_HTTP_PORT": "0" }
     }
   }
 }
 ```
 
-Drop this into `.mcp.json` (Claude Code), `settings.json` (Cursor), or your MCP client config.
+For other MCP clients (Cursor, custom wrappers, IDE plugins) drop the same descriptor into your client's config. `REFRAME_HTTP_PORT=0` tells the MCP subprocess NOT to open its own HTTP sidecar — `npm start` already owns `:4100` and the probe-first protocol shares state across siblings automatically.
 
 ---
 
