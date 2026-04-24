@@ -161,6 +161,7 @@ export function renderShell(props: ShellProps): string {
           <button data-format="svg">SVG</button>
           <button data-format="png">PNG</button>
           <button data-format="pdf">PDF</button>
+          <button data-format="pptx">PowerPoint (.pptx)</button>
           <button data-format="animated_html">Animated HTML</button>
           <button data-format="lottie">Lottie</button>
           <button data-format="site">Site bundle</button>
@@ -638,6 +639,7 @@ export function renderMacroDropdowns(): string {
 // explicit context without any server-side prompt changes.
 export function renderBottomChat(): string {
   return `<div class="bottom-chat" data-bottom-chat>
+    <div class="bc-resize-handle" data-bc-resize role="separator" aria-orientation="horizontal" aria-label="Resize chat height" tabindex="0"></div>
     <button class="bc-collapse" data-bc-collapse title="Свернуть/развернуть" aria-label="Toggle chat log" aria-expanded="true">
       <svg class="bc-collapse-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
         <path d="M3 4.5l3 3 3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
@@ -651,6 +653,11 @@ export function renderBottomChat(): string {
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
           <rect x="5" y="2" width="4" height="7" rx="2" stroke="currentColor" stroke-width="1.3"/>
           <path d="M3 7a4 4 0 0 0 8 0M7 11v1M5 12h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button class="bc-ref" data-bc-ref-toggle title="Attach URL or file reference" aria-label="Add reference" aria-haspopup="menu" aria-expanded="false">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M6 8a2 2 0 0 0 2.8 0l2-2a2 2 0 1 0-2.8-2.8l-1 1M8 6a2 2 0 0 0-2.8 0l-2 2a2 2 0 1 0 2.8 2.8l1-1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
         </svg>
       </button>
       <button class="bc-think" data-bc-think aria-pressed="false" title="Deep think — let the model reason through complex design asks" aria-label="Deep think">
@@ -676,6 +683,7 @@ export function renderBottomChat(): string {
           <path d="M7 3v8M3 7h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
         </svg>
       </button>
+      <span class="bc-elapsed" data-bc-elapsed hidden aria-live="polite"></span>
       <button class="bc-cancel" data-bc-cancel title="Stop" aria-label="Stop" hidden>
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
           <rect x="2" y="2" width="8" height="8" rx="1" fill="currentColor"/>

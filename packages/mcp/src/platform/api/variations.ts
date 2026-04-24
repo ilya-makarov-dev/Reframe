@@ -247,7 +247,7 @@ async function ensureTokenIndex(
   return tokenIdx;
 }
 
-async function applyVariationToScene(
+export async function applyVariationToScene(
   sceneId: string,
   kind: string,
   value: any,

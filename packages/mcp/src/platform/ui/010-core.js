@@ -162,16 +162,84 @@
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  function flash(message, kind) {
-    const el = document.createElement('div');
-    el.className = 'flash' + (kind ? ' ' + kind : '');
-    el.textContent = message;
-    document.body.appendChild(el);
-    requestAnimationFrame(function() { el.classList.add('show'); });
-    setTimeout(function() {
+  // Toast system.
+  //   flash('saved')                            → neutral info, auto-dismiss ~2.4s
+  //   flash('ok', 'success')                    → success tint, auto-dismiss
+  //   flash('warn', 'warning')                  → warning tint, auto-dismiss
+  //   flash('failed', 'error')                  → error tint, STICKY (manual × to dismiss)
+  //   flash('done', 'success', { duration: 5000 })       → explicit duration
+  //   flash('need a redo', 'error', { action: { label: 'Retry', onClick: fn } })
+  //                                             → clickable action inside the toast
+  //   flash('queued', 'info', { sticky: true }) → force stick even for info
+  //
+  // Multiple toasts stack vertically in a fixed container so a fast burst
+  // (save + compile + audit) doesn't overwrite itself. Auto-dismiss shows
+  // a thin countdown bar along the bottom; the bar is the source of truth
+  // — CSS animation drives visual countdown, matching JS setTimeout.
+  function flash(message, kind, opts) {
+    opts = opts || {};
+    var type = kind || 'info';
+    var sticky = opts.sticky != null ? !!opts.sticky : (type === 'error');
+    var duration = Number(opts.duration) > 0 ? Number(opts.duration) : 2400;
+
+    var host = document.getElementById('reframe-flash-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'reframe-flash-host';
+      host.className = 'flash-host';
+      document.body.appendChild(host);
+    }
+
+    var el = document.createElement('div');
+    el.className = 'flash flash--' + type + (sticky ? ' flash--sticky' : '');
+    el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+
+    var msg = document.createElement('span');
+    msg.className = 'flash-msg';
+    msg.textContent = message;
+    el.appendChild(msg);
+
+    if (opts.action && opts.action.label && typeof opts.action.onClick === 'function') {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'flash-action';
+      btn.textContent = opts.action.label;
+      btn.addEventListener('click', function() {
+        try { opts.action.onClick(); } catch (_) {}
+        dismiss();
+      });
+      el.appendChild(btn);
+    }
+
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'flash-close';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.textContent = '×';
+    close.addEventListener('click', dismiss);
+    el.appendChild(close);
+
+    var timerHandle = null;
+    var dismissed = false;
+    function dismiss() {
+      if (dismissed) return;
+      dismissed = true;
+      if (timerHandle) { clearTimeout(timerHandle); timerHandle = null; }
       el.classList.remove('show');
-      setTimeout(function() { el.remove(); }, 300);
-    }, 2400);
+      setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 220);
+    }
+
+    if (!sticky) {
+      var bar = document.createElement('div');
+      bar.className = 'flash-countdown';
+      bar.style.animationDuration = duration + 'ms';
+      el.appendChild(bar);
+      timerHandle = setTimeout(dismiss, duration);
+    }
+
+    host.appendChild(el);
+    requestAnimationFrame(function() { el.classList.add('show'); });
+    return { dismiss: dismiss, el: el };
   }
 
   async function api(path, body) {
@@ -380,8 +448,89 @@
         case 'reframe:measurements':
           onMeasurements(data.measurements || []);
           break;
+        case 'reframe:iframe-error':
+          onIframeError(data);
+          break;
+        case 'reframe:rects':
+          // Watched-selector broadcast. Fan out to subscribers via a
+          // window event so multiple consumers (future pin overlay,
+          // comment bubbles) can react without a central registry.
+          try {
+            window.dispatchEvent(new CustomEvent('reframe:iframe-rects', {
+              detail: { sceneId: data.__canvasSceneId, entries: data.entries || [] },
+            }));
+          } catch (_) { /* CustomEvent unsupported */ }
+          break;
       }
     });
+  }
+
+  // Iframe runtime errors → non-modal toast. Errors from scene code
+  // (bad inline script, broken font fetch, thrown promise in a data
+  // viz) are otherwise invisible. We throttle to one toast per unique
+  // message per 30s so a repeating error doesn't blanket the screen —
+  // the iframe's console still has the full stream for debugging.
+  //
+  // Designer-facing copy: raw JS exceptions are intimidating ("Uncaught
+  // TypeError: Cannot read property 'foo' of undefined") and rarely
+  // actionable for someone who didn't write the code. Translate the
+  // common ones to plain language while keeping the original available
+  // via the toast's hover-title.
+  var _iframeErrorSeen = Object.create(null);
+  function humanizeError(raw, kind) {
+    var s = String(raw || '');
+    if (!s) return 'Something went wrong in the preview.';
+    if (kind === 'unhandledrejection') {
+      return 'The scene kicked off an async task that failed: ' + s;
+    }
+    // Common React/JS patterns with designer-friendly re-phrasings.
+    var m;
+    if (/Cannot read propert(?:y|ies) .+ of (?:undefined|null)/.test(s)) {
+      m = s.match(/propert(?:y|ies) ['"]?([^'"]+)['"]? of/);
+      var prop = m ? m[1] : 'something';
+      return 'Scene code tried to read "' + prop + '" from a value that wasn\'t there.';
+    }
+    if (/is not (?:a )?function/.test(s)) {
+      m = s.match(/(\S+)\s+is not/);
+      return 'Scene code called ' + (m ? m[1] : 'something') + ' like a function, but it wasn\'t one.';
+    }
+    if (/Failed to (?:fetch|load)/i.test(s) || /net::/i.test(s)) {
+      return 'Scene couldn\'t load a resource (font, image, or script). Check the URL.';
+    }
+    if (/Content Security Policy|Refused to (?:load|execute)/i.test(s)) {
+      return 'A browser security rule blocked scene content — likely an inline script or remote asset.';
+    }
+    if (/SyntaxError/i.test(s)) {
+      return 'Scene has a syntax error in its inline script — check the last edit.';
+    }
+    if (/ResizeObserver loop/i.test(s)) {
+      // Non-actionable browser noise — silenced upstream but add a floor.
+      return '';
+    }
+    // Fallback — strip noisy prefixes designers don't care about.
+    return s.replace(/^(Uncaught\s+)?(?:\w+Error)\s*:\s*/, '').slice(0, 180);
+  }
+  function onIframeError(data) {
+    if (!data || typeof data.message !== 'string') return;
+    var humanized = humanizeError(data.message, data.kind);
+    if (!humanized) return; // filter known non-actionable noise
+    var key = (data.kind || 'error') + ':' + humanized;
+    var now = Date.now();
+    if (_iframeErrorSeen[key] && (now - _iframeErrorSeen[key]) < 30000) return;
+    _iframeErrorSeen[key] = now;
+    var loc = '';
+    if (data.source) {
+      var src = data.source.split('/').pop();
+      loc = ' · ' + src + (typeof data.lineno === 'number' ? ':' + data.lineno : '');
+    }
+    var toast = flash('Scene error' + loc + ': ' + humanized, 'error');
+    // Keep the raw message accessible via title for anyone who wants the
+    // exact exception — the humanized copy is the headline, raw is the
+    // footnote. flash() returns {dismiss, el} so this is safe when the
+    // implementation permits.
+    if (toast && toast.el && toast.el.setAttribute) {
+      toast.el.setAttribute('title', data.message);
+    }
   }
 
   function onMeasurements(list) {

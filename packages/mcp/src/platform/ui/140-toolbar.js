@@ -467,6 +467,24 @@
 
   // ── Export split-preview overlay ──────────────────────
   function showExportPreview(sessionId, format) {
+    // Binary formats (pptx, pdf, png) can't be rendered inside an iframe —
+    // the browser would either download them or show a zip error. Skip
+    // the split-preview overlay and go straight to download.
+    if (format === 'pptx' || format === 'pdf' || format === 'png') {
+      var downloadUrl = '/preview/' + sessionId + '.' + format;
+      flash('Preparing ' + format.toUpperCase() + '…', 'info');
+      // Using a hidden <a download> avoids the 'pop-up blocked' that
+      // window.open() sometimes hits — the click context is the user's
+      // menu selection, so browsers treat it as user-initiated.
+      var a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = '';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function() { a.remove(); }, 5000);
+      return;
+    }
     var previewUrl = '/preview/' + sessionId;
     var exportUrl = '/preview/' + sessionId + '.' + format;
     // Both branches of the old `isCode` ternary emitted identical iframe

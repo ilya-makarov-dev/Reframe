@@ -33,6 +33,8 @@ import { handleIntentApi } from './api/intent.js';
 import { handleGestureApi } from './api/gesture.js';
 import { handleNodeEditApi } from './api/node-edit.js';
 import { handleVariationsApi } from './api/variations.js';
+import { handleResizeApi } from './api/resize.js';
+import { handleTweaksApi } from './api/tweaks.js';
 import { renderShell, renderSidebar } from './layout.js';
 import type { SidebarSceneItem, SidebarComponentItem, SidebarMacroItem } from './layout.js';
 import { hydrateShell } from './hydrate.js';
@@ -311,6 +313,16 @@ export default async function(o){
     if (pathname === '/platform/api/rebrand/apply' ||
         pathname.startsWith('/platform/api/variations/')) {
       return handleVariationsApi(req, res, ctx);
+    }
+    // Resize / viewport adapt endpoint — spawns a tablet/phone variant
+    // via core's adaptFromGraph without routing through the chat agent.
+    if (pathname.startsWith('/platform/api/resize/')) {
+      return handleResizeApi(req, res, ctx);
+    }
+    // Tweaks — agent-declared live controls dispatched directly against
+    // the engine (no chat turn, no LLM cost).
+    if (pathname.startsWith('/platform/api/tweaks/')) {
+      return handleTweaksApi(req, res, ctx);
     }
 
     return handleIntentApi(req, res, ctx);

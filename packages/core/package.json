@@ -41,6 +41,7 @@
     "canvaskit-wasm": "^0.41.0",
     "linkedom": "^0.18.12",
     "opentype.js": "^1.3.4",
+    "pptxgenjs": "^4.0.1",
     "svg-parser": "^2.0.4",
     "yoga-layout": "^3.2.1"
   }

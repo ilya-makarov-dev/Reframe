@@ -10,7 +10,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerReframeMcpTools } from './register-tools.js';
 import { initYoga } from '../../core/src/engine/yoga-init.js';
 import { VERSION } from './version.js';
-import { startHttpSidecar } from './http-server.js';
+import { ensureHttpSidecar } from './http-server.js';
 import { projectExists } from '../../core/src/project/io.js';
 import { setDeferredProjectInit, loadProjectScenes } from './store.js';
 import { setProjectDir } from './tools/project.js';
@@ -44,12 +44,13 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // REFRAME_HTTP_PORT=0 disables the sidecar — used when this MCP is
-  // spawned by a parent reframe sidecar (the parent already owns the
-  // HTTP port and we'd kill it during the takeover dance).
+  // Sidecar start is now probe-first (see ensureHttpSidecar): if a
+  // sibling reframe-sidecar already owns the port, we silently share
+  // it instead of fighting for ownership. REFRAME_HTTP_PORT=0 still
+  // forces skip for tests / parent-managed deployments.
   const port = parseInt(process.env.REFRAME_HTTP_PORT ?? '4100', 10);
   if (port > 0) {
-    startHttpSidecar(port);
+    await ensureHttpSidecar(port);
   }
 }
 

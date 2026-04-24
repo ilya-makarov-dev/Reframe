@@ -26,3 +26,6 @@ export type { LottieExportOptions } from './lottie.js';
 export { exportSite } from './site.js';
 export type { SiteExportOptions, SitePage } from './site.js';
 
+export { exportToPptx } from './pptx.js';
+export type { PptxExportOptions, PptxScene } from './pptx.js';
+

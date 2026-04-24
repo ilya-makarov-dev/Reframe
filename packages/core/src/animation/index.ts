@@ -29,6 +29,13 @@ export {
   sampleTimeline,
 } from './timeline.js';
 
+// Declarative builder — preset/stagger/sequence config → ITimeline.
+export {
+  buildTimeline,
+  type TimelineBuildConfig,
+  type TimelineBuildResult,
+} from './timeline-builder.js';
+
 // Presets
 export {
   presets, getPreset, listPresets, stagger,

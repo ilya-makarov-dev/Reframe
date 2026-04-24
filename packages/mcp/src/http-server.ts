@@ -56,25 +56,66 @@ import { getProjectDir as getToolsProjectDir } from './tools/project.js';
 
 // ─── Port management ────────────────────────────────────────
 
-/** Kill whatever process is occupying a TCP port (Windows + Unix). */
-async function killPort(port: number): Promise<void> {
-  try {
-    if (process.platform === 'win32') {
-      const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: 'utf8' });
-      const pids = new Set(
-        out.split('\n')
-          .map(l => l.trim().split(/\s+/).pop())
-          .filter((p): p is string => !!p && /^\d+$/.test(p) && p !== '0' && p !== String(process.pid))
-      );
-      for (const pid of pids) {
-        try { execSync(`taskkill /PID ${pid} /F`, { encoding: 'utf8' }); } catch {}
-      }
-    } else {
-      execSync(`lsof -ti :${port} | xargs -r kill -9`, { encoding: 'utf8' });
+/**
+ * Reframe service identifier carried in the /api/health response so any
+ * process trying to bind :4100 can tell whether the existing listener is
+ * a sibling reframe-sidecar (share it, don't touch) vs an unrelated
+ * service (give up, don't kill). Bumped when the probe contract changes.
+ */
+const REFRAME_SERVICE_TAG = 'reframe-sidecar';
+const REFRAME_SERVICE_PROTOCOL = 1;
+
+/**
+ * Probe whether a reframe sidecar is already listening on the port.
+ *
+ *   returns 'reframe' → reframe-sidecar responded; share with it
+ *   returns 'foreign' → something else owns the port; do NOT kill
+ *   returns 'free'    → nothing is listening
+ *
+ * Uses a 500 ms timeout so slow ports don't stall the MCP subprocess
+ * startup path. IPv6 `::1` is tried first to match the sidecar's
+ * `httpListenHost()` default; failures fall back to `127.0.0.1`.
+ */
+async function probeSidecar(port: number): Promise<'reframe' | 'foreign' | 'free'> {
+  const hosts = ['127.0.0.1', '::1'];
+  for (const host of hosts) {
+    try {
+      const result = await new Promise<'reframe' | 'foreign' | 'free' | 'retry'>((resolve) => {
+        const req = require('http').get({
+          host,
+          port,
+          path: '/api/health',
+          timeout: 500,
+          headers: { 'user-agent': 'reframe-probe/1' },
+        }, (res: any) => {
+          let buf = '';
+          res.on('data', (c: Buffer) => { buf += c.toString(); });
+          res.on('end', () => {
+            try {
+              const j = JSON.parse(buf);
+              if (j && j.service === REFRAME_SERVICE_TAG) return resolve('reframe');
+              return resolve('foreign');
+            } catch {
+              return resolve('foreign');
+            }
+          });
+        });
+        req.on('error', (e: any) => {
+          // ECONNREFUSED = nothing listening; let fallback host try too.
+          if (e && (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND')) return resolve('free');
+          if (e && e.code === 'EHOSTUNREACH') return resolve('retry');
+          return resolve('foreign');
+        });
+        req.on('timeout', () => { req.destroy(); resolve('foreign'); });
+      });
+      if (result !== 'retry') return result;
+    } catch {
+      // Best-effort — if the probe itself throws, treat as free so
+      // startup proceeds and EADDRINUSE path catches real conflicts.
+      return 'free';
     }
-  } catch {
-    // Port may already be free
   }
+  return 'free';
 }
 
 import { registerReframeMcpTools } from './register-tools.js';
@@ -353,25 +394,73 @@ function broadcastSceneList(): void {
 
 let sidecarStarted = false;
 let sidecarPort = 4100;
+/** Flipped to true by tryListen() once httpServer.listen() callback fires.
+ *  Distinguishes "this process bound the port" from "this process only
+ *  registered as a sibling consumer" when ensureHttpSidecar is re-entered. */
+let _listening = false;
 
-/** Ensure sidecar is running. Safe to call multiple times — no-op after first. */
-export function ensureHttpSidecar(port?: number): void {
+/**
+ * Ensure the HTTP sidecar is running. Safe to call repeatedly — no-op
+ * after the first successful bind AND no-op when a sibling reframe
+ * process already owns the port.
+ *
+ * The port-sharing protocol:
+ *
+ *   1. If REFRAME_SKIP_HTTP_SIDECAR is set → skip entirely (tests).
+ *   2. If REFRAME_HTTP_PORT<=0 → skip (parent told us to shut up).
+ *   3. Probe /api/health on the requested port:
+ *      - reframe-sidecar responds → sibling is alive; we ride on its
+ *        data (same filesystem, same scenes, same project.json).
+ *        Mark started, record port, DO NOT listen, DO NOT kill.
+ *      - foreign service responds → log + disable. Never taskkill
+ *        someone else's server.
+ *      - nothing responds → proceed with listen as usual.
+ *
+ * Historical trap (pre-2026-04-24): we used to just try to listen,
+ * hit EADDRINUSE, and run killPort(). If the occupant was a PARENT
+ * reframe-sidecar (which happens every time an MCP subprocess is
+ * spawned via .mcp.json), killPort would terminate the user's live
+ * dashboard process — with no recovery. The probe-first approach
+ * makes the subprocess path safe by default.
+ */
+/** Outcome of ensureHttpSidecar. Callers use this to decide whether to
+ *  keep the Node process alive (when we bound the port) vs exit
+ *  cleanly (when a sibling already owns it). */
+export type EnsureSidecarResult = 'bound' | 'sibling' | 'foreign' | 'skipped';
+
+export async function ensureHttpSidecar(port?: number): Promise<EnsureSidecarResult> {
   const skip = process.env.REFRAME_SKIP_HTTP_SIDECAR;
-  if (skip === '1' || skip === 'true') return;
-  // REFRAME_HTTP_PORT=0 disables the sidecar entirely. Set by a parent
-  // sidecar when it spawns a subprocess reframe MCP (via .mcp.json in
-  // the in-app agent flow) so the subprocess does NOT try to bind port
-  // 4100 — which is already owned by the parent.
-  //
-  // Without this guard, the subprocess's storeScene → ensureHttpSidecar
-  // chain would try to listen on 4100, hit EADDRINUSE, fire the error
-  // handler that calls killPort(), and killPort's taskkill /F would
-  // terminate the PARENT sidecar (since it filters out only its own
-  // pid). That's the "platform dies right after compile" bug.
+  if (skip === '1' || skip === 'true') return 'skipped';
   const envPort = process.env.REFRAME_HTTP_PORT;
-  if (envPort !== undefined && Number(envPort) <= 0) return;
-  if (sidecarStarted) return;
-  startHttpSidecar(port ?? sidecarPort);
+  if (envPort !== undefined && Number(envPort) <= 0) return 'skipped';
+  if (sidecarStarted) return _listening ? 'bound' : 'sibling';
+
+  const targetPort = port ?? (envPort ? Number(envPort) : sidecarPort);
+  const occupant = await probeSidecar(targetPort);
+  if (occupant === 'reframe') {
+    sidecarStarted = true;
+    sidecarPort = targetPort;
+    process.stderr.write(
+      `reframe HTTP: sibling reframe-sidecar already on :${targetPort} — sharing, not re-binding\n`,
+    );
+    return 'sibling';
+  }
+  if (occupant === 'foreign') {
+    process.stderr.write(
+      `reframe HTTP: port ${targetPort} held by a non-reframe service — sidecar disabled (set REFRAME_HTTP_PORT to a free port or REFRAME_SKIP_HTTP_SIDECAR=1)\n`,
+    );
+    sidecarStarted = true;
+    return 'foreign';
+  }
+  startHttpSidecar(targetPort);
+  return 'bound';
+}
+
+/** Synchronous version for legacy call sites that can't await. */
+export function ensureHttpSidecarSync(port?: number): void {
+  ensureHttpSidecar(port).catch((err) => {
+    process.stderr.write(`reframe HTTP: ensureHttpSidecar failed — ${err?.message || err}\n`);
+  });
 }
 
 export function startHttpSidecar(port = 4100): void {
@@ -489,11 +578,38 @@ export function startHttpSidecar(port = 4100): void {
       if (handled) return;
     }
 
-    // Health check
+    // Health check.
+    //
+    // Two routes land here:
+    //   /health       — human / ops  (full status + session counts + scenes)
+    //   /api/health   — machine probe (tiny, contract-versioned, used by
+    //                   sibling reframe processes to decide whether to
+    //                   share this port or disable their own sidecar)
+    //
+    // /api/health MUST stay stable — changing its shape breaks the
+    // probe in older reframe processes still running on the machine.
+    // Bump REFRAME_SERVICE_PROTOCOL (top of file) when adding required
+    // fields; old siblings treating an unknown protocol as foreign is
+    // the fail-safe, but a mismatch triggers the "sidecar disabled"
+    // path which is visible in user-facing logs.
+    if (url.pathname === '/api/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        service: REFRAME_SERVICE_TAG,
+        protocol: REFRAME_SERVICE_PROTOCOL,
+        pid: process.pid,
+        version: VERSION,
+        port: sidecarPort,
+      }));
+      return;
+    }
     if (url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'ok',
+        service: REFRAME_SERVICE_TAG,
+        protocol: REFRAME_SERVICE_PROTOCOL,
+        pid: process.pid,
         version: VERSION,
         mode: 'sidecar',
         sessions: sessions.size,
@@ -668,6 +784,24 @@ export function startHttpSidecar(port = 4100): void {
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${stored.name} — TSX</title>
 <style>body{margin:0;background:#0b0b0d;color:#f5f5f7;font-family:ui-monospace,SF Mono,Menlo,monospace;padding:24px;font-size:13px;line-height:1.6}pre{margin:0;white-space:pre-wrap}</style>
 </head><body><pre>${tsx.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</pre></body></html>`);
+        return;
+      }
+      if (ext === 'pptx') {
+        // Binary PPTX export. Run the exporter, stream with the right
+        // MIME so the browser triggers a download instead of trying to
+        // render a zip in an iframe. Content-Disposition hints at the
+        // filename so "Save As" gets the correct default.
+        const { exportToPptx } = await import('../../core/src/exporters/pptx.js');
+        const buf = await exportToPptx(
+          { graph: stored.graph, rootId: stored.rootId, title: stored.name },
+          { deckTitle: stored.name, author: 'reframe', scale: 2 },
+        );
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          'Content-Disposition': `attachment; filename="${(stored.slug || sceneId).replace(/[^a-z0-9-]+/gi, '-')}.pptx"`,
+          'Content-Length': String(buf.length),
+        });
+        res.end(buf);
         return;
       }
       if (ext === 'lottie' || ext === 'json') {
@@ -935,6 +1069,7 @@ export function startHttpSidecar(port = 4100): void {
 
   function tryListen(): void {
     httpServer.listen(port, listenHost, () => {
+      _listening = true;
       process.stderr.write(
         `reframe HTTP sidecar on http://${displayHost}:${port} (bind ${listenHost}; scenes + events + MCP)\n`,
       );
@@ -991,17 +1126,21 @@ export function startHttpSidecar(port = 4100): void {
   }
 
   httpServer.on('error', (err: any) => {
-    if (err.code === 'EADDRINUSE' && retries < maxRetries) {
-      retries++;
-      process.stderr.write(`reframe HTTP: port ${port} in use — killing occupant (attempt ${retries}/${maxRetries})...\n`);
-      killPort(port).then(() => {
-        setTimeout(() => {
-          httpServer.close(() => {});
-          tryListen();
-        }, 500);
-      });
-    } else if (err.code === 'EADDRINUSE') {
-      process.stderr.write(`reframe HTTP: port ${port} still blocked after ${maxRetries} attempts, sidecar disabled\n`);
+    if (err.code === 'EADDRINUSE') {
+      // Port-sharing protocol fix (2026-04-24): we USED to taskkill the
+      // occupant here. That was catastrophic when the occupant was a
+      // parent reframe-sidecar (spawned MCP subprocess → tried to bind
+      // same port → killed the user's dashboard). ensureHttpSidecar now
+      // probe-first-bind-second; if we hit EADDRINUSE here it means the
+      // probe missed something (race condition, slow port), so disable
+      // cleanly and let the parent handle the request instead of
+      // fighting for ownership. killPort() stays defined for last-resort
+      // manual shutdown but is never auto-invoked.
+      process.stderr.write(
+        `reframe HTTP: port ${port} occupied (probe missed it? race with another start?) — sidecar disabled for this process\n`,
+      );
+      try { httpServer.close(); } catch {}
+      sidecarStarted = true; // short-circuit future ensureHttpSidecar calls
     } else {
       process.stderr.write(`reframe HTTP error: ${err.message}\n`);
     }
@@ -1017,7 +1156,33 @@ async function main() {
   await initYoga();
 
   const port = parseInt(process.env.REFRAME_PORT ?? '4100', 10);
-  startHttpSidecar(port);
+  // ensureHttpSidecar runs the probe-first protocol — if a sibling
+  // reframe-sidecar is already on this port, it exits cleanly instead
+  // of fighting for ownership. startHttpSidecar is still called when
+  // the probe reports the port free, so the single-instance path is
+  // unchanged. Prior behaviour (direct startHttpSidecar) skipped probe
+  // and relied on EADDRINUSE retry with killPort — which used to take
+  // down the occupant's process (parent sidecar in MCP subprocess
+  // scenarios). See ensureHttpSidecar JSDoc for the full protocol.
+  const outcome = await ensureHttpSidecar(port);
+
+  // For the standalone entry (`node http-server.js`, `npm start`), exit
+  // cleanly when another reframe process already owns the port. The
+  // ensureHttpSidecar result is authoritative — no async race vs
+  // _listening to second-guess. Keeps `npm start` idempotent: running
+  // it twice doesn't leave two half-alive Node processes.
+  if (outcome === 'sibling') {
+    process.stderr.write('reframe HTTP: sibling owns the port — exiting standalone starter\n');
+    process.exit(0);
+  }
+  if (outcome === 'foreign') {
+    process.stderr.write('reframe HTTP: port held by non-reframe service — exiting\n');
+    process.exit(1);
+  }
+  // 'bound' → httpServer.listen callback keeps the event loop alive;
+  // nothing else to do here.
+  // 'skipped' → user explicitly disabled sidecar via env. Stay alive
+  // in case they attached an MCP stdio transport separately.
 }
 
 // Only run standalone if this is the entry point

@@ -353,6 +353,61 @@ export function renderEditorShell(options: {
       <div id="loading"><div class="spinner"></div></div>
       <canvas id="reframe-viewport" tabindex="0"${sceneAttr} data-session="${esc(options.sceneIds?.split(',')[0] ?? '')}"></canvas>
 
+      <!-- Viewport preview switcher: Desktop / Tablet / Phone.
+           Visual preview only — applies a CSS viewport-clip to the
+           canvas, NOT a real mobile adapt. First tablet/phone click
+           surfaces a flash pointing at reframe_edit op=adapt for a
+           real variant. Wiring in bindViewportPreview. -->
+      <div class="viewport-preview" data-viewport-preview-pill role="toolbar" aria-label="Viewport preview">
+        <button class="vp-btn active" data-viewport-preview="desktop" title="Desktop (full width)" aria-pressed="true" aria-label="Desktop preview">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="11" height="7" rx="1" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M5 12h4M7 10v2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="vp-btn" data-viewport-preview="tablet" title="Tablet preview (834 px)" aria-pressed="false" aria-label="Tablet preview">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <rect x="2.5" y="1.5" width="9" height="11" rx="1.2" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M6 11h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="vp-btn" data-viewport-preview="phone" title="Phone preview (375 px)" aria-pressed="false" aria-label="Phone preview">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <rect x="4" y="1" width="6" height="12" rx="1.4" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M6 2.8h2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+            <path d="M6.5 11.5h1" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Floating zoom pill: fit / − / level-menu / + / 100%.
+           Wiring lives in /platform/ui/ (bindZoomPill) — reads from the
+           public zoom API exposed on window.__reframeDOMCanvas.zoom. -->
+      <div class="zoom-pill" data-zoom-pill role="toolbar" aria-label="Zoom">
+        <button class="zp-btn" data-zoom-action="fit" title="Fit to screen (⌘0)" aria-label="Fit to screen">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M2 5V2h3M12 5V2H9M2 9v3h3M12 9v3H9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button class="zp-btn" data-zoom-action="out" title="Zoom out (⌘−)" aria-label="Zoom out">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M3 7h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="zp-level" data-zoom-level type="button" title="Pick preset zoom level" aria-haspopup="menu" aria-expanded="false">100%</button>
+        <button class="zp-btn" data-zoom-action="in" title="Zoom in (⌘+)" aria-label="Zoom in">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M7 3v8M3 7h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="zp-btn" data-zoom-action="100" title="Reset to 100% (⌘1)" aria-label="Reset to 100 percent">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <circle cx="7" cy="7" r="3.5" stroke="currentColor" stroke-width="1.3"/>
+            <circle cx="7" cy="7" r="1" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+
       <!-- Floating toolbar: tools + undo/redo -->
       <div id="float-toolbar">
         <button class="tb active" data-tool="SELECT" title="Select (V)">
@@ -394,6 +449,17 @@ export function renderEditorShell(options: {
            (showPropsForNode). data-panel="design" + class .properties is
            kept so existing scripts.ts selectors still resolve. -->
       <div data-panel="design" class="properties" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:0 12px;min-width:0;">
+        <!-- Tweaks section — populated by bindTweaksPanel from
+             /platform/api/tweaks/get. Collapses itself if the scene
+             has no tweaks declared (stays silently hidden). Sits above
+             the per-node properties so scene-wide knobs read first. -->
+        <section class="tweaks-panel" data-tweaks-panel hidden>
+          <header class="tweaks-head">
+            <span class="tweaks-title">Tweaks</span>
+            <span class="tweaks-count" data-tweaks-count></span>
+          </header>
+          <div class="tweaks-list" data-tweaks-list></div>
+        </section>
         <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
           Select a node to inspect
         </div>

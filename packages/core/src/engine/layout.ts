@@ -88,6 +88,32 @@ export interface YogaInstance {
 // ─── State ──────────────────────────────────────────────────────
 
 let yoga: YogaInstance | null = null;
+let _yogaWarningEmitted = false;
+
+/**
+ * Whether the layout engine is ready. Exported so standalone consumers
+ * can guard their own pipelines instead of blindly calling
+ * ensureSceneLayout and debugging silent no-ops.
+ */
+export function isLayoutReady(): boolean {
+  return yoga !== null;
+}
+
+/**
+ * One-shot stderr warning when computeLayout is invoked before Yoga is
+ * initialized. The message names the exact fix (import + await initYoga)
+ * so the diagnostic cost is one line of log, not a debugging session.
+ */
+function warnYogaNotInitialized(): void {
+  if (_yogaWarningEmitted) return;
+  _yogaWarningEmitted = true;
+  const msg = '[reframe] Layout engine not initialized — computeLayout is a no-op until Yoga is ready. Call `await initYoga()` from @reframe/core/engine/yoga-init once at startup before computing layouts.';
+  if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+    console.warn(msg);
+  } else if (typeof process !== 'undefined' && process.stderr && typeof process.stderr.write === 'function') {
+    process.stderr.write(msg + '\n');
+  }
+}
 
 export function setYoga(instance: YogaInstance): void {
   yoga = instance;
@@ -598,7 +624,16 @@ export function computeLayout(graph: SceneGraph, frameId: string): void {
     return;
   }
 
-  if (!yoga) return;
+  if (!yoga) {
+    // DX guard: standalone consumers (CLI tools, test harnesses, embedded
+    // engine usage) who forget to call `initYoga()` get a silent no-op
+    // here — layout fields stay at importer defaults (widths computed,
+    // y-offsets zero) and downstream audit/export read stale geometry.
+    // Warn once per process so the miss is diagnosable without breaking
+    // callers who deliberately skip layout (fixture-only flows).
+    warnYogaNotInitialized();
+    return;
+  }
 
   const y = yoga;
   const yogaRoot = buildYogaTree(y, graph, frame);

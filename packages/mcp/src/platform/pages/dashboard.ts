@@ -171,6 +171,66 @@ function renderEmpty(): string {
 
       </div>
 
+      <!-- STARTERS: three prompt-seeded templates. Each opens an empty canvas
+           then prefills the agent chat with a tailored brief, so the designer
+           can tweak the brief before sending or just hit ⌘↵. -->
+      <div class="dash-starter-label">or start from a prompt</div>
+      <div class="dash-starter-row">
+        <button class="dash-starter-card empty-path" data-kind="starter"
+          data-starter-prompt="Design a clean landing page with a hero (headline + subhead + primary CTA + secondary link), a 3-row feature section (asymmetric layout, no 3 equal cards), social proof strip, pricing preview, and a footer. 1440px wide. Use the active brand tokens.">
+          <div class="dash-starter-icon">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <rect x="2.5" y="2.5" width="17" height="17" rx="2" stroke="currentColor" stroke-width="1.4"/>
+              <path d="M6 7h10M6 10h6M6 13h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="dash-starter-text">
+            <span class="dash-starter-title">Landing page</span>
+            <span class="dash-starter-desc">Hero, features, social proof, pricing, footer</span>
+          </div>
+          <svg class="dash-starter-arrow" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+
+        <button class="dash-starter-card empty-path" data-kind="starter"
+          data-starter-prompt="Design an analytics dashboard: top nav with project selector, 4 KPI cards in a row, a main line-chart panel, a right-side data table with 8 rows, and a sidebar filter rail. Dense spacing, tabular-nums, no serif. 1440px wide. Use the active brand tokens.">
+          <div class="dash-starter-icon">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <rect x="2.5" y="2.5" width="17" height="17" rx="2" stroke="currentColor" stroke-width="1.4"/>
+              <rect x="5"   y="5"   width="5"  height="5"  fill="currentColor" opacity="0.15"/>
+              <rect x="12"  y="5"   width="5"  height="5"  fill="currentColor" opacity="0.15"/>
+              <rect x="5"   y="12"  width="12" height="5"  fill="currentColor" opacity="0.15"/>
+            </svg>
+          </div>
+          <div class="dash-starter-text">
+            <span class="dash-starter-title">Dashboard</span>
+            <span class="dash-starter-desc">KPIs, charts, data table, filter rail</span>
+          </div>
+          <svg class="dash-starter-arrow" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+
+        <button class="dash-starter-card empty-path" data-kind="starter"
+          data-starter-prompt="Design a mobile app screen at 375x812 (iPhone): status bar, top app bar with title and back chevron, a hero image card, a vertical feed of 4 content cards with 16px radius and soft shadows, and a bottom tab bar with 5 icons. Use the active brand tokens.">
+          <div class="dash-starter-icon">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <rect x="6.5" y="2" width="9" height="18" rx="2" stroke="currentColor" stroke-width="1.4"/>
+              <path d="M10 4.5h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+              <path d="M9 17h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="dash-starter-text">
+            <span class="dash-starter-title">Mobile screen</span>
+            <span class="dash-starter-desc">App bar, hero, card feed, tab bar</span>
+          </div>
+          <svg class="dash-starter-arrow" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+
       <!-- BRAND STRIP -->
       <div class="dash-brand-strip">
         <span class="dash-brand-label">60+ brand systems available</span>

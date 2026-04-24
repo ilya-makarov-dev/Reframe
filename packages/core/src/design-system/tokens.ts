@@ -347,6 +347,127 @@ function invertColorForDarkMode(color: Color, role: string): Color {
 // ─── Resolve token by name ──────────────────────────────────
 
 /**
+ * Write a new value to a token in the ACTIVE mode of its collection.
+ * Updates every bound node property to the new resolved value so the
+ * change is immediately visible in the graph (not just the token index).
+ *
+ * Accepts three value shapes matching the token's declared type:
+ *   COLOR  → hex string ("#3b82f6") OR Color object
+ *   FLOAT  → number
+ *   STRING → string
+ *
+ * For COLOR tokens, every node property bound to this token is
+ * rewritten via the same logic rebrandColorsFromTokens uses on a
+ * brand switch — fills, text color, strokes, effects — so a single
+ * setTokenValue('color.accent', '#ff4') call visually rebrands the
+ * whole scene in one step.
+ *
+ * For FLOAT / STRING tokens, bound node properties get the new raw
+ * value written directly; layout-sensitive fields (width, height,
+ * padding, fontSize) require the caller to re-run ensureSceneLayout.
+ *
+ * Returns the number of node properties propagated. 0 means the token
+ * exists but nothing was bound to it; a negative return is impossible
+ * (throws instead so silent no-ops don't hide typos).
+ */
+export function setTokenValue(
+  graph: SceneGraph,
+  index: TokenIndex,
+  tokenName: string,
+  rawValue: string | number | Color,
+): number {
+  const varId = index.tokens.get(tokenName);
+  if (!varId) throw new Error(`token "${tokenName}" not in index`);
+  const variable = graph.variables.get(varId);
+  if (!variable) throw new Error(`token "${tokenName}" variable vanished from graph`);
+  const collection = graph.variableCollections.get(variable.collectionId);
+  if (!collection) throw new Error(`token "${tokenName}" has no collection`);
+
+  const activeModeId =
+    graph.activeMode.get(variable.collectionId) ?? collection.defaultModeId;
+  if (!activeModeId) throw new Error(`token "${tokenName}" has no active mode`);
+
+  // ── Coerce rawValue into the VariableValue shape ──
+  let value: VariableValue;
+  if (variable.type === 'COLOR') {
+    if (typeof rawValue === 'string') {
+      value = hexToColor(rawValue);
+    } else if (typeof rawValue === 'object' && rawValue && 'r' in rawValue) {
+      value = rawValue as Color;
+    } else {
+      throw new Error(`token "${tokenName}" is COLOR, need hex string or Color object, got ${typeof rawValue}`);
+    }
+  } else if (variable.type === 'FLOAT') {
+    if (typeof rawValue !== 'number') {
+      const n = Number(rawValue);
+      if (!Number.isFinite(n)) {
+        throw new Error(`token "${tokenName}" is FLOAT, need number, got ${typeof rawValue}`);
+      }
+      value = n;
+    } else {
+      value = rawValue;
+    }
+  } else {
+    // STRING
+    value = String(rawValue);
+  }
+
+  variable.valuesByMode[activeModeId] = value;
+
+  // ── Propagate to bound nodes ──
+  let propagated = 0;
+  for (const node of graph.nodes.values()) {
+    for (const [field, boundId] of Object.entries(node.boundVariables)) {
+      if (boundId !== varId) continue;
+      if (variable.type === 'COLOR') {
+        const color = value as Color;
+        if (field.startsWith('fills')) {
+          const fills = (node as any).fills as any[] | undefined;
+          if (Array.isArray(fills)) {
+            for (const f of fills) {
+              if (f && f.type === 'SOLID') f.color = color;
+            }
+            propagated++;
+          }
+        } else if (field.startsWith('strokes')) {
+          const strokes = (node as any).strokes as any[] | undefined;
+          if (Array.isArray(strokes)) {
+            for (const s of strokes) {
+              if (s && s.type === 'SOLID') s.color = color;
+            }
+            propagated++;
+          }
+        } else if (field === 'characters.color' || field === 'color' || field === 'textColor') {
+          // Text nodes carry color directly. Write via style.fills when
+          // present (mirrors how importer assigns text color).
+          const textNode = node as any;
+          if (textNode.fills && Array.isArray(textNode.fills)) {
+            for (const f of textNode.fills) {
+              if (f && f.type === 'SOLID') f.color = color;
+            }
+            propagated++;
+          } else {
+            textNode.color = color;
+            propagated++;
+          }
+        } else {
+          // Generic color field — write via index-access. Unknown shape
+          // means the field isn't one we know how to update; skip quietly.
+          (node as any)[field] = color;
+          propagated++;
+        }
+      } else {
+        // Numeric / string — direct assignment.
+        (node as any)[field] = value;
+        propagated++;
+      }
+    }
+  }
+
+  return propagated;
+}
+
+/**
  * Resolve a token name to its current value.
  * Uses the active mode of the collection.
  */

@@ -1801,9 +1801,45 @@ export async function handleNodeEditApi(
       const { importFromHtml } = await import('../../../../core/src/importers/html.js');
       const result = await importFromHtml(html, { width: 1440 });
 
-      // Store the scene
-      const name = url ? new URL(url).hostname.replace(/^www\./, '') : 'imported';
-      const sessionId = store.storeScene(result.graph, result.rootId, undefined, { name });
+      // Run a full Yoga pass before storage. importFromHtml produces
+      // correct widths/heights but doesn't always propagate y-offsets to
+      // children of a vertical-flex root — the first /api/audit read then
+      // sees every child at y=0 and fires a cascade of false sibling-
+      // overlap warnings. One ensureSceneLayout here makes the stored
+      // scene immediately consistent for all downstream consumers
+      // (audit, tree, /preview, exporters).
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(result.graph, result.rootId);
+
+      // Name + slug resolution.
+      //
+      //   body.name  — explicit scene name (falls through to slug if no
+      //                body.slug is provided)
+      //   body.slug  — explicit slug override (kebab-cased + sanitised)
+      //   url        — derived from hostname sans "www."
+      //   default    — "imported-<YYYYMMDD-HHMMSS>" so two consecutive
+      //                imports of raw HTML don't collide under the
+      //                same "imported" slug (the regression /designer-qa
+      //                hit on 2026-04-24: every re-import overwrote the
+      //                prior scene silently).
+      function kebab(s: string): string {
+        return String(s).trim().toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 64) || 'imported';
+      }
+      function timestampSlug(): string {
+        const d = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `imported-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+      }
+      const explicitName = typeof body?.name === 'string' && body.name.trim() ? body.name.trim() : '';
+      const explicitSlug = typeof body?.slug === 'string' && body.slug.trim() ? kebab(body.slug) : '';
+      const urlHost = url ? new URL(url).hostname.replace(/^www\./, '') : '';
+      const name = explicitName || urlHost || (explicitSlug ? explicitSlug : timestampSlug());
+      const slugHint = explicitSlug || (urlHost ? kebab(urlHost) : (explicitName ? kebab(explicitName) : timestampSlug()));
+
+      const sessionId = store.storeScene(result.graph, result.rootId, undefined, { name, slug: slugHint });
       const scene = store.getScene(sessionId);
       const slug = scene?.slug ?? sessionId;
 

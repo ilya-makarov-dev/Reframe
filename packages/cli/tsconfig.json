@@ -2,13 +2,18 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": "..",
     "module": "CommonJS",
     "moduleResolution": "node",
     "lib": ["ES2020", "DOM"],
     "types": ["node"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@reframe/core": ["../core/src/index.ts"],
+      "@reframe/core/*": ["../core/src/*"]
+    }
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "../core/src/**/*.d.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -1631,10 +1631,46 @@ input, textarea, select {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: min(50vh, 440px);
+  /* var(--bc-log-max) is set by the resize handle; falls back to the
+     pre-resize default when the user hasn't touched the handle. */
+  max-height: var(--bc-log-max, min(50vh, 440px));
   overflow-y: auto;
   padding: 4px 2px;
   font-size: 12px;
+}
+
+/* Resize handle — thin strip along the top edge of the bottom chat.
+   Drag upward to grow the log area, downward to shrink. Stays mostly
+   invisible (2px opaque line on hover) so it doesn't pile visual weight
+   onto the pill. Double-click resets to default. */
+.bc-resize-handle {
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 8px;
+  transform: translateY(-50%);
+  cursor: ns-resize;
+  z-index: 2;
+  background: transparent;
+}
+.bc-resize-handle::after {
+  content: "";
+  display: block;
+  margin: 3px auto 0;
+  width: 48px;
+  height: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background-color 140ms var(--ease);
+}
+.bc-resize-handle:hover::after,
+.bc-resize-handle:focus-visible::after,
+.bc-resize-handle.resizing::after {
+  background: var(--border-strong);
+}
+.bc-resize-handle:focus-visible {
+  outline: none;
 }
 .bc-log[hidden] { display: none; }
 .bc-collapse {
@@ -1679,17 +1715,39 @@ input, textarea, select {
 }
 .bc-bubble.thinking {
   align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 12px;
   background: transparent;
-  color: var(--text-muted, rgba(128,128,128,0.8));
+  color: var(--text-muted, rgba(128,128,128,0.85));
   border: 1px dashed var(--border-subtle);
-  font-size: 14px;
-  letter-spacing: 0.35em;
-  animation: bc-thinking-pulse 1.3s ease-in-out infinite;
 }
-@keyframes bc-thinking-pulse {
-  0%,100% { opacity: 0.45; }
-  50%     { opacity: 1;    }
+.bc-bubble.thinking .bc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: bc-dot-bounce 1.2s ease-in-out infinite;
 }
+.bc-bubble.thinking .bc-dot:nth-child(2) { animation-delay: 0.15s; }
+.bc-bubble.thinking .bc-dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes bc-dot-bounce {
+  0%, 60%, 100% { transform: translateY(0);    opacity: 0.35; }
+  30%           { transform: translateY(-4px); opacity: 1; }
+}
+.bc-elapsed {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  height: 36px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.bc-elapsed[hidden] { display: none; }
 .bc-tool {
   align-self: flex-start;
   max-width: 92%;
@@ -1715,9 +1773,50 @@ input, textarea, select {
   margin-left: auto;
   font-size: 10px;
   color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .bc-tool-status.ok  { color: #36c777; }
 .bc-tool-status.err { color: #e85a5a; }
+
+/* Running-state concentric dot: inner breathing circle + outer ping ring.
+   Reads as "actively working" more clearly than a text "running…"
+   label on its own — the eye catches motion before it catches copy.
+   Pure CSS, injected before the status text via ::before so no JS
+   restructuring is needed in the tool-card renderer. */
+.bc-tool-status:not(.ok):not(.err)::before {
+  content: "";
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 0 currentColor;
+  animation:
+    bc-tool-running-pulse 1.4s ease-in-out infinite,
+    bc-tool-running-ping 1.4s ease-out infinite;
+  opacity: 0.7;
+}
+.bc-tool-status.ok::before,
+.bc-tool-status.err::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+@keyframes bc-tool-running-pulse {
+  0%, 100% { transform: scale(1);   opacity: 0.55; }
+  50%      { transform: scale(1.15); opacity: 1; }
+}
+@keyframes bc-tool-running-ping {
+  0%   { box-shadow: 0 0 0 0 currentColor; }
+  70%  { box-shadow: 0 0 0 8px rgba(0, 0, 0, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+}
 .bc-tool-input {
   margin-top: 3px;
   color: var(--text-muted);
@@ -1857,6 +1956,91 @@ input, textarea, select {
 .bc-chip-x:hover {
   background: var(--surface-hover);
   color: var(--text-primary);
+}
+/* Ref chips (user-attached URL/file) — subtle tint so they read as
+   attachments rather than auto-scope chips. */
+.bc-chip.bc-chip-ref {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+/* Ref-attach button + popover (URL / file inputs). Popover is anchored
+   ABOVE the button so it doesn't cover the canvas preview. */
+.bc-ref {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.bc-ref:hover,
+.bc-ref[aria-expanded="true"] {
+  background: var(--surface);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+.bc-ref-popover {
+  z-index: 50;
+  width: 340px;
+  padding: 10px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 32px -10px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font: inherit;
+}
+.bc-ref-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.bc-ref-label {
+  width: 36px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.bc-ref-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.bc-ref-input:focus { border-color: var(--accent); }
+.bc-ref-add {
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease);
+}
+.bc-ref-add:hover { background: var(--surface-hover); }
+.bc-ref-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 .bc-input-row {
   display: flex;
@@ -2045,6 +2229,98 @@ input, textarea, select {
   background: var(--border-subtle);
   margin-right: 8px;
 }
+.ipop-btn-comment .ipop-icon {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.ipop-sep {
+  display: inline-block;
+  width: 1px;
+  height: 14px;
+  background: var(--border-subtle);
+  margin: 0 4px;
+}
+
+/* Composer mode — popover expands vertically and swaps pill shape for
+   a card so the textarea can breathe. Triggered by clicking the
+   Comment button (or Cmd+/ on a selected node). */
+.inline-popover.is-composer {
+  flex-direction: column;
+  align-items: stretch;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  gap: 8px;
+}
+.ipop-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ipop-composer-input {
+  appearance: none;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  outline: none;
+  resize: none;
+  min-height: 52px;
+  max-height: 160px;
+  overflow-y: auto;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.ipop-composer-input:focus {
+  border-color: var(--accent);
+}
+.ipop-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  justify-content: space-between;
+}
+.ipop-composer-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+}
+.ipop-composer-preset {
+  appearance: none;
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.ipop-composer-preset:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.ipop-composer-send {
+  appearance: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.ipop-composer-send:hover { opacity: 0.9; }
 
 /* ─────────────────────────────────────────────────────────
  * VerbPanels — inline glass panels per verb, replacing prompt().
@@ -5538,6 +5814,464 @@ input, textarea, select {
   transform: translateX(2px);
 }
 
+/* Starter cards — 3-up row of prompt-seeded templates. Sits below the
+   primary "Create Canvas" card. Hover reveals an arrow icon that slides
+   right; same-motion family as the primary card so it reads as sibling,
+   not a separate system. */
+.dash-starter-label {
+  margin-top: 22px;
+  margin-bottom: 10px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.dash-starter-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 32px;
+}
+@media (max-width: 720px) {
+  .dash-starter-row { grid-template-columns: 1fr; }
+}
+.dash-starter-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 14px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition:
+    border-color 180ms var(--ease),
+    background-color 180ms var(--ease),
+    transform 180ms var(--ease);
+}
+.dash-starter-card:hover {
+  border-color: var(--accent);
+  background: var(--surface);
+  transform: translateY(-1px);
+}
+.dash-starter-icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  border-radius: 8px;
+  background: var(--surface);
+  transition: color 180ms var(--ease), background-color 180ms var(--ease);
+}
+.dash-starter-card:hover .dash-starter-icon {
+  color: var(--accent);
+  background: var(--surface-elevated);
+}
+.dash-starter-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dash-starter-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.dash-starter-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.dash-starter-arrow {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 180ms var(--ease), transform 180ms var(--ease), color 180ms var(--ease);
+}
+.dash-starter-card:hover .dash-starter-arrow {
+  opacity: 1;
+  transform: translateX(0);
+  color: var(--accent);
+}
+
+/* ─────────────────────────────────────────────────────────
+ * Tweaks panel — agent-declared live controls at the top of
+ * the right-side Properties pane. Hidden when the active
+ * scene has no tweaks declared.
+ * ───────────────────────────────────────────────────────── */
+.tweaks-panel {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-elevated);
+  padding: 10px 10px 6px;
+  margin: 8px 0 14px;
+  font-family: var(--sans);
+}
+.tweaks-panel[hidden] { display: none; }
+.tweaks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.tweaks-title {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.tweaks-count {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+}
+.tweaks-count:empty { display: none; }
+.tweaks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tweak-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tweak-label {
+  font-size: 11.5px;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+.tweak-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* Color tweak — native picker + hex text input */
+.tweak-control .tweak-swatch {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  overflow: hidden;
+}
+.tweak-control .tweak-swatch::-webkit-color-swatch-wrapper { padding: 0; border: 0; }
+.tweak-control .tweak-swatch::-webkit-color-swatch         { border: 0; border-radius: 4px; }
+.tweak-control .tweak-swatch::-moz-color-swatch            { border: 0; border-radius: 4px; }
+.tweak-control .tweak-hex {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  font: inherit;
+  font-size: 11.5px;
+  font-family: var(--mono, ui-monospace, monospace);
+  padding: 0 8px;
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  outline: none;
+}
+.tweak-control .tweak-hex:focus { border-color: var(--accent); }
+/* Number tweak — range slider + tabular-nums readout */
+.tweak-control .tweak-slider {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.tweak-control .tweak-readout {
+  min-width: 40px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  text-align: right;
+  user-select: none;
+  cursor: pointer;
+}
+.tweak-control .tweak-readout:hover { color: var(--text-primary); }
+/* Select tweak */
+.tweak-control .tweak-select {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  font: inherit;
+  font-size: 11.5px;
+  padding: 0 8px;
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 12px) 50%, calc(100% - 8px) 50%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  padding-right: 22px;
+}
+.tweak-control .tweak-select:focus { border-color: var(--accent); outline: none; }
+
+/* ─────────────────────────────────────────────────────────
+ * Zoom pill — floating toolbar in top-right of the canvas.
+ * fit · − · level-menu · + · 100%
+ * Bound in /platform/ui/145-zoom-pill.js to window.__reframeDOMCanvas.zoom.
+ * ───────────────────────────────────────────────────────── */
+.zoom-pill {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 12;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 2px;
+  gap: 0;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 18px -6px rgba(0, 0, 0, 0.12);
+  font: inherit;
+}
+.zoom-pill .zp-btn,
+.zoom-pill .zp-level {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  border-radius: 6px;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+.zoom-pill .zp-btn { width: 26px; }
+.zoom-pill .zp-btn:hover,
+.zoom-pill .zp-level:hover {
+  background: var(--surface);
+  color: var(--text-primary);
+}
+.zoom-pill .zp-level {
+  min-width: 54px;
+  padding: 0 8px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+.zoom-pill .zp-level[aria-expanded="true"] {
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
+/* ─────────────────────────────────────────────────────────
+ * Viewport preview switcher — desktop / tablet / phone.
+ * Clips canvas viewport to a narrower width; phone adds an
+ * iPhone-style bezel frame on top of the viewport. Preview
+ * only — not a real mobile adapt (that's reframe_edit op=adapt).
+ * ───────────────────────────────────────────────────────── */
+.viewport-preview {
+  position: absolute;
+  top: 14px;
+  right: 210px;
+  z-index: 12;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 2px;
+  gap: 1px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 18px -6px rgba(0, 0, 0, 0.12);
+  font: inherit;
+}
+.viewport-preview .vp-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  width: 28px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+.viewport-preview .vp-btn:hover {
+  background: var(--surface);
+  color: var(--text-primary);
+}
+.viewport-preview .vp-btn.active {
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+/* Viewport buttons show a busy state while adapt is generating a
+   variant. `.busy` disables clicks and spins the icon. */
+.viewport-preview .vp-btn[aria-busy="true"] {
+  color: var(--accent);
+  pointer-events: none;
+}
+.viewport-preview .vp-btn[aria-busy="true"] svg {
+  animation: vp-btn-spin 1.1s linear infinite;
+}
+@keyframes vp-btn-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Decorative device bezels for phone / tablet variants.
+   Does NOT clip or resize content — the variant is already authored at
+   the target width, this only adds the physical-object chrome around it.
+   Triggered by the viewport-preview binder setting data-viewport-preview
+   on <html> once it detects the current scene's dimensions match. */
+html[data-viewport-preview="phone"]  .rfd-canvas-viewport,
+html[data-viewport-preview="tablet"] .rfd-canvas-viewport {
+  /* Centered within its canvas area with breathing room on all sides. */
+  margin: 32px auto;
+  /* Warm-dark device body tone so it reads as a physical object against
+     the cream canvas background without falling to pure #000 (which
+     burns holes in the layout). */
+  background: #2a2a2c;
+  padding: 3px;
+  position: relative;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.05),
+    0 12px 32px rgba(0, 0, 0, 0.16);
+  transition: border-radius 240ms var(--ease), box-shadow 240ms var(--ease);
+}
+html[data-viewport-preview="phone"] .rfd-canvas-viewport {
+  border-radius: 44px;
+}
+html[data-viewport-preview="tablet"] .rfd-canvas-viewport {
+  border-radius: 20px;
+}
+/* Inner screen radius — matches phone/tablet body radius minus the 3 px
+   bezel padding so the edge stays concentric. The iframe inside already
+   clips to the viewport via overflow:hidden set by the editor bundle. */
+html[data-viewport-preview="phone"]  .rfd-canvas-viewport > * { border-radius: 41px; }
+html[data-viewport-preview="tablet"] .rfd-canvas-viewport > * { border-radius: 17px; }
+
+/* Dynamic Island — solid pill, near-black, decorative only (no pointer
+   events so clicks pass through to the scene). */
+html[data-viewport-preview="phone"] .rfd-canvas-viewport::before {
+  content: "";
+  position: absolute;
+  top: 11px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 95px;
+  height: 28px;
+  border-radius: 999px;
+  background: #0a0a0a;
+  z-index: 3;
+  pointer-events: none;
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.04);
+}
+
+/* Home indicator — subtle, at 50% opacity so it reads as a detail rather
+   than a UI element competing with the scene content. */
+html[data-viewport-preview="phone"] .rfd-canvas-viewport::after {
+  content: "";
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 134px;
+  height: 5px;
+  border-radius: 999px;
+  background: #0a0a0a;
+  opacity: 0.5;
+  z-index: 3;
+  pointer-events: none;
+}
+
+/* Tablet — narrower top bezel band instead of a notch. Uses the same
+   ::before slot so we only maintain one pseudo contract per mode. */
+html[data-viewport-preview="tablet"] .rfd-canvas-viewport::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #0a0a0a;
+  opacity: 0.6;
+  z-index: 3;
+  pointer-events: none;
+}
+
+/* Preset menu. Anchored below the level button when open. Keyboard arrows
+   cycle through levels; Enter commits; Escape closes. */
+.zoom-pill-menu {
+  position: absolute;
+  top: 42px;
+  right: 36px;
+  z-index: 13;
+  min-width: 96px;
+  padding: 4px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px -6px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.zoom-pill-menu[hidden] { display: none; }
+.zoom-pill-menu button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 5px 10px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background-color 120ms var(--ease);
+}
+.zoom-pill-menu button:hover,
+.zoom-pill-menu button[data-active="true"] {
+  background: var(--surface);
+}
+
 /* Secondary action links — compact, understated */
 .dash-secondary-row {
   display: flex;
@@ -5723,29 +6457,100 @@ input, textarea, select {
  * Flash toast — bottom right, hairline border, no glow
  * ───────────────────────────────────────────────────────── */
 
-.flash {
+.flash-host {
   position: fixed;
   bottom: 24px;
   right: 24px;
-  padding: 12px 16px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: none;
+  max-width: calc(100vw - 48px);
+}
+.flash {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  padding-right: 30px;
   background: var(--surface-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   color: var(--text-primary);
   font-size: 13px;
+  line-height: 1.35;
   box-shadow:
     0 1px 2px rgba(28, 27, 24, 0.04),
     0 8px 24px rgba(28, 27, 24, 0.08);
-  z-index: 100;
   opacity: 0;
   transform: translateY(8px);
-  transition: all var(--t-med) var(--ease);
-  pointer-events: none;
-  max-width: 320px;
+  transition: opacity var(--t-med) var(--ease), transform var(--t-med) var(--ease);
+  pointer-events: auto;
+  max-width: 360px;
+  overflow: hidden;
 }
 .flash.show { opacity: 1; transform: translateY(0); }
-.flash.error  { border-color: var(--danger); }
-.flash.success { border-color: var(--success); }
+.flash--success { border-color: var(--success); }
+.flash--warning { border-color: var(--warning, #d48a15); }
+.flash--error   { border-color: var(--danger); }
+.flash-msg {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.flash-action {
+  flex-shrink: 0;
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease);
+}
+.flash-action:hover { background: var(--surface-hover); }
+.flash-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.flash-close:hover { background: var(--surface-hover); color: var(--text-primary); }
+.flash-countdown {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 100%;
+  background: var(--border-strong);
+  transform-origin: left center;
+  animation: flash-countdown-shrink linear forwards;
+}
+.flash--success .flash-countdown { background: var(--success); }
+.flash--warning .flash-countdown { background: var(--warning, #d48a15); }
+.flash--error   .flash-countdown { background: var(--danger); }
+@keyframes flash-countdown-shrink {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
 
 /* ─────────────────────────────────────────────────────────
  * Brand browser overlay — full-screen modal with visual catalog.

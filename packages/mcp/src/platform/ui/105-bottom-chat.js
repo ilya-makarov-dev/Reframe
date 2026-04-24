@@ -17,6 +17,7 @@
   function bindBottomChat() {
     var bar = $('[data-bottom-chat]');
     if (!bar) return;
+    var resizeHandle = $('[data-bc-resize]');
     var input = $('[data-bc-input]');
     var sendBtn = $('[data-bc-send]');
     var cancelBtn = $('[data-bc-cancel]');
@@ -88,8 +89,141 @@
       thinkingBubble = null;
     }
 
+    // Three bouncing dots placeholder. Replaces the earlier single-ellipsis
+    // thinking bubble — dots read as "actively working" rather than "paused".
+    function appendThinkingBubble() {
+      if (!logEl) return null;
+      showLog();
+      var b = document.createElement('div');
+      b.className = 'bc-bubble bc-assistant thinking';
+      b.setAttribute('data-testid', 'chat-thinking');
+      b.innerHTML = '<span class="bc-dot"></span><span class="bc-dot"></span><span class="bc-dot"></span>';
+      logEl.appendChild(b);
+      logEl.scrollTop = logEl.scrollHeight;
+      return b;
+    }
+
+    // Elapsed-time indicator. Surfaced between 2s and stream end so short
+    // replies don't flash a "0s" badge, but long agent runs make the wait
+    // legible. Tabular-nums prevents digit-jitter.
+    var elapsedEl = $('[data-bc-elapsed]');
+    var elapsedTimer = null;
+    var elapsedStart = 0;
+    var elapsedShowTimer = null;
+    function formatElapsed(ms) {
+      var s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's';
+      var m = Math.floor(s / 60);
+      var rem = s % 60;
+      return m + 'm ' + (rem < 10 ? '0' : '') + rem + 's';
+    }
+    function startElapsed() {
+      if (!elapsedEl) return;
+      elapsedStart = Date.now();
+      if (elapsedShowTimer) clearTimeout(elapsedShowTimer);
+      elapsedShowTimer = setTimeout(function() {
+        if (!elapsedEl) return;
+        elapsedEl.textContent = formatElapsed(Date.now() - elapsedStart);
+        elapsedEl.removeAttribute('hidden');
+      }, 2000);
+      if (elapsedTimer) clearInterval(elapsedTimer);
+      elapsedTimer = setInterval(function() {
+        if (!elapsedEl || elapsedEl.hasAttribute('hidden')) return;
+        elapsedEl.textContent = formatElapsed(Date.now() - elapsedStart);
+      }, 500);
+    }
+    function stopElapsed() {
+      if (elapsedShowTimer) { clearTimeout(elapsedShowTimer); elapsedShowTimer = null; }
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      if (elapsedEl) { elapsedEl.setAttribute('hidden', ''); elapsedEl.textContent = ''; }
+    }
+
     // ── Muted chip tracking (kind → bool). Reset when scene changes. ──
     if (!state.bottomChatChipsMuted) state.bottomChatChipsMuted = {};
+
+    // ── Resizable log height ──
+    // Handle at the top edge of the pill. Drag vertically to set
+    // --bc-log-max on the bar element (which .bc-log max-height reads).
+    // Persist per project so the designer's preferred chat height
+    // survives reloads. Double-click resets to the default.
+    var LOG_HEIGHT_KEY = 'reframe.bottomChat.logMax:' + (projectSlug || 'default');
+    var MIN_LOG_H = 120;
+    var MAX_LOG_H_RATIO = 0.8; // max 80% of viewport height
+    function applyLogHeight(pxOrDefault) {
+      if (!pxOrDefault || pxOrDefault === 'default') {
+        bar.style.removeProperty('--bc-log-max');
+        return;
+      }
+      var n = parseInt(pxOrDefault, 10);
+      if (!Number.isFinite(n) || n <= 0) return;
+      var maxH = Math.floor(window.innerHeight * MAX_LOG_H_RATIO);
+      var clamped = Math.max(MIN_LOG_H, Math.min(maxH, n));
+      bar.style.setProperty('--bc-log-max', clamped + 'px');
+    }
+    try { applyLogHeight(localStorage.getItem(LOG_HEIGHT_KEY)); } catch (_) {}
+
+    if (resizeHandle) {
+      var dragStartY = 0;
+      var dragStartH = 0;
+      function getCurrentLogHeight() {
+        if (!logEl) return 440;
+        // Prefer the explicit var if set; else fall back to computed max.
+        var explicit = bar.style.getPropertyValue('--bc-log-max');
+        if (explicit) return parseInt(explicit, 10) || 440;
+        // computedStyle reflects the `min(50vh, 440px)` default.
+        return parseFloat(getComputedStyle(logEl).maxHeight) || 440;
+      }
+      function onResizeMove(e) {
+        var dy = dragStartY - e.clientY; // drag up → grow
+        applyLogHeight(dragStartH + dy);
+      }
+      function onResizeEnd() {
+        resizeHandle.classList.remove('resizing');
+        document.removeEventListener('mousemove', onResizeMove);
+        document.removeEventListener('mouseup', onResizeEnd);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        // Persist the final value (read the var we just wrote).
+        var finalV = bar.style.getPropertyValue('--bc-log-max');
+        try {
+          if (finalV) localStorage.setItem(LOG_HEIGHT_KEY, parseInt(finalV, 10) + '');
+        } catch (_) {}
+      }
+      resizeHandle.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        // Make sure the log is visible while resizing so the user sees
+        // the growth — force-show even if it was hidden with no messages.
+        if (logEl && logEl.hasAttribute('hidden')) logEl.removeAttribute('hidden');
+        dragStartY = e.clientY;
+        dragStartH = getCurrentLogHeight();
+        resizeHandle.classList.add('resizing');
+        document.body.style.cursor = 'ns-resize';
+        document.body.style.userSelect = 'none';
+        document.addEventListener('mousemove', onResizeMove);
+        document.addEventListener('mouseup', onResizeEnd);
+      });
+      // Double-click → reset to default.
+      resizeHandle.addEventListener('dblclick', function() {
+        applyLogHeight('default');
+        try { localStorage.removeItem(LOG_HEIGHT_KEY); } catch (_) {}
+      });
+      // Keyboard accessibility: arrow-up/down shift by 40px when handle
+      // is focused. Tab + Space-focus also work because the handle has
+      // tabindex=0.
+      resizeHandle.addEventListener('keydown', function(e) {
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+        e.preventDefault();
+        var cur = getCurrentLogHeight();
+        var next = cur + (e.key === 'ArrowUp' ? 40 : -40);
+        applyLogHeight(next);
+        try { localStorage.setItem(LOG_HEIGHT_KEY, parseInt(bar.style.getPropertyValue('--bc-log-max'), 10) + ''); } catch (_) {}
+      });
+      // Re-clamp against new viewport when window resizes.
+      window.addEventListener('resize', function() {
+        var explicit = bar.style.getPropertyValue('--bc-log-max');
+        if (explicit) applyLogHeight(parseInt(explicit, 10));
+      });
+    }
 
     // ── Autosize textarea up to ~4 rows ──
     function autosize() {
@@ -110,14 +244,60 @@
       chipsEl.style.display = '';
       chipsEl.innerHTML = chips.map(function(c) {
         var muted = state.bottomChatChipsMuted[c.kind];
-        return '<span class="bc-chip' + (muted ? ' muted' : '') + '" data-chip-kind="' + c.kind + '">' +
+        // Removable refs vs toggleable scope chips: × on refs deletes,
+        // × on scope mutes (and turns into + so user can restore).
+        var xAttr, xLabel, xText;
+        if (c.removable) {
+          xAttr = 'data-chip-remove="' + c.refId + '"';
+          xLabel = 'Remove reference';
+          xText = '×';
+        } else {
+          xAttr = 'data-chip-toggle="' + c.kind + '"';
+          xLabel = 'Toggle ' + c.kind;
+          xText = muted ? '+' : '×';
+        }
+        return '<span class="bc-chip' + (muted ? ' muted' : '') + (c.removable ? ' bc-chip-ref' : '') + '" data-chip-kind="' + c.kind + '">' +
           '<span class="bc-chip-icon">' + c.icon + '</span>' +
           '<span class="bc-chip-label">' + escape(c.label) + '</span>' +
-          '<button class="bc-chip-x" data-chip-toggle="' + c.kind + '" aria-label="Toggle ' + c.kind + '">' +
-            (muted ? '+' : '×') +
+          '<button class="bc-chip-x" ' + xAttr + ' aria-label="' + xLabel + '">' +
+            xText +
           '</button>' +
         '</span>';
       }).join('');
+    }
+
+    // User-added references (URLs, file paths). Persisted per project so
+    // a designer's "current task sources" survive reloads. Stored as a
+    // flat list of { kind: 'url'|'file', value, id } where id is a
+    // lightweight random tag used by the × button handler. Chips for
+    // these reuse the same row as auto-scope chips but use a distinct
+    // kind prefix ('ref-url' / 'ref-file') so muting logic doesn't
+    // collide with scope chips.
+    var REFS_KEY = 'reframe.bottomChat.refs:' + (projectSlug || 'default');
+    if (!Array.isArray(state.bottomChatRefs)) {
+      state.bottomChatRefs = (function() {
+        try {
+          var raw = localStorage.getItem(REFS_KEY);
+          if (!raw) return [];
+          var parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch (_) { return []; }
+      })();
+    }
+    function persistRefs() {
+      try { localStorage.setItem(REFS_KEY, JSON.stringify(state.bottomChatRefs)); } catch (_) {}
+    }
+    function addRef(kind, value) {
+      if (!value) return;
+      var id = Math.random().toString(36).slice(2, 8);
+      state.bottomChatRefs.push({ kind: kind, value: value, id: id });
+      persistRefs();
+      renderChips();
+    }
+    function removeRef(id) {
+      state.bottomChatRefs = state.bottomChatRefs.filter(function(r) { return r.id !== id; });
+      persistRefs();
+      renderChips();
     }
 
     function collectChips() {
@@ -127,6 +307,17 @@
         var tag = (state.selection.tag || 'node').toLowerCase();
         out.push({ kind: 'node', icon: '◉', label: tag + ' · ' + shortId(state.selection.inode) });
       }
+      // User-added references.
+      (state.bottomChatRefs || []).forEach(function(r) {
+        if (r.kind === 'url') {
+          var shortUrl = r.value.replace(/^https?:\/\//, '').replace(/\/$/, '');
+          if (shortUrl.length > 38) shortUrl = shortUrl.slice(0, 36) + '…';
+          out.push({ kind: 'ref-url:' + r.id, icon: '↗', label: shortUrl, removable: true, refId: r.id });
+        } else if (r.kind === 'file') {
+          var shortFile = r.value.length > 38 ? '…' + r.value.slice(-36) : r.value;
+          out.push({ kind: 'ref-file:' + r.id, icon: '📄', label: shortFile, removable: true, refId: r.id });
+        }
+      });
       // Active brand. The dashboard has a [data-brand-picker-label],
       // the project page does not — it surfaces brand only via the
       // project health endpoint. Read the DOM first (dashboard path),
@@ -155,11 +346,16 @@
       return id.length > 10 ? id.slice(0, 8) + '…' : id;
     }
 
-    // Chip × / + toggles mute
+    // Chip × handler: scope chips toggle mute, ref chips remove entirely.
     chipsEl.addEventListener('click', function(e) {
-      var btn = e.target.closest('[data-chip-toggle]');
-      if (!btn) return;
-      var kind = btn.getAttribute('data-chip-toggle');
+      var remove = e.target.closest('[data-chip-remove]');
+      if (remove) {
+        removeRef(remove.getAttribute('data-chip-remove'));
+        return;
+      }
+      var toggle = e.target.closest('[data-chip-toggle]');
+      if (!toggle) return;
+      var kind = toggle.getAttribute('data-chip-toggle');
       state.bottomChatChipsMuted[kind] = !state.bottomChatChipsMuted[kind];
       renderChips();
     });
@@ -336,6 +532,8 @@
         if (on) cancelBtn.removeAttribute('hidden');
         else cancelBtn.setAttribute('hidden', '');
       }
+      if (on) startElapsed();
+      else stopElapsed();
     }
 
     // ── SSE stream parser. EventSource can't POST, so fetch + ReadableStream. ──
@@ -349,8 +547,7 @@
       // loads context, and waits for the first API token. Without this
       // placeholder the chat looks dead and users hit send again. Removed
       // by the first event handler below (text | tool_use | tool_result).
-      thinkingBubble = appendBubble('assistant thinking', '\u2026');
-      thinkingBubble.setAttribute('data-testid', 'chat-thinking');
+      thinkingBubble = appendThinkingBubble();
 
       var body = { prompt: prompt };
       if (state.agentSessionId) body.sessionId = state.agentSessionId;
@@ -490,12 +687,27 @@
       var chips = collectChips().filter(function(c) {
         return !state.bottomChatChipsMuted[c.kind];
       });
-      var scopeLine = '';
-      if (chips.length > 0) {
-        var parts = chips.map(function(c) { return c.kind + ': ' + c.label; });
-        scopeLine = '[Scope: ' + parts.join(' · ') + ']\n';
-      }
-      var fullPrompt = scopeLine + text;
+      // Scope chips (node/brand/viewport) go on one line; user-added
+      // refs (url/file) go on a separate line so the agent can parse
+      // them distinctly and, for file refs, follow up with Read tool.
+      var scopeParts = [];
+      var refParts = [];
+      chips.forEach(function(c) {
+        if (c.kind.indexOf('ref-url:') === 0) {
+          // Use the full URL from state, not the truncated chip label.
+          var rec = (state.bottomChatRefs || []).find(function(r) { return r.id === c.refId; });
+          refParts.push('url: ' + (rec ? rec.value : c.label));
+        } else if (c.kind.indexOf('ref-file:') === 0) {
+          var recF = (state.bottomChatRefs || []).find(function(r) { return r.id === c.refId; });
+          refParts.push('file: ' + (recF ? recF.value : c.label));
+        } else {
+          scopeParts.push(c.kind + ': ' + c.label);
+        }
+      });
+      var prefix = '';
+      if (scopeParts.length > 0) prefix += '[Scope: ' + scopeParts.join(' · ') + ']\n';
+      if (refParts.length > 0)   prefix += '[Refs: '  + refParts.join(' · ')   + ']\n';
+      var fullPrompt = prefix + text;
       input.value = '';
       autosize();
       streamChat(fullPrompt);
@@ -510,6 +722,96 @@
       autosize();
       send();
     };
+
+    // ── Reference popover (URL / file attachments) ──
+    // Click the bc-ref button → small popover anchored below with two
+    // inputs (URL + file path). Submit either to attach. Attached refs
+    // persist per project and render as removable chips alongside scope
+    // chips; on send they're folded into the [Scope: …] prefix so the
+    // agent sees the same context we do.
+    var refBtn = $('[data-bc-ref-toggle]');
+    var refPopover = null;
+    function closeRefPopover() {
+      if (!refPopover) return;
+      refPopover.remove();
+      refPopover = null;
+      if (refBtn) refBtn.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('click', onRefPopoverOutside, true);
+      document.removeEventListener('keydown', onRefPopoverKey, true);
+    }
+    function onRefPopoverOutside(e) {
+      if (!refPopover) return;
+      if (refPopover.contains(e.target) || (refBtn && refBtn.contains(e.target))) return;
+      closeRefPopover();
+    }
+    function onRefPopoverKey(e) {
+      if (e.key === 'Escape') { closeRefPopover(); if (refBtn) refBtn.focus(); }
+    }
+    function openRefPopover() {
+      if (refPopover) { closeRefPopover(); return; }
+      refPopover = document.createElement('div');
+      refPopover.className = 'bc-ref-popover';
+      refPopover.setAttribute('role', 'dialog');
+      refPopover.innerHTML =
+        '<div class="bc-ref-row">' +
+          '<label class="bc-ref-label">URL</label>' +
+          '<input type="url" class="bc-ref-input" data-ref-url placeholder="https://example.com/article" />' +
+          '<button type="button" class="bc-ref-add" data-ref-add="url">Add</button>' +
+        '</div>' +
+        '<div class="bc-ref-row">' +
+          '<label class="bc-ref-label">File</label>' +
+          '<input type="text" class="bc-ref-input" data-ref-file placeholder=".reframe/notes.md" />' +
+          '<button type="button" class="bc-ref-add" data-ref-add="file">Add</button>' +
+        '</div>' +
+        '<div class="bc-ref-hint">Attached references ride with every message in this chat as context for the agent.</div>';
+      document.body.appendChild(refPopover);
+
+      // Anchor above the button. refBtn is inside the bottom chat bar so
+      // we measure its rect and position the popover with a small gap.
+      var r = refBtn.getBoundingClientRect();
+      refPopover.style.position = 'fixed';
+      refPopover.style.left = Math.max(12, r.left) + 'px';
+      refPopover.style.bottom = (window.innerHeight - r.top + 8) + 'px';
+
+      var urlInput = refPopover.querySelector('[data-ref-url]');
+      var fileInput = refPopover.querySelector('[data-ref-file]');
+      if (urlInput) urlInput.focus();
+
+      refPopover.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-ref-add]');
+        if (!btn) return;
+        var kind = btn.getAttribute('data-ref-add');
+        var input = kind === 'url' ? urlInput : fileInput;
+        if (!input) return;
+        var val = (input.value || '').trim();
+        if (!val) return;
+        addRef(kind, val);
+        input.value = '';
+      });
+      refPopover.addEventListener('keydown', function(e) {
+        if (e.key !== 'Enter') return;
+        var input = e.target;
+        if (input === urlInput) {
+          e.preventDefault();
+          var v = (input.value || '').trim();
+          if (v) { addRef('url', v); input.value = ''; }
+        } else if (input === fileInput) {
+          e.preventDefault();
+          var vf = (input.value || '').trim();
+          if (vf) { addRef('file', vf); input.value = ''; }
+        }
+      });
+
+      if (refBtn) refBtn.setAttribute('aria-expanded', 'true');
+      document.addEventListener('click', onRefPopoverOutside, true);
+      document.addEventListener('keydown', onRefPopoverKey, true);
+    }
+    if (refBtn) {
+      refBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        openRefPopover();
+      });
+    }
 
     // Quick-picks toggle — renders agent's <choices> markers as
     // clickable chips when ON. OFF silently strips markers so the
@@ -636,6 +938,28 @@
     setInterval(chipWatcher, 250);
     renderChips();
     autosize();
+
+    // ── Prefill from ?prompt= query param (starter-card entry) ──
+    // Starter cards on the empty dashboard pass a tailored brief through
+    // the URL. We populate the textarea (but don't auto-send) so the
+    // designer can tweak before dispatching. The param is consumed once
+    // then wiped via replaceState so a refresh doesn't refill.
+    (function consumeStarterPrompt() {
+      try {
+        var params = new URLSearchParams(location.search);
+        var seed = params.get('prompt');
+        if (!seed) return;
+        input.value = seed;
+        autosize();
+        input.focus();
+        // Place caret at end so the user can edit or just hit ⌘↵.
+        try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
+        params.delete('prompt');
+        var qs = params.toString();
+        var newUrl = location.pathname + (qs ? '?' + qs : '') + location.hash;
+        history.replaceState(history.state, '', newUrl);
+      } catch (_) { /* no-op — URLSearchParams unavailable */ }
+    })();
 
     // ── Replay persisted chat on load ───────────────────────
     // Boot payload carries the project's chat history. Walk messages

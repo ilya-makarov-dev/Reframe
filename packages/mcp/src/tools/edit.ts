@@ -411,6 +411,43 @@ const operationSchema = z.discriminatedUnion('op', [
       .describe('Typography preset: dramatic (max contrast), flat (all 500), editorial (tight headings), technical (wide letter-spacing), friendly (rounded).'),
   }),
 
+  // Declare live-tweak controls — a curated set of sliders / color
+  // pickers / selects the Platform UI surfaces in the right panel so
+  // the designer can nudge the scene without a chat round-trip. Each
+  // tweak maps to either a token write (op.type="token") or a
+  // variation macro (op.type="macro"). Designed to be called after
+  // compile — pick the 3-6 knobs that matter most for this scene
+  // (accent color, density, radius, typography preset, color mode)
+  // and the UI renders them immediately. Subsequent calls REPLACE the
+  // scene's tweak list (pass [] to clear).
+  z.object({
+    op: z.literal('declareTweaks'),
+    sceneId: z.string().optional(),
+    tweaks: z.array(z.object({
+      id: z.string().describe('Stable id, unique within the scene'),
+      label: z.string().describe('Designer-facing label (e.g. "Accent color")'),
+      description: z.string().optional().describe('One-line helper copy'),
+      kind: z.enum(['color', 'number', 'select']),
+      default: z.union([z.string(), z.number()]).describe('Starting value. Type must match kind.'),
+      min: z.number().optional().describe('For kind=number — slider lower bound'),
+      max: z.number().optional().describe('For kind=number — slider upper bound'),
+      step: z.number().optional().describe('For kind=number — slider step'),
+      options: z.array(z.object({ value: z.string(), label: z.string() })).optional()
+        .describe('For kind=select — allowed values'),
+      unit: z.string().optional().describe('Unit suffix for number values (e.g. "px", "%", "°")'),
+      op: z.union([
+        z.object({
+          type: z.literal('token'),
+          tokenPath: z.string().describe('Token name in the scene index — e.g. "color.accent", "space.unit"'),
+        }),
+        z.object({
+          type: z.literal('macro'),
+          kind: z.enum(['density', 'radius', 'shadows', 'typography', 'colorRotation', 'mode']),
+        }),
+      ]),
+    })).describe('The full set of tweaks. Replaces any prior declaration for this scene.'),
+  }),
+
   // Iterate — audit+fix loop. Replaces the old reframe_iterate tool.
   z.object({
     op: z.literal('iterate'),
@@ -2026,6 +2063,43 @@ export async function handleEdit(input: {
         const n = vTypographyPreset(stored.graph, stored.rootId, op.preset);
         touchedScenes.add(sceneId);
         results.push(`TYPOGRAPHY_PRESET ${op.preset} — ${n} text nodes updated`);
+        break;
+      }
+
+      case 'declareTweaks': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('DECLARE_TWEAKS ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`DECLARE_TWEAKS ERROR: scene "${sceneId}" not found`); break; }
+
+        // Validate at this layer too — zod only checks shape, not cross-
+        // field consistency (color kind + macro op is invalid).
+        const tweakList = (op.tweaks ?? []);
+        const errs: string[] = [];
+        const seen = new Set<string>();
+        for (let i = 0; i < tweakList.length; i++) {
+          const t = tweakList[i];
+          if (seen.has(t.id)) errs.push(`tweak[${i}].id "${t.id}" duplicated`);
+          seen.add(t.id);
+          if (t.kind === 'color' && t.op.type !== 'token') {
+            errs.push(`tweak[${i}] (${t.id}): color kind requires op.type="token"`);
+          }
+          if (t.kind === 'number' && typeof t.default !== 'number') {
+            errs.push(`tweak[${i}] (${t.id}): number kind requires numeric default`);
+          }
+          if ((t.kind === 'select' || t.kind === 'color') && typeof t.default !== 'string') {
+            errs.push(`tweak[${i}] (${t.id}): ${t.kind} kind requires string default`);
+          }
+          if (t.kind === 'select' && (!t.options || t.options.length === 0)) {
+            errs.push(`tweak[${i}] (${t.id}): select kind requires options`);
+          }
+        }
+        if (errs.length > 0) {
+          results.push('DECLARE_TWEAKS ERROR: ' + errs.join('; '));
+          break;
+        }
+        stored.tweaks = tweakList.map((t: any) => ({ ...t })) as any;
+        results.push(`DECLARE_TWEAKS — ${tweakList.length} tweak${tweakList.length === 1 ? '' : 's'} registered for scene ${sceneId}`);
         break;
       }
 

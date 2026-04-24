@@ -707,6 +707,27 @@
               flash('Failed to create canvas', 'error');
             }
           }).catch(function(e) { flash('Failed: ' + e.message, 'error'); });
+        } else if (kind === 'starter') {
+          // Starter cards: open an empty canvas, then pass the tailored prompt
+          // through the URL so the bottom-chat input comes up pre-filled when
+          // the project page loads. We don't auto-send — the designer may want
+          // to tweak the brief first. Empty / missing prompt falls back to
+          // plain create-canvas behavior.
+          var starterPrompt = btn.getAttribute('data-starter-prompt') || '';
+          flash('Opening canvas…', 'info');
+          api('/platform/api/import', {
+            html: '<div style="width:1440px;min-height:900px;background:#f5f5f4"></div>',
+          }).then(function(data) {
+            if (data && data.slug) {
+              var href = '/platform/project/' + data.slug;
+              if (starterPrompt) {
+                href += '?prompt=' + encodeURIComponent(starterPrompt);
+              }
+              location.href = href;
+            } else {
+              flash('Failed to create canvas', 'error');
+            }
+          }).catch(function(e) { flash('Failed: ' + e.message, 'error'); });
         }
       });
     });

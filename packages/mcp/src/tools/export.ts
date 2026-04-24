@@ -19,6 +19,7 @@ import { StandaloneHost } from '../../../core/src/adapters/standalone/adapter.js
 import { runWithHostAsync } from '../../../core/src/host/context.js';
 import { validateTimeline, computeDuration } from '../../../core/src/animation/timeline.js';
 import { presets, stagger as staggerFn, listPresets } from '../../../core/src/animation/presets.js';
+import { buildTimeline as buildTimelineCore } from '../../../core/src/animation/timeline-builder.js';
 import type { ITimeline, INodeAnimation } from '../../../core/src/animation/types.js';
 import { exportToRaster, initCanvasKit } from '../../../core/src/exporters/raster.js';
 import { exportSvgFromGraph } from '../engine.js';
@@ -32,8 +33,8 @@ import { makeToolJsonErrorResult } from '../tool-result.js';
 
 export const exportInputSchema = {
   sceneId: z.string().describe('Scene ID to export.'),
-  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'lottie', 'video'])
-    .describe('Output format. `html` respects `animate:true` to embed the scene timeline as inline CSS keyframes / GSAP (replaces the old "animated_html" format). `video` produces an MP4 via hyperframes render (Puppeteer + FFmpeg). Multi-page projects: call `reframe_export format=html` per scene — no "site" format needed.'),
+  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'lottie', 'video', 'pptx'])
+    .describe('Output format. `html` respects `animate:true` to embed the scene timeline as inline CSS keyframes / GSAP (replaces the old "animated_html" format). `video` produces an MP4 via hyperframes render (Puppeteer + FFmpeg). `pptx` emits a PowerPoint deck — one PNG-backed slide per scene (use sceneIds for multi-slide decks). Multi-page projects: call `reframe_export format=html` per scene — no "site" format needed.'),
 
   // HTML options
   fullDocument: z.boolean().optional().default(true),
@@ -120,6 +121,10 @@ export const exportInputSchema = {
 };
 
 // ─── Timeline builder ─────────────────────────────────────────
+// Moved to @reframe/core `packages/core/src/animation/timeline-builder.ts`
+// so standalone consumers (CLI, tests, embedded pipelines) can build
+// timelines without pulling in the MCP tool layer. This wrapper keeps
+// the internal signature intact for call sites in this file.
 
 function buildTimeline(
   graph: SceneGraph,
@@ -137,134 +142,16 @@ function buildTimeline(
     speed?: number;
   },
 ): { timeline: ITimeline; warnings: string[] } {
-  const animations: INodeAnimation[] = [];
-  const warnings: string[] = [];
-  const availablePresets = listPresets();
-
-  // Resolve node name → id
-  const nameToId = new Map<string, string>();
-  function walkNames(id: string) {
-    const n = graph.getNode(id);
-    if (!n) return;
-    nameToId.set(n.name, id);
-    for (const cid of n.childIds) walkNames(cid);
-  }
-  walkNames(rootId);
-  const availableNodes = [...nameToId.keys()];
-
-  // Helper: resolve node name, warn if missing
-  function resolveNode(nodeName: string): string | undefined {
-    const nodeId = nameToId.get(nodeName);
-    if (!nodeId) {
-      warnings.push(`Node "${nodeName}" not found. Available: ${availableNodes.join(', ')}`);
-    }
-    return nodeId;
-  }
-
-  // Helper: pack preset-create config from shared override fields
-  function buildCreateConfig(opts: { duration?: number; easing?: string; distance?: number }): Record<string, any> {
-    const cfg: Record<string, any> = {};
-    if (opts.duration !== undefined) cfg.duration = opts.duration;
-    if (opts.easing !== undefined) cfg.easing = opts.easing;
-    if (opts.distance !== undefined) cfg.distance = opts.distance;
-    return cfg;
-  }
-
-  // Preset animations
-  if (animateConfig.presets) {
-    for (const p of animateConfig.presets) {
-      const presetDef = presets[p.preset];
-      if (!presetDef) {
-        warnings.push(`Unknown preset "${p.preset}". Available: ${availablePresets.join(', ')}`);
-        continue;
-      }
-      const nodeId = resolveNode(p.nodeName);
-      const anim = presetDef.create(buildCreateConfig(p));
-      animations.push({
-        ...anim,
-        nodeId,
-        nodeName: p.nodeName,
-        delay: p.delay ?? 0,
-      });
-    }
-  }
-
-  // Stagger
-  if (animateConfig.stagger) {
-    const s = animateConfig.stagger;
-    if (!presets[s.preset]) {
-      warnings.push(`Unknown stagger preset "${s.preset}". Available: ${availablePresets.join(', ')}`);
-    } else {
-      const ids: string[] = [];
-      const resolvedNames: string[] = [];
-      for (const name of s.nodeNames) {
-        const id = nameToId.get(name);
-        if (id) {
-          ids.push(id);
-          resolvedNames.push(name);
-        } else {
-          warnings.push(`Stagger: node "${name}" not found, skipping. Available: ${availableNodes.join(', ')}`);
-        }
-      }
-      if (ids.length > 0) {
-        const staggerConfig = buildCreateConfig(s);
-        const staggered = staggerFn(ids, s.preset, {
-          staggerDelay: s.staggerDelay ?? 100,
-          // staggerFn accepts `duration` top-level AND `config` passthrough.
-          // Top-level duration wins in its impl; we also pass through easing/distance via config.
-          ...(s.duration !== undefined && { duration: s.duration }),
-          config: staggerConfig,
-        });
-        for (let i = 0; i < staggered.length; i++) {
-          (staggered[i] as any).nodeName = resolvedNames[i];
-        }
-        animations.push(...(staggered as INodeAnimation[]));
-      }
-    }
-  }
-
-  // Sequences — compose N presets per node with cumulative delay.
-  // Sequential composition: step i starts at `baseDelay + sum(step_0..step_{i-1}.duration) - overlap*i`.
-  // Overlap=0 = pure back-to-back; positive = cross-over; negative = gap.
-  if (animateConfig.sequences) {
-    for (const seq of animateConfig.sequences) {
-      const nodeId = resolveNode(seq.nodeName);
-      const baseDelay = seq.delay ?? 0;
-      const overlap = seq.overlap ?? 0;
-      let cumulativeDelay = baseDelay;
-      for (const step of seq.chain) {
-        const presetDef = presets[step.preset];
-        if (!presetDef) {
-          warnings.push(`Sequence on "${seq.nodeName}": unknown preset "${step.preset}". Available: ${availablePresets.join(', ')}`);
-          continue;
-        }
-        const anim = presetDef.create(buildCreateConfig(step));
-        animations.push({
-          ...anim,
-          nodeId,
-          nodeName: seq.nodeName,
-          delay: cumulativeDelay,
-        });
-        cumulativeDelay += anim.duration - overlap;
-      }
-    }
-  }
-
-  return {
-    timeline: {
-      animations,
-      loop: animateConfig.loop ?? false,
-      speed: animateConfig.speed ?? 1,
-    },
-    warnings,
-  };
+  return buildTimelineCore(graph, rootId, animateConfig);
 }
 
 // ─── Handler ──────────────────────────────────────────────────
 
 export async function handleExport(input: {
   sceneId: string;
-  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'lottie' | 'video';
+  /** Comma-separated list of sceneIds to include as additional slides (pptx only). */
+  sceneIds?: string;
+  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'lottie' | 'video' | 'pptx';
   fullDocument?: boolean;
   dataAttributes?: boolean;
   cssClasses?: boolean;
@@ -592,6 +479,46 @@ export async function handleExport(input: {
         break;
       }
 
+      case 'pptx': {
+        // PPTX is binary like PNG — write the file ourselves and
+        // return a text summary. Multi-slide decks: `input.sceneIds`
+        // carries a comma-separated list to include as extra slides
+        // beyond the primary sceneId. Order follows the list.
+        const { exportToPptx } = await import('../../../core/src/exporters/pptx.js');
+        const extraIds = (input.sceneIds || '')
+          .split(',').map(s => s.trim()).filter(Boolean)
+          .filter(id => id !== sceneId);
+        const pptScenes: Array<{ graph: SceneGraph; rootId: string; title?: string }> = [];
+        pptScenes.push({ graph, rootId, title: (getScene(sceneId)?.name || sceneId) });
+        for (const id of extraIds) {
+          try {
+            const resolved = resolveScene({ sceneId: id });
+            ensureSceneLayout(resolved.graph, resolved.rootId);
+            const scn = getScene(id);
+            pptScenes.push({ graph: resolved.graph, rootId: resolved.rootId, title: scn?.name || id });
+          } catch (e: any) {
+            sections.push(`[!] skipped ${id} — ${e?.message ?? e}`);
+          }
+        }
+
+        const pptxBuf = await exportToPptx(pptScenes, {
+          deckTitle: getScene(sceneId)?.name,
+          author: 'reframe',
+          scale: input.scale ?? 2,
+        });
+
+        const pptxStored = getScene(sceneId);
+        const pptxSlug = pptxStored?.slug ?? sceneId;
+        const pptxExportDir = getExportsBaseDir();
+        if (!existsSync(pptxExportDir)) mkdirSync(pptxExportDir, { recursive: true });
+        const pptxPath = join(pptxExportDir, `${pptxSlug}.pptx`);
+        writeFileSync(pptxPath, pptxBuf);
+
+        const sizeKB = (pptxBuf.length / 1024).toFixed(1);
+        sections.unshift(`PPTX exported → ${pptxPath} (${pptScenes.length} slide${pptScenes.length === 1 ? '' : 's'}, ${sizeKB}KB)`);
+        return { content: [{ type: 'text' as const, text: sections.join('\n') }] };
+      }
+
       default:
         return {
           content: [{ type: 'text' as const, text: `Unknown format: ${format}` }],
@@ -612,6 +539,9 @@ export async function handleExport(input: {
     lottie: 'lottie.json', png: 'png', pdf: 'pdf',
     // video-format writes a directory, not an extension'd file (see below)
     video: 'html',
+    // pptx returns inside its case branch (binary); this entry is for
+    // completeness so TS `extMap[format]` is never undefined.
+    pptx: 'pptx',
   };
   const ext = extMap[format] ?? format;
   const exportDir = getExportsBaseDir();
@@ -688,6 +618,7 @@ export async function handleExport(input: {
     png: null,            // no live render — link to file
     pdf: null,
     video: null,
+    pptx: null,           // binary zip — browser can't render, download only
   };
   let previewUrl: string;
   if (previewExtMap[format] == null) {

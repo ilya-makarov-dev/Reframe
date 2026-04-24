@@ -55,6 +55,8 @@ export const PREVIEW_INJECT_JS = `
     annotationMode: false, // parent toggles this via setMode message
     hoverEl: null,   // currently-outlined hover element (in-iframe paint)
     selectEl: null,  // currently-outlined selected element
+    watchedSelectors: [], // subset of CSS selectors we broadcast rects for
+    rectBroadcastScheduled: false,
   };
 
   // ── In-iframe hover/select outline ─────────────────────
@@ -226,19 +228,24 @@ export const PREVIEW_INJECT_JS = `
       x: window.scrollX,
       y: window.scrollY,
     });
+    // Scrolling changes every watched element's viewport-relative rect,
+    // so piggyback a rect broadcast (RAF-coalesced inside the helper).
+    broadcastRects();
   }
 
   // ── Parent → iframe messages ───────────────────────────
   function onMessage(event) {
     // Origin-pin. Without this, ANY page that embeds our preview (or a
     // sibling frame under the same top) can postMessage with a forged
-    // source:'reframe-host' tag and flip annotationMode / trigger a
-    // measurement storm via reframe:measure-all. String-tag alone is not
-    // a trust boundary.
+    // source tag and flip annotationMode / trigger a measurement storm.
+    // String-tag alone is not a trust boundary.
     if (event.origin !== PARENT_ORIGIN) return;
     if (event.source !== window.parent) return;
     const data = event.data || {};
-    if (data.source !== 'reframe-host') return;
+    // Accept both the legacy 'reframe-host' tag (right-panel path) and
+    // the DOM-canvas-sibling 'reframe-parent' tag (createDOMCanvas
+    // postToIframe). Same trust model: origin pinned above.
+    if (data.source !== 'reframe-host' && data.source !== 'reframe-parent') return;
     if (data.type === 'reframe:setMode') {
       state.annotationMode = !!data.annotationMode;
       // Visual hint: change cursor so the user sees they're in annotation mode.
@@ -262,6 +269,34 @@ export const PREVIEW_INJECT_JS = `
     }
     if (data.type === 'reframe:measure-all') {
       sendMeasurements();
+    }
+    // Fast-path token tweaks. Parent slider changes a CSS-bound token;
+    // we overwrite the custom property on :root and every element using
+    // var(--foo) repaints in one frame. No server round-trip, no iframe
+    // reload, no reflow of unchanged layout. Server persist happens in
+    // parallel via the existing HTTP flow — this is purely the visual
+    // preview layer. data.updates is an array of { cssVar, value } so a
+    // single postMessage can batch multiple tokens (mode switch).
+    if (data.type === 'reframe:tweak-hot' && Array.isArray(data.updates)) {
+      const html = document.documentElement;
+      for (let i = 0; i < data.updates.length; i++) {
+        const u = data.updates[i];
+        if (!u || typeof u.cssVar !== 'string') continue;
+        const varName = u.cssVar.charAt(0) === '-' ? u.cssVar : ('--' + u.cssVar);
+        const value = u.value == null ? '' : String(u.value);
+        if (value === '') html.style.removeProperty(varName);
+        else html.style.setProperty(varName, value);
+      }
+    }
+    // Watched-selector rects. Parent sends a list of selectors to track;
+    // we broadcast their bounding rects on scroll/resize so host pins /
+    // overlays follow the element without polling. Selectors already in
+    // the watch list are a no-op (idempotent update). An empty list
+    // clears the watcher — useful when leaving comment mode.
+    if (data.type === 'reframe:watch-selectors' && Array.isArray(data.selectors)) {
+      state.watchedSelectors = data.selectors.slice();
+      // Fire once immediately so the host has rects before first scroll.
+      broadcastRects();
     }
   }
 
@@ -327,11 +362,91 @@ export const PREVIEW_INJECT_JS = `
     return String(s).replace(/["\\\\]/g, '\\\\$&');
   }
 
+  // ── Rect broadcast for watched selectors ──────────────
+  // Parent asks us (via reframe:watch-selectors) to keep it updated on the
+  // bounding rects of a small set of elements — typically the anchors
+  // persistent pins / comment bubbles are attached to. We batch into one
+  // postMessage per animation frame so pointer-driven scrolls coalesce.
+  // When the watch list is empty this is a cheap no-op.
+  function broadcastRects() {
+    if (state.rectBroadcastScheduled) return;
+    state.rectBroadcastScheduled = true;
+    requestAnimationFrame(function() {
+      state.rectBroadcastScheduled = false;
+      const selectors = state.watchedSelectors || [];
+      if (selectors.length === 0) return;
+      const entries = [];
+      for (let i = 0; i < selectors.length; i++) {
+        const sel = selectors[i];
+        let el;
+        try {
+          if (sel.charAt(0) === '[' || sel.charAt(0) === '.' || sel.charAt(0) === '#' || sel.charAt(0) === ':' || /^[a-z]/i.test(sel)) {
+            el = document.querySelector(sel);
+          } else {
+            el = null;
+          }
+        } catch (_) {
+          el = null;
+        }
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        entries.push({ selector: sel, rect: { top: r.top, left: r.left, width: r.width, height: r.height } });
+      }
+      if (entries.length > 0) {
+        post({ type: 'reframe:rects', entries: entries });
+      }
+    });
+  }
+
+  // ── Iframe error capture ──────────────────────────────
+  // Runtime errors inside the rendered scene (a bad inline script, a
+  // broken web-font fetch, a CSP violation) otherwise vanish into the
+  // iframe's console. Bubble them to the parent so the Platform UI
+  // surfaces a non-modal banner and the designer can see what's wrong
+  // without opening devtools. Truncate stack so a noisy cascade doesn't
+  // flood the host message queue.
+  function onRuntimeError(ev) {
+    try {
+      post({
+        type: 'reframe:iframe-error',
+        kind: 'error',
+        message: (ev && ev.message) ? String(ev.message).slice(0, 500) : 'Unknown iframe error',
+        source: ev && ev.filename ? String(ev.filename).slice(0, 200) : '',
+        lineno: ev && typeof ev.lineno === 'number' ? ev.lineno : undefined,
+        colno: ev && typeof ev.colno === 'number' ? ev.colno : undefined,
+        stack: (ev && ev.error && ev.error.stack) ? String(ev.error.stack).slice(0, 1000) : '',
+        timestamp: Date.now(),
+      });
+    } catch (_) { /* never throw from the handler itself */ }
+  }
+  function onRuntimeRejection(ev) {
+    try {
+      const reason = ev && ev.reason;
+      const msg = (reason && reason.message) ? reason.message : String(reason);
+      post({
+        type: 'reframe:iframe-error',
+        kind: 'unhandledrejection',
+        message: String(msg).slice(0, 500),
+        stack: (reason && reason.stack) ? String(reason.stack).slice(0, 1000) : '',
+        timestamp: Date.now(),
+      });
+    } catch (_) { /* never throw */ }
+  }
+
   // ── Install / teardown ─────────────────────────────────
   let mutationObs = null;
-  let resizeObs = null;
+  let reattachTimer = null;
 
-  function install() {
+  function onResize() {
+    scheduleMeasure();
+    broadcastRects();
+  }
+
+  function attachListeners() {
+    // Idempotent — addEventListener with the same (fn, capture) tuple
+    // is a no-op if already attached. Some agent-generated scripts wipe
+    // prototypes or shadow removeEventListener; the reattach loop below
+    // calls this every 400ms so we stay resilient against that.
     document.addEventListener('pointermove', onPointerMove, { passive: true });
     document.addEventListener('pointerleave', onPointerLeave);
     document.addEventListener('pointerdown', onPointerDown, true);
@@ -340,17 +455,34 @@ export const PREVIEW_INJECT_JS = `
     document.addEventListener('keydown', onKeyDown);
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('message', onMessage);
-    window.addEventListener('resize', scheduleMeasure);
+    window.addEventListener('resize', onResize);
+    window.addEventListener('error', onRuntimeError, true);
+    window.addEventListener('unhandledrejection', onRuntimeRejection, true);
+  }
+
+  function install() {
+    attachListeners();
     // Any DOM mutation under body triggers a debounced re-measure so
     // persistent marks on the parent stay glued to their anchors.
     if (typeof MutationObserver !== 'undefined') {
-      mutationObs = new MutationObserver(scheduleMeasure);
+      mutationObs = new MutationObserver(function() {
+        scheduleMeasure();
+        // Mutations can move watched elements too — keep pins glued.
+        broadcastRects();
+      });
       mutationObs.observe(document.body, {
         childList: true,
         subtree: true,
         attributes: true,
         attributeFilter: ['style', 'class'],
       });
+    }
+    // Defensive re-attach loop. Cheap (~8 addEventListener calls every
+    // 400ms) and saves the host from "silently dead iframe" bugs when
+    // the rendered scene's own scripts fight us for document-level
+    // listeners. Can be disabled by setting window.__reframeInjectLean.
+    if (!window.__reframeInjectLean) {
+      reattachTimer = setInterval(attachListeners, 400);
     }
   }
 
@@ -363,7 +495,10 @@ export const PREVIEW_INJECT_JS = `
     document.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('scroll', onScroll);
     window.removeEventListener('message', onMessage);
-    window.removeEventListener('resize', scheduleMeasure);
+    window.removeEventListener('resize', onResize);
+    window.removeEventListener('error', onRuntimeError, true);
+    window.removeEventListener('unhandledrejection', onRuntimeRejection, true);
+    if (reattachTimer) { clearInterval(reattachTimer); reattachTimer = null; }
     if (mutationObs) { try { mutationObs.disconnect(); } catch (_) {} mutationObs = null; }
   }
 

@@ -294,6 +294,9 @@
     bindContextMenu();
     bindInlinePopover();
     bindBottomChat();
+    bindZoomPill();
+    bindViewportPreview();
+    bindTweaksPanel();
     bindBatchExport();
     bindVariantStrip();
     bindPipelineStepper();

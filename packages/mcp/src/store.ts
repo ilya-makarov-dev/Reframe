@@ -51,7 +51,52 @@ export interface StoredScene {
    * keeps the two in sync.
    */
   tokenIndex?: TokenIndex;
+  /**
+   * Agent-declared live tweaks — a curated set of parameters the Platform UI
+   * renders as sliders / color pickers / selects so the designer can nudge
+   * the scene without a round-trip to the LLM. Populated via
+   * `reframe_edit op=declareTweaks` and consumed by /platform/api/tweaks/*.
+   * Apply-time the tweak's `op` is dispatched directly against the engine:
+   * `token` writes a design-token value, `macro` calls a named transform.
+   */
+  tweaks?: TweakDecl[];
 }
+
+/**
+ * Declaration of a single live-tweak control. The agent emits these
+ * alongside a scene compile so the UI knows which knobs are worth
+ * surfacing. Changing a value fires the mapped `op` directly — no
+ * chat turn, no token cost, instant re-render.
+ */
+export interface TweakDecl {
+  /** Stable id used by the apply endpoint. Unique within the scene. */
+  id: string;
+  /** Short, designer-facing label. e.g. "Accent", "Radius", "Density". */
+  label: string;
+  /** Optional helper copy shown under the control. */
+  description?: string;
+  /** Control shape. `color` → color picker; `number` → slider; `select` → radio/dropdown. */
+  kind: 'color' | 'number' | 'select';
+  /** Starting value. Must match `kind` (string for color/select, number for number). */
+  default: string | number;
+  /** For `number`: slider bounds + step. Ignored otherwise. */
+  min?: number;
+  max?: number;
+  step?: number;
+  /** For `select`: the set of allowed values (plus human labels). Ignored otherwise. */
+  options?: Array<{ value: string; label: string }>;
+  /** Unit suffix shown next to number values (e.g. "px", "%", "°"). */
+  unit?: string;
+  /** Engine op fired when the value changes. */
+  op: TweakOp;
+}
+
+/** The engine operation a tweak dispatches. Kept deliberately small. */
+export type TweakOp =
+  /** Write a single design-token value. `tokenPath` is the token name in the scene's TokenIndex (e.g. "color.accent", "space.unit"). */
+  | { type: 'token'; tokenPath: string }
+  /** Run a named macro from the variation catalog. Matches /platform/api/variations/apply. */
+  | { type: 'macro'; kind: 'density' | 'radius' | 'shadows' | 'typography' | 'colorRotation' | 'mode' };
 
 // ─── Internal state ─────────────────────────────────────────
 

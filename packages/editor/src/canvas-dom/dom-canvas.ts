@@ -22,7 +22,7 @@
  */
 
 import { createSceneRenderer } from './renderer.js';
-import { createZoomPan, type ZoomPanState } from './zoom-pan.js';
+import { createZoomPan, ZOOM_LEVELS, type ZoomPanState } from './zoom-pan.js';
 import { createSelectionOverlay, type SelectionRect, type HandlePosition } from './overlay.js';
 import { hitTest } from './pointer.js';
 import { createPresentMode, type PresentModeController } from './present.js';
@@ -38,6 +38,30 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   reload: () => void;
   select: (ids: string | string[] | null) => void;
   present: PresentModeController;
+  zoom: {
+    /** Snapped to {@link ZOOM_LEVELS}. `1` = 100%. */
+    getZoom: () => number;
+    setZoom: (z: number) => void;
+    zoomIn: () => void;
+    zoomOut: () => void;
+    zoomTo100: () => void;
+    zoomToFit: () => void;
+    /** Subscribe to zoom / pan updates. Returns unsubscribe. */
+    onChange: (fn: (zoom: number) => void) => () => void;
+    /** Snapping ticks the picker can round to (e.g. 0.25, 0.5, 1, 2, 4). */
+    levels: readonly number[];
+  };
+  /**
+   * Send an arbitrary message to the iframe's preview-inject script.
+   * Used by live UX surfaces (tweak sliders, viewport mode switches) to
+   * push state changes into the iframe without a full reload. The iframe
+   * listens for `event.source === window.parent`; messages tagged with
+   * `source: 'reframe-parent'` are routed by the inject's dispatcher.
+   *
+   * Returns true if the iframe was reachable; false on first paint when
+   * the contentWindow isn't yet available (caller can queue + retry).
+   */
+  postToIframe: (message: unknown) => boolean;
   destroy: () => void;
 } {
   const viewport = document.createElement('div');
@@ -97,12 +121,17 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
 
   let initialFitDone = false;
 
+  // Subscribers added via the public `zoom.onChange` API — any external
+  // UI (e.g. the floating zoom pill in the shell) that needs to reflect
+  // zoom changes registers here and gets called after every transform.
+  const zoomSubscribers = new Set<(z: number) => void>();
   const zoomPan = createZoomPan({
     wrapper,
     viewport,
     onChange: (state) => {
       currentZoom = state;
       overlay.syncTransform(state.zoom, state.panX, state.panY);
+      for (const fn of zoomSubscribers) fn(state.zoom);
     },
   });
 
@@ -451,8 +480,40 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
       else setSelection(ids);
     },
     present: presentMode,
+    zoom: {
+      getZoom: () => currentZoom.zoom,
+      setZoom: (z) => zoomPan.setZoom(z),
+      zoomIn: () => zoomPan.zoomIn(),
+      zoomOut: () => zoomPan.zoomOut(),
+      zoomTo100: () => zoomPan.zoomTo100(),
+      // Fit uses the scene root bbox captured on renderer.onLoad. If the
+      // bbox isn't known yet (very first paint race), fall back to 100%
+      // so the button never silently no-ops.
+      zoomToFit: () => {
+        if (sceneRootBbox) zoomPan.zoomToFit(sceneRootBbox.w, sceneRootBbox.h);
+        else zoomPan.zoomTo100();
+      },
+      onChange: (fn) => {
+        zoomSubscribers.add(fn);
+        // Immediate push so subscribers don't have to query getZoom() separately.
+        fn(currentZoom.zoom);
+        return () => { zoomSubscribers.delete(fn); };
+      },
+      levels: ZOOM_LEVELS,
+    },
+    postToIframe: (message) => {
+      const win = renderer.iframe.contentWindow;
+      if (!win) return false;
+      try {
+        win.postMessage({ source: 'reframe-parent', ...(message as object) }, '*');
+        return true;
+      } catch {
+        return false;
+      }
+    },
     destroy: () => {
       window.removeEventListener('keydown', onGlobalKey);
+      zoomSubscribers.clear();
       presentMode.destroy();
       overlay.destroy();
       zoomPan.destroy();
