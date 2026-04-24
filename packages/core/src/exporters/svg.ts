@@ -494,16 +494,81 @@ export function exportToSvg(
  * Convenience wrapper that extracts the node tree from a SceneGraph.
  */
 export function exportSceneGraphToSvg(
-  graph: { getNode(id: string): any },
+  graph: { getNode(id: string): any; annotations?: import('../engine/annotation').AnnotationNode[] },
   rootId: string,
   options?: SvgExportOptions,
 ): string {
   const root = graph.getNode(rootId);
   if (!root) throw new Error(`Node ${rootId} not found in graph`);
 
-  // Convert SceneGraph flat map to nested tree
   const tree = graphNodeToTree(graph, rootId);
-  return exportToSvg(tree, options);
+  const baseSvg = exportToSvg(tree, options);
+
+  // Annotations: inject as a <g class="reframe-annotations"> block just
+  // before </svg>. Each annotation renders as a <g> with a text and a
+  // bracket polyline — all drawn in SVG, no foreignObject (which is
+  // unreliable in some SVG viewers). Positions derived from post-Yoga
+  // bbox same way as html.ts / react.ts.
+  if (!graph.annotations || graph.annotations.length === 0) return baseSvg;
+
+  const { computeAbsolutePosition } =
+    require('../engine/geometry') as typeof import('../engine/geometry');
+  const { resolveAnchorPoint, resolveAnnotationColor, resolveAnnotationStyle } =
+    require('../engine/annotation') as typeof import('../engine/annotation');
+  const getNode = (id: string) => graph.getNode(id);
+  const rootPos = computeAbsolutePosition(rootId, getNode);
+
+  const annoParts: string[] = [];
+  annoParts.push(`  <g class="reframe-annotations">`);
+  for (const a of graph.annotations) {
+    const t = graph.getNode(a.targetNodeId);
+    if (!t) continue;
+    const abs = computeAbsolutePosition(a.targetNodeId, getNode);
+    const box = { x: abs.x - rootPos.x, y: abs.y - rootPos.y, width: t.width, height: t.height };
+    const p = resolveAnchorPoint(a, box);
+    const color = resolveAnnotationColor(a);
+    const style = resolveAnnotationStyle(a);
+    const opacity = a.resolved ? 0.45 : 1;
+    const fontFamily = style === 'mono' ? 'ui-monospace, Menlo, monospace' : "'Caveat', cursive, sans-serif";
+    const fontSize = style === 'mono' ? 13 : 22;
+    // Corner bracket: two line segments forming an L at the annotation origin.
+    const bx = Math.round(p.x);
+    const by = Math.round(p.y);
+    // Direction controls which L the bracket draws (mirror the HTML CSS logic).
+    const bracketPoints = bracketSvgPoints(bx, by, p.bracketDirection);
+    annoParts.push(
+      `    <g data-anno-id="${a.id}" data-anno-style="${style}" data-anno-bracket="${p.bracketDirection}" opacity="${opacity}">`,
+      `      <polyline points="${bracketPoints}" fill="none" stroke="${color}" stroke-width="2"/>`,
+      `      <text x="${bx}" y="${by + fontSize}" fill="${color}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="500">${escapeSvgText(a.text)}</text>`,
+      `    </g>`,
+    );
+  }
+  annoParts.push(`  </g>`);
+
+  // Splice before the closing </svg>. baseSvg always ends with that tag.
+  const close = '</svg>';
+  const idx = baseSvg.lastIndexOf(close);
+  if (idx < 0) return baseSvg;
+  return baseSvg.slice(0, idx) + annoParts.join('\n') + '\n' + baseSvg.slice(idx);
+}
+
+function escapeSvgText(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function bracketSvgPoints(x: number, y: number, dir: 'nw' | 'ne' | 'sw' | 'se' | 'top' | 'bottom'): string {
+  const size = 14;
+  switch (dir) {
+    case 'nw': return `${x},${y + size} ${x - 4},${y + size} ${x - 4},${y - 4} ${x + size},${y - 4}`;
+    case 'ne': return `${x},${y + size} ${x + 4},${y + size} ${x + 4},${y - 4} ${x - size},${y - 4}`;
+    case 'sw': return `${x},${y - size} ${x - 4},${y - size} ${x - 4},${y + 4} ${x + size},${y + 4}`;
+    case 'se': return `${x},${y - size} ${x + 4},${y - size} ${x + 4},${y + 4} ${x - size},${y + 4}`;
+    case 'top': return `${x - size},${y - 4} ${x + size},${y - 4}`;
+    case 'bottom': return `${x - size},${y + 4} ${x + size},${y + 4}`;
+  }
 }
 
 function graphNodeToTree(

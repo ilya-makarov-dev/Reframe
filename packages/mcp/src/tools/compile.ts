@@ -114,6 +114,49 @@ export const compileInputSchema = {
     'Return an inline PNG preview of the primary compiled scene alongside the text report. '
     + 'Set false for multi-size / batch compiles where the preview payload is not worth the bytes.',
   ),
+
+  // ─── Variants composition (Phase 0 additive) ─────────────────
+  // When present, this request compiles N scenes as a variants composition.
+  // Constraint: all scenes[i].brand must be equal (or all undefined) —
+  // Phase 0 supports same-brand-only. Cross-brand variants = future
+  // extension activated by real user signal.
+  variants: z.object({
+    scenes: z.array(z.record(z.any())).min(2).describe(
+      'N compile inputs (2+). Each is a standard CompileInput shape (content/blueprint/html/file/designMd/brand/name/sizes/...). '
+      + 'All scenes[i].brand must be equal — throw on mismatch.',
+    ),
+  }).optional().describe(
+    'Variants composition: compile N scenes with shared brand resolution. '
+    + 'Returns structured JSON with per-scene results + shared brand.',
+  ),
+
+  // ─── Flow composition (Phase 0 Flow kind) ────────────────────
+  // When present, this request compiles a flow — a stateful sequence of
+  // scenes with transitions and cross-step data. Persisted to
+  // `.reframe/flows/<flowId>/` as flow.json (spec) + state.json (live
+  // data). Constraints mirror variants: same-brand across all steps,
+  // no per-step designMd override, step names must be unique.
+  // Transitions default to linear Next buttons (0→1, 1→2, …) when omitted.
+  flow: z.object({
+    flowId: z.string().describe(
+      'Stable id for the flow — becomes the .reframe/flows/<flowId>/ directory name. Used in URL (?flow=<flowId>) and as the state.json anchor.',
+    ),
+    name: z.string().optional().describe('Optional human label for the flow (e.g. "Signup", "Onboarding").'),
+    steps: z.array(z.record(z.any())).min(2).describe(
+      'N step compile inputs (2+). Each is a standard CompileInput shape. All steps[i].brand must be equal; per-step designMd is unsupported in Phase 0.',
+    ),
+    transitions: z.array(z.object({
+      from: z.number().int(),
+      to: z.number().int(),
+      label: z.string().optional(),
+      condition: z.string().optional(),
+    })).optional().describe(
+      'Transition graph. Omit for linear flow (auto-generates 0→1, 1→2, … with "Next" labels). Phase 0: condition is reserved, always treated as true.',
+    ),
+  }).optional().describe(
+    'Flow composition: compile N step scenes, write flow.json + init state.json. '
+    + 'Returns structured JSON with per-step results + flowId + generated transitions.',
+  ),
 };
 
 // ─── Types ────────────────────────────────────────────────────
@@ -157,11 +200,64 @@ interface CompileInput {
   aiClassify?: boolean;
   layoutBackend?: 'yoga' | 'taffy';
   preview?: boolean;
+  /** Phase 0 additive: variants composition. See handleVariantsCompile. */
+  variants?: { scenes: CompileInput[] };
+  /** Phase 0 Flow kind composition. See handleFlowCompile. */
+  flow?: {
+    flowId: string;
+    name?: string;
+    steps: CompileInput[];
+    transitions?: Array<{ from: number; to: number; label?: string; condition?: string }>;
+  };
 }
 
 // ─── Handler ──────────────────────────────────────────────────
 
 export async function handleCompile(input: CompileInput) {
+  // ─── Variants dispatch (Phase 0 additive) ───────────────────
+  // If the request carries a `variants` field, route to the variants
+  // handler. Zero impact on single-scene callers — they never set this
+  // field. All existing logic below runs unchanged for single compiles.
+  if (input.variants) {
+    // Mutual exclusion: variants is a composition input. Combining it
+    // with single-scene input fields (html/file/content/blueprint) is
+    // ambiguous — caller probably meant one or the other. Silent drop
+    // would be a bug; throw explicitly with actionable error code.
+    const conflictingFields: string[] = [];
+    if (input.html !== undefined) conflictingFields.push('html');
+    if (input.file !== undefined) conflictingFields.push('file');
+    if (input.content !== undefined) conflictingFields.push('content');
+    if (input.blueprint !== undefined) conflictingFields.push('blueprint');
+    if (input.flow !== undefined) conflictingFields.push('flow');
+    if (conflictingFields.length > 0) {
+      return makeToolJsonErrorResult(
+        `variants-compile cannot be combined with single-scene input fields or other compositions (${conflictingFields.join(', ')}). Pick one mode: single scene (content/blueprint/html/file), variants (variants.scenes[]), OR flow (flow.steps[]).`,
+        'compile.input_mode_conflict',
+        { conflictingFields },
+      );
+    }
+    return handleVariantsCompile(input.variants);
+  }
+
+  // ─── Flow dispatch (Phase 0 Flow kind) ──────────────────────
+  if (input.flow) {
+    const conflictingFields: string[] = [];
+    if (input.html !== undefined) conflictingFields.push('html');
+    if (input.file !== undefined) conflictingFields.push('file');
+    if (input.content !== undefined) conflictingFields.push('content');
+    if (input.blueprint !== undefined) conflictingFields.push('blueprint');
+    // variants already checked above; if both set, variants wins the
+    // dispatch — by the time we reach here, input.variants is undefined.
+    if (conflictingFields.length > 0) {
+      return makeToolJsonErrorResult(
+        `flow-compile cannot be combined with single-scene input fields (${conflictingFields.join(', ')}). Flow requires its own steps[] array.`,
+        'compile.input_mode_conflict',
+        { conflictingFields },
+      );
+    }
+    return handleFlowCompile(input.flow);
+  }
+
   const t0 = Date.now();
   const session = getSession();
   session.recordToolCall('compile');
@@ -910,6 +1006,324 @@ export async function handleCompile(input: CompileInput) {
   }
 
   return { content };
+}
+
+// ─── Variants composition handler (Phase 0) ──────────────────
+//
+// N-scene compile with same-brand enforcement. Each scene runs through the
+// existing single-scene pipeline via a recursive handleCompile call — no
+// duplicated compile logic. Shared designMd is resolved once and forwarded
+// to each scene to skip N× brand disk loads.
+//
+// Phase 0 constraint: all scenes[i].brand must be equal (or all undefined).
+// Mismatched presence OR different brand strings → throw. Cross-brand
+// variants = future extension activated by real user signal, not built
+// pre-emptively.
+//
+// Response envelope: text-only JSON (no per-variant inline PNG — the caller
+// renders the composition-level preview via CompositionRenderer). Each
+// scene's full single-compile response is preserved verbatim so callers
+// can extract per-scene audit / error / storedScene as needed.
+async function handleVariantsCompile(input: { scenes: CompileInput[] }) {
+  const { scenes } = input;
+
+  // Defensive validation — schema already enforces min(2), but handler
+  // may be called from non-validated paths (tests, internal refactors).
+  if (!Array.isArray(scenes) || scenes.length < 2) {
+    return makeToolJsonErrorResult(
+      'variants-compile requires at least 2 scenes',
+      'compile.variants.too_few',
+      { count: scenes?.length ?? 0 },
+    );
+  }
+
+  // Same-brand enforcement. Each scene's brand must match scenes[0].brand
+  // exactly — including undefined=undefined (all scenes rely on session
+  // brand or inline designMd). Mixed presence is a mismatch.
+  const firstBrand = scenes[0].brand;
+  for (let i = 1; i < scenes.length; i++) {
+    if (scenes[i].brand !== firstBrand) {
+      return makeToolJsonErrorResult(
+        'variants-compile requires same-brand across all scenes (Phase 0 constraint; cross-brand variants = future chat-signal activation)',
+        'compile.variants.brand_mismatch',
+        {
+          brands: scenes.map(s => s.brand ?? null),
+          firstBrand: firstBrand ?? null,
+        },
+      );
+    }
+  }
+
+  // Per-scene designMd override guard. Phase 0 constraint: all variants
+  // share brand AND designMd — shared designMd resolved once from the
+  // common brand, forwarded to each scene. If a scene carries its own
+  // designMd, the intent is ambiguous: is the shared version overridden
+  // silently, kept, or is the caller testing two designMd's? Throw
+  // explicitly. Per-variant designMd overrides = future chat-signal
+  // activation when a real use-case appears (e.g. same brand, different
+  // token overrides per variant).
+  for (let i = 0; i < scenes.length; i++) {
+    if (scenes[i].designMd !== undefined) {
+      return makeToolJsonErrorResult(
+        `variants-compile: scene[${i}] carries an explicit designMd. Phase 0 requires all variants to share brand AND designMd (shared resolution). Per-scene designMd override = future signal activation.`,
+        'compile.variants.custom_designmd_unsupported',
+        { sceneIndex: i, name: scenes[i].name ?? null },
+      );
+    }
+  }
+
+  // Duplicate-name guard (on RESOLVED names = user-supplied OR auto-fill).
+  // Each variant ends up under a scene slug via storeScene; duplicate
+  // names silently overwrite earlier storage and lose the first variant.
+  // Detect before any compile runs. Covers:
+  //   explicit: [{name:'hero'}, {name:'hero'}]                → caught
+  //   implicit collision: [{name:'variant-1'}, {}]            → caught
+  //     (second auto-fills to 'variant-1', colliding with first)
+  //   all-auto: [{}, {}, {}] → ['variant-0','variant-1','variant-2'] → clean
+  const requestedNames = scenes.map((s, i) => s.name ?? `variant-${i}`);
+  const seenNames = new Set<string>();
+  for (const n of requestedNames) {
+    if (seenNames.has(n)) {
+      return makeToolJsonErrorResult(
+        `variants-compile: duplicate scene name "${n}" — each variant must map to a unique scene slug (either pass distinct names or omit all to get auto-assigned variant-0/1/2…)`,
+        'compile.variants.duplicate_name',
+        { names: requestedNames },
+      );
+    }
+    seenNames.add(n);
+  }
+
+  // Shared designMd resolution: single load, propagated to each scene
+  // input that didn't supply one. Avoids N× loadBrandDesignMd calls.
+  let sharedDesignMd: string | undefined;
+  if (firstBrand) {
+    const loaded = await loadBrandDesignMd(firstBrand);
+    if (loaded) sharedDesignMd = loaded;
+  }
+
+  // Per-scene compile. Unique name per variant to avoid storeScene
+  // collision. Preview forced off per-scene — composition caller renders
+  // its own composite preview.
+  const sceneResults: Array<{
+    index: number;
+    name: string;
+    /**
+     * INTENTIONAL: full MCP tool-response envelope, not extracted audit
+     * body. Preserves everything the single-compile returned (audit
+     * sections, error paths, stored-scene metadata, per-size results
+     * when scene has sizes[]) so callers get one-to-one fidelity.
+     * Parse `result.content[0].text` to get the human-readable compile
+     * report. Do NOT "simplify" to just the audit body — that loses
+     * error paths and stored-scene id.
+     */
+    result: Awaited<ReturnType<typeof handleCompile>>;
+  }> = [];
+
+  for (let i = 0; i < scenes.length; i++) {
+    const base = scenes[i];
+    const sceneInput: CompileInput = { ...base };
+    // Propagate resolved designMd so the recursive handleCompile skips its
+    // own loadBrandDesignMd + session.setBrand path. Clearing `brand` here
+    // avoids N× idempotent session writes when all variants share a brand.
+    if (sharedDesignMd) {
+      if (!sceneInput.designMd) sceneInput.designMd = sharedDesignMd;
+      sceneInput.brand = undefined;
+    }
+    sceneInput.name = requestedNames[i];
+    sceneInput.preview = false;
+
+    const result = await handleCompile(sceneInput);
+    sceneResults.push({
+      index: i,
+      name: sceneInput.name,
+      result,
+    });
+  }
+
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(
+          {
+            kind: 'variants',
+            sharedBrand: firstBrand ?? null,
+            scenes: sceneResults,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
+// ─── Flow composition handler (Phase 0) ──────────────────────
+//
+// Compile N step scenes as a flow entity, write flow.json + init
+// state.json on disk. Same constraints as variants: single brand,
+// single designMd, distinct step names. Transitions default to linear
+// when omitted (each step i gets a Next button going to i+1, last step
+// has no outgoing transition).
+//
+// Flow is a first-class persisted entity (not URL-only). Scenes live
+// under .reframe/scenes/ like any scene; the flow is a view over them
+// written to .reframe/flows/<flowId>/. Editing a scene outside the flow
+// context still affects the flow next time it mounts — scenes are
+// shared with the project.
+async function handleFlowCompile(input: {
+  flowId: string;
+  name?: string;
+  steps: CompileInput[];
+  transitions?: Array<{ from: number; to: number; label?: string; condition?: string }>;
+}) {
+  const { flowId, name, steps, transitions: transitionsOverride } = input;
+
+  if (!flowId || typeof flowId !== 'string') {
+    return makeToolJsonErrorResult(
+      'flow-compile requires a non-empty flowId',
+      'compile.flow.missing_id',
+    );
+  }
+
+  if (!Array.isArray(steps) || steps.length < 2) {
+    return makeToolJsonErrorResult(
+      'flow-compile requires at least 2 steps',
+      'compile.flow.too_few_steps',
+      { count: steps?.length ?? 0 },
+    );
+  }
+
+  // Same-brand enforcement — mirrors variants-compile.
+  const firstBrand = steps[0].brand;
+  for (let i = 1; i < steps.length; i++) {
+    if (steps[i].brand !== firstBrand) {
+      return makeToolJsonErrorResult(
+        'flow-compile requires same-brand across all steps (Phase 0 constraint; cross-brand flows = future chat-signal activation)',
+        'compile.flow.brand_mismatch',
+        {
+          brands: steps.map(s => s.brand ?? null),
+          firstBrand: firstBrand ?? null,
+        },
+      );
+    }
+  }
+
+  // Per-step designMd override guard — mirrors variants.
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i].designMd !== undefined) {
+      return makeToolJsonErrorResult(
+        `flow-compile: step[${i}] carries an explicit designMd. Phase 0 requires all steps to share brand AND designMd. Per-step designMd override = future signal activation.`,
+        'compile.flow.custom_designmd_unsupported',
+        { stepIndex: i, name: steps[i].name ?? null },
+      );
+    }
+  }
+
+  // Duplicate-name guard on resolved names. Step slugs end up in
+  // storeScene — collisions silently overwrite like variants.
+  const requestedNames = steps.map((s, i) => s.name ?? `${flowId}-step-${i}`);
+  const seenNames = new Set<string>();
+  for (const n of requestedNames) {
+    if (seenNames.has(n)) {
+      return makeToolJsonErrorResult(
+        `flow-compile: duplicate step name "${n}" — each step must map to a unique scene slug (pass distinct names or omit all to get auto-assigned <flowId>-step-0/1/2…)`,
+        'compile.flow.duplicate_name',
+        { names: requestedNames },
+      );
+    }
+    seenNames.add(n);
+  }
+
+  // Shared designMd resolution.
+  let sharedDesignMd: string | undefined;
+  if (firstBrand) {
+    const loaded = await loadBrandDesignMd(firstBrand);
+    if (loaded) sharedDesignMd = loaded;
+  }
+
+  // Linear transitions default: step[i] → step[i+1] with "Next" label.
+  // Caller overrides by passing explicit transitions.
+  const transitions = transitionsOverride ?? (() => {
+    const out: Array<{ from: number; to: number; label: string }> = [];
+    for (let i = 0; i < steps.length - 1; i++) {
+      out.push({ from: i, to: i + 1, label: 'Next' });
+    }
+    return out;
+  })();
+
+  // Per-step compile via existing single-scene handleCompile.
+  const stepResults: Array<{
+    index: number;
+    name: string;
+    result: Awaited<ReturnType<typeof handleCompile>>;
+  }> = [];
+
+  for (let i = 0; i < steps.length; i++) {
+    const base = steps[i];
+    const sceneInput: CompileInput = { ...base };
+    if (sharedDesignMd) {
+      if (!sceneInput.designMd) sceneInput.designMd = sharedDesignMd;
+      sceneInput.brand = undefined;
+    }
+    sceneInput.name = requestedNames[i];
+    sceneInput.preview = false;
+
+    const result = await handleCompile(sceneInput);
+    stepResults.push({
+      index: i,
+      name: sceneInput.name,
+      result,
+    });
+  }
+
+  // Write flow.json + initial state.json to .reframe/flows/<flowId>/.
+  const { writeFlowSpec, writeFlowState, readFlowState } = await import('../../../core/src/project/flow-store.js');
+  const projectDir = getWorkspaceRoot();
+  const now = new Date().toISOString();
+
+  try {
+    writeFlowSpec(projectDir, {
+      flowId,
+      name,
+      stepSceneIds: requestedNames,
+      transitions,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Initialize state if absent; preserve existing state if re-compiling
+    // the flow (author edits a step and re-runs — currentStep + data stick).
+    const existing = readFlowState(projectDir, flowId);
+    writeFlowState(projectDir, existing);
+  } catch (err: any) {
+    return makeToolJsonErrorResult(
+      `flow-compile: failed to write flow spec to disk: ${err?.message ?? String(err)}`,
+      'compile.flow.write_failed',
+      { flowId, projectDir },
+    );
+  }
+
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(
+          {
+            kind: 'flow',
+            flowId,
+            name: name ?? null,
+            sharedBrand: firstBrand ?? null,
+            stepSceneIds: requestedNames,
+            transitions,
+            steps: stepResults,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
 }
 
 // ─── Brand DESIGN.md loader ──────────────────────────────────

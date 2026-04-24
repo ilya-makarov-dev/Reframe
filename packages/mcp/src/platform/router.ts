@@ -314,6 +314,15 @@ export default async function(o){
         pathname.startsWith('/platform/api/variations/')) {
       return handleVariationsApi(req, res, ctx);
     }
+    // Flow spec + state endpoints (Phase 0 Flow kind). Three routes:
+    //   GET  /platform/api/flow/:id                → spec
+    //   GET  /platform/api/flow/:id/state          → live state
+    //   POST /platform/api/flow/:id/state          → merge data into state
+    //   POST /platform/api/flow/:id/transition     → set currentStep
+    if (pathname.startsWith('/platform/api/flow/')) {
+      const { handleFlowApi } = await import('./api/flow-api.js');
+      return handleFlowApi(req, res, ctx);
+    }
     // Resize / viewport adapt endpoint — spawns a tablet/phone variant
     // via core's adaptFromGraph without routing through the chat agent.
     if (pathname.startsWith('/platform/api/resize/')) {

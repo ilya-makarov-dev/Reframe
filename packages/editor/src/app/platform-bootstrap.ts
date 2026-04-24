@@ -17,8 +17,13 @@
  */
 
 import { createDOMCanvas } from '../canvas-dom/index.js';
+import { installLegacyGlobalShim, getFocusedCanvas } from '../canvas-dom/registry.js';
+import { mountCompositionRenderer, type CompositionRendererHandle } from '../canvas-dom/composition-renderer.js';
+import { mountFlowRenderer, type FlowRendererHandle } from '../canvas-dom/flow-renderer.js';
 
 let domCanvas: ReturnType<typeof createDOMCanvas> | null = null;
+let compositionHandle: CompositionRendererHandle | null = null;
+let flowHandle: FlowRendererHandle | null = null;
 
 /**
  * Mount the DOM canvas. Entry point called by `/platform/viewport.js`
@@ -26,6 +31,14 @@ let domCanvas: ReturnType<typeof createDOMCanvas> | null = null;
  * script that runs on every editor page load).
  */
 export async function initPlatformViewport(): Promise<void> {
+  // Install legacy global shim before any canvas mounts. After this
+  // `window.__reframeDOMCanvas` / `__reframeEditor` are lazy getters
+  // pointing at the focused canvas in the registry — 9 platform UI JS
+  // files (zoom-pill, tweaks-panel, toolbar, widgets, inline-popover,
+  // init, etc.) read these globals unchanged. New code should use
+  // registry.getFocusedCanvas() / getCanvas(hostId) directly.
+  installLegacyGlobalShim();
+
   const canvasEl = document.getElementById('reframe-viewport');
   const container = canvasEl?.parentElement;
   if (!container) return;
@@ -46,41 +59,196 @@ export async function initPlatformViewport(): Promise<void> {
     ?? new URL(window.location.href).pathname.split('/').pop()
     ?? '';
 
-  domCanvas = createDOMCanvas({
-    container,
-    sceneId,
-    onSelect: (ids) => {
-      // Right-panel `/api/node/get` handler takes a single node id;
-      // pass the PRIMARY (first-clicked) node. Multi-select is signalled
-      // via the `multi` flag so LAYERS + chip row can render a badge
-      // without fetching per-node data for each.
-      const primary = ids.length > 0 ? ids[0] : null;
-      window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
-        detail: { nodeId: primary, multi: ids.length > 1 },
-      }));
-      if (primary) {
-        window.dispatchEvent(new CustomEvent('reframe:ui-state-changed', {
-          detail: { selectedNodeIds: ids },
-        }));
-      }
-    },
-  });
+  // Variants URL param: `?variants=a,b,c` mounts a CompositionRenderer
+  // over pre-existing scene ids instead of a single DOMCanvas. The
+  // caller is responsible for having compiled those scenes beforehand;
+  // unknown scene ids render as empty iframes in their column (404 from
+  // /preview fetch is non-fatal — the column stays visible as a
+  // placeholder). Demo mode for Week 1 exit criteria.
+  const urlParams = new URL(window.location.href).searchParams;
+  const variantsParam = urlParams.get('variants');
+  const rawVariantIds = variantsParam
+    ? variantsParam.split(',').map((s) => s.trim()).filter(Boolean)
+    : [];
+  // Duplicate-id guard. `?variants=hero,hero,hero` (typo, bad paste, or
+  // naive attack) would, without this, register two canvases under the
+  // same hostId — registry.ts warns and the second mount clobbers the
+  // first, orphaning iframes and leaking listeners. Same class of bug
+  // we throw on in variants-compile (compile.variants.duplicate_name).
+  // Dedupe + warn here instead of throw — URL params are user-typed, not
+  // API calls; a soft fallback beats a hard crash on a typo.
+  const variantSceneIds = Array.from(new Set(rawVariantIds));
+  if (variantSceneIds.length !== rawVariantIds.length) {
+    console.warn(
+      '[platform-bootstrap] ?variants contained duplicate sceneIds; deduped to ' +
+      JSON.stringify(variantSceneIds),
+    );
+  }
 
-  // LAYERS rail click → canvas selection. Same bridge OP used.
+  // Shared onSelect bridge — same event shape for single-scene and
+  // variants modes. Right-panel inspector + LAYERS rail listen for the
+  // canvas-select event; they don't care which DOMCanvas fired it because
+  // the registry's focused-canvas shim keeps the globals pointing at the
+  // right instance.
+  const dispatchCanvasSelect = (ids: string[]) => {
+    const primary = ids.length > 0 ? ids[0] : null;
+    window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
+      detail: { nodeId: primary, multi: ids.length > 1 },
+    }));
+    if (primary) {
+      window.dispatchEvent(new CustomEvent('reframe:ui-state-changed', {
+        detail: { selectedNodeIds: ids },
+      }));
+    }
+  };
+
+  // Flow URL: ?flow=<flowId>&step=<n> — mount a flow composition by
+  // fetching its spec from the server, then render all step scenes with
+  // CSS display-gated switching. Flow wins over variants when both
+  // present (they're mutually exclusive composition kinds; unlikely
+  // combo but deterministic winner avoids ambiguity).
+  const flowParam = urlParams.get('flow');
+  if (flowParam) {
+    const stepParam = urlParams.get('step');
+    const initialStep = stepParam ? Math.max(0, parseInt(stepParam, 10) || 0) : 0;
+    try {
+      const resp = await fetch(`/platform/api/flow/${encodeURIComponent(flowParam)}`);
+      if (resp.ok) {
+        const { spec } = await resp.json() as { spec: {
+          flowId: string;
+          stepSceneIds: string[];
+          transitions: Array<{ from: number; to: number; label?: string }>;
+        } };
+        if (spec?.stepSceneIds?.length >= 2) {
+          flowHandle = mountFlowRenderer({
+            host: container,
+            flowId: spec.flowId,
+            steps: spec.stepSceneIds.map((sceneId) => ({ sceneId })),
+            transitions: spec.transitions,
+            initialStep,
+            onCanvasSelect: (sceneId, ids) => {
+              const focused = getFocusedCanvas();
+              const selfCanvas = flowHandle?.canvases.get(sceneId);
+              if (focused === selfCanvas) dispatchCanvasSelect(ids);
+            },
+            onStepChange: async (_index, _sceneId) => {
+              // Persist step position server-side so refresh restores it.
+              try {
+                await fetch(`/platform/api/flow/${encodeURIComponent(flowParam)}/transition`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ to: _index }),
+                });
+              } catch (err) {
+                console.warn('[platform-bootstrap] flow transition persist failed', err);
+              }
+            },
+          });
+          // Keep LAYERS rail handler reachable; skip single-scene branch.
+          window.addEventListener('reframe:layer-select', ((evt: CustomEvent) => {
+            const nodeId = evt.detail?.nodeId;
+            if (!nodeId) return;
+            const target = getFocusedCanvas();
+            if (target) target.select(nodeId);
+          }) as EventListener);
+          installCompositionFocusSubscriber();
+          return;
+        }
+      }
+      console.warn(`[platform-bootstrap] flow "${flowParam}" not found or malformed — falling through to single-scene mode`);
+    } catch (err) {
+      console.warn('[platform-bootstrap] flow fetch failed — falling through', err);
+    }
+  }
+
+  if (variantSceneIds.length >= 2) {
+    // Variants mode — mount N full DOMCanvases via CompositionRenderer.
+    // Labels default to the sceneIds themselves; host can override via
+    // future query param or page data-attribute.
+    compositionHandle = mountCompositionRenderer({
+      host: container,
+      composition: {
+        kind: 'variants',
+        sceneIds: variantSceneIds,
+        labels: variantSceneIds.map((id) => id),
+      },
+      onCanvasSelect: (_sceneId, ids) => {
+        // Only forward selection from the currently-focused variant to
+        // avoid inspector flicker on background re-layouts.
+        const focused = getFocusedCanvas();
+        const selfCanvas = compositionHandle?.canvases.get(_sceneId);
+        if (focused === selfCanvas) dispatchCanvasSelect(ids);
+      },
+      // onFocus imperative callback is no longer needed — the window
+      // event `reframe:composition-focus` is dispatched by registry.setFocused
+      // with full detail (hostId + sceneId + brand + compositionKind),
+      // and installCompositionFocusSubscriber() below listens for it.
+      // Leaving onFocus undefined avoids a double-fire.
+    });
+  } else {
+    // Single-scene mode — unchanged from pre-multi-mount behavior.
+    domCanvas = createDOMCanvas({
+      container,
+      sceneId,
+      onSelect: dispatchCanvasSelect,
+    });
+  }
+
+  // LAYERS rail click → canvas selection. Routes to the focused canvas
+  // in multi-mount mode (registry shim resolves __reframeDOMCanvas to
+  // focused). Falls back to the single-scene handle in single mode.
   window.addEventListener('reframe:layer-select', ((evt: CustomEvent) => {
     const nodeId = evt.detail?.nodeId;
-    if (nodeId && domCanvas) domCanvas.select(nodeId);
+    if (!nodeId) return;
+    const target = getFocusedCanvas() ?? domCanvas;
+    if (target) target.select(nodeId);
   }) as EventListener);
 
-  // Expose for devtools + `reframe_ui probe` scripts (the MCP UI
-  // automation that Platform-UI tests use). Same shape as the prior
-  // `window.__reframeDOMCanvas` from the dual-path era; alias
-  // `__reframeEditor` kept for QA scripts that predate the split.
-  (window as any).__reframeDOMCanvas = domCanvas;
-  (window as any).__reframeEditor = domCanvas;
+  installCompositionFocusSubscriber();
+
+  // Legacy globals are served by the shim installed above — `window
+  // .__reframeDOMCanvas` and `window.__reframeEditor` are configured as
+  // lazy getters that return the focused canvas from the registry. No
+  // direct assignment needed here (used to be two writes; now the
+  // registry is the single source of truth, which matters when N
+  // canvases mount for variants/flow/sampler compositions).
 }
 
 /** Legacy getter retained for backward compat; returns the DOM canvas. */
 export function getEditorShell(): ReturnType<typeof createDOMCanvas> | null {
   return domCanvas;
+}
+
+/**
+ * Composition focus → shell sync. Extracted so the flow branch can
+ * install it on the early-return path. Single-scene and variants paths
+ * also install it at the end of initPlatformViewport. Idempotent via
+ * __reframeCompositionFocusInstalled guard — subsequent calls are no-op.
+ *
+ * When the focused scene/step/variant changes, update the legacy
+ * [data-session] attribute + state globals that Platform UI reads to
+ * fetch scene data. Every existing code path (right panel, layers rail,
+ * toolbar, tweaks, bottom chat) reads:
+ *
+ *     state.currentSceneId || document.querySelector('[data-session]').getAttribute('data-session')
+ *
+ * Updating this single attribute makes them all resolve the focused
+ * variant/step. Single-scene pages never fire this event (registry only
+ * emits on actual focus CHANGE).
+ */
+function installCompositionFocusSubscriber(): void {
+  const flag = '__reframeCompositionFocusInstalled';
+  if ((window as any)[flag]) return;
+  (window as any)[flag] = true;
+  window.addEventListener('reframe:composition-focus', ((evt: CustomEvent) => {
+    const detail = evt.detail;
+    if (!detail?.sceneId) return;
+    const canvasEl = document.getElementById('reframe-viewport');
+    if (canvasEl) canvasEl.setAttribute('data-session', detail.sceneId);
+    const stateGlobal = (window as any).state;
+    if (stateGlobal) stateGlobal.currentSceneId = detail.sceneId;
+    window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
+      detail: { nodeId: null, multi: false },
+    }));
+  }) as EventListener);
 }

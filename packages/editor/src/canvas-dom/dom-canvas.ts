@@ -26,12 +26,29 @@ import { createZoomPan, ZOOM_LEVELS, type ZoomPanState } from './zoom-pan.js';
 import { createSelectionOverlay, type SelectionRect, type HandlePosition } from './overlay.js';
 import { hitTest } from './pointer.js';
 import { createPresentMode, type PresentModeController } from './present.js';
+import { registerCanvas, setFocused, isFocused, type DOMCanvasHandle, type CompositionKind } from './registry.js';
 
 export interface DOMCanvasOptions {
   container: HTMLElement;
   sceneId: string;
   projectSlug?: string;
   onSelect?: (ids: string[]) => void;
+  /**
+   * Unique key in the multi-mount registry. Defaults to sceneId, which
+   * works unless two canvases in one page show the same scene (variants
+   * / flow of the same scene — rare, but the option is here for it).
+   * Global listeners (P-key, Space pan, parallax) gate on
+   * isFocused(hostId) so keypresses route to one instance, not all.
+   */
+  hostId?: string;
+  /**
+   * Composition kind this canvas participates in. Propagated to the
+   * registry and into the reframe:composition-focus event detail so
+   * shell subscribers can route UI by kind. Defaults to 'single'.
+   */
+  compositionKind?: CompositionKind;
+  /** Optional brand slug for the scene. Appears in focus event detail. */
+  brand?: string;
 }
 
 export function createDOMCanvas(opts: DOMCanvasOptions): {
@@ -64,6 +81,8 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   postToIframe: (message: unknown) => boolean;
   destroy: () => void;
 } {
+  const hostId = opts.hostId ?? opts.sceneId;
+
   const viewport = document.createElement('div');
   viewport.className = 'rfd-canvas-viewport';
   Object.assign(viewport.style, {
@@ -128,6 +147,10 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   const zoomPan = createZoomPan({
     wrapper,
     viewport,
+    // Multi-mount gate: Space-for-pan is a window-global keydown; without
+    // this predicate, holding Space would toggle pan mode on every mounted
+    // canvas simultaneously. With it, only the focused instance responds.
+    isFocused: () => isFocused(hostId),
     onChange: (state) => {
       currentZoom = state;
       overlay.syncTransform(state.zoom, state.panX, state.panY);
@@ -138,6 +161,10 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   const presentMode = createPresentMode({
     iframe: renderer.iframe,
     viewport,
+    // Same multi-mount gate — parallax mousemove listens window-globally;
+    // without this predicate the mouse moving over variant[0] would animate
+    // variant[1]'s camera too.
+    isFocused: () => isFocused(hostId),
     onModeChange: (on) => {
       // Hide selection overlay during present mode so it doesn't flash
       // over the camera-animated scene.
@@ -151,6 +178,13 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   const attachIframeHandlers = (iframe: HTMLIFrameElement) => {
     const doc = iframe.contentDocument;
     if (!doc) return;
+
+    // Focus bridge: any click inside this instance's iframe promotes it
+    // to the focused canvas in the multi-mount registry. Mirrors the
+    // existing {capture:true} selection path — set focus FIRST, then let
+    // the selection handler run. Same event, two capture-phase listeners
+    // in insertion order: focus → select.
+    doc.addEventListener('click', () => setFocused(hostId), { capture: true });
 
     // Click → select. Shift+click → toggle. Empty space → clear.
     doc.addEventListener('click', (e) => {
@@ -457,10 +491,16 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
     }
   };
 
-  // ── Present mode keybind (global) ──────────────────────────
-
+  // ── Present mode keybind (window-global + focus-gated) ─────
+  //
+  // P-key is registered on window so it fires regardless of which element
+  // has focus (iframe content, UI chrome, overlay). Every mounted canvas
+  // installs its own listener — the isFocused(hostId) gate below ensures
+  // only the focused instance toggles present mode. Without the gate,
+  // pressing P with N canvases mounted would toggle all N simultaneously.
   const onGlobalKey = (e: KeyboardEvent) => {
     if (e.key === 'p' && (e.ctrlKey || e.metaKey) === false && !e.shiftKey && !e.altKey) {
+      if (!isFocused(hostId)) return;
       if (editingEl) return; // don't hijack while typing in inline edit
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
@@ -472,7 +512,7 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
 
   // ── Public API ─────────────────────────────────────────────
 
-  return {
+  const handle: DOMCanvasHandle = {
     reload: () => renderer.reload(),
     select: (ids) => {
       if (ids == null) setSelection([]);
@@ -512,6 +552,7 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
       }
     },
     destroy: () => {
+      unregister();
       window.removeEventListener('keydown', onGlobalKey);
       zoomSubscribers.clear();
       presentMode.destroy();
@@ -522,4 +563,17 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
       void sceneRootBbox;
     },
   };
+
+  // Register AFTER the handle object is fully constructed so the registry
+  // exposes the complete API (legacy __reframeDOMCanvas getter returns
+  // something usable from frame 0). First register becomes focused by
+  // default — subsequent instances promote themselves via the iframe click
+  // bridge installed inside attachIframeHandlers.
+  const unregister = registerCanvas(hostId, handle, {
+    sceneId: opts.sceneId,
+    brand: opts.brand,
+    compositionKind: opts.compositionKind ?? 'single',
+  });
+
+  return handle;
 }

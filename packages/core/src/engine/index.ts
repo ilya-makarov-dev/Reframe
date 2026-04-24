@@ -8,6 +8,41 @@
 // ── Scene Graph ───────────────────────────────────
 export { SceneGraph, generateId, resetIdCounter, createDefaultNode } from './scene-graph';
 
+// ── Scene Composition (additive wrapper: single | variants | flow) ──
+export {
+  singleComposition,
+  variantsComposition,
+  flowComposition,
+  sceneCount,
+  scenesOf,
+} from './composition';
+export type {
+  SceneComposition,
+  CompositionKind,
+  FlowTransition,
+  FlowState,
+  JsonValue,
+} from './composition';
+
+// ── Annotations (scene-level side-channel) ───────────
+export {
+  generateAnnotationId,
+  defaultColorForSeverity,
+  resolveAnnotationColor,
+  resolveAnnotationStyle,
+  resolveAnchorPoint,
+  createAnnotation,
+  DEFAULT_ANCHOR_OFFSETS,
+} from './annotation';
+export type {
+  AnnotationNode,
+  AnnotationAnchor,
+  AnnotationStyle,
+  AnnotationSeverity,
+  AnchorableNodeBox,
+  AnchorPoint,
+} from './annotation';
+
 // ── Types ─────────────────────────────────────────
 export type {
   SceneNode,

@@ -10,6 +10,7 @@
  */
 
 import { z } from 'zod';
+import { makeToolJsonErrorResult } from '../tool-result.js';
 import { NodeType } from '../../../core/src/host/types.js';
 import type { SceneGraph } from '../../../core/src/engine/scene-graph.js';
 import type { SceneNode } from '../../../core/src/engine/types.js';
@@ -39,6 +40,7 @@ import {
   scaleShadows as vScaleShadows,
   rotateColors as vRotateColors,
   applyTypographyPreset as vTypographyPreset,
+  breakGrid as vBreakGrid,
 } from '../../../core/src/variations/index.js';
 import { adaptFromGraph } from '../../../core/src/resize/adapt.js';
 import { ComponentRegistry } from '../../../core/src/engine/component-registry.js';
@@ -409,6 +411,60 @@ const operationSchema = z.discriminatedUnion('op', [
     sceneId: z.string().optional(),
     preset: z.enum(['dramatic', 'flat', 'editorial', 'technical', 'friendly'])
       .describe('Typography preset: dramatic (max contrast), flat (all 500), editorial (tight headings), technical (wide letter-spacing), friendly (rounded).'),
+  }),
+
+  // Variation: break equal-grid (auto-fix for "N equal cards" slop signature)
+  z.object({
+    op: z.literal('breakGrid'),
+    sceneId: z.string().optional(),
+    pattern: z.enum(['bento']).optional().default('bento').describe(
+      'Transform pattern. Phase 1: bento only (middle child grows 2×, edges 1×, middle band gets +40% vertical padding). Others = future signal.',
+    ),
+    widthTolerance: z.number().optional().describe('Equal-width tolerance in px. Default 8.'),
+    middlePaddingFactor: z.number().optional().describe('Multiplier for middle-band padding. Default 1.4.'),
+  }),
+
+  // ── Annotations (Phase 8, scene-level side-channel) ─────────
+  //
+  // Three ops: annotate (create) / updateAnnotation (patch fields) /
+  // removeAnnotation (delete). Move / resolve / change severity all go
+  // through updateAnnotation. Annotations are persistent scene metadata;
+  // they survive reload and export. reframe-critic should emit these
+  // alongside its chat-text critique.
+
+  z.object({
+    op: z.literal('annotate'),
+    sceneId: z.string().optional(),
+    targetNodeId: z.string().describe('The node this annotation is about. Must exist in the scene tree.'),
+    text: z.string().describe('Annotation body. Rendered as a span near the target node.'),
+    anchor: z.enum(['nw', 'ne', 'sw', 'se', 'top', 'bottom']).describe('Which corner/edge of the target bbox to attach to.'),
+    offsetX: z.number().optional().describe('Fine-tune horizontal offset (px) from default anchor position.'),
+    offsetY: z.number().optional().describe('Fine-tune vertical offset (px) from default anchor position.'),
+    style: z.enum(['caveat', 'mono']).optional().describe('Font family. Default "caveat".'),
+    severity: z.enum(['info', 'suggestion', 'warn']).optional().describe('Default color resolves from severity when color is omitted.'),
+    color: z.string().optional().describe('Explicit CSS color. Overrides severity default.'),
+    author: z.string().optional().describe('Free-form attribution — e.g. "critic", "designer", initials.'),
+  }),
+
+  z.object({
+    op: z.literal('updateAnnotation'),
+    sceneId: z.string().optional(),
+    annotationId: z.string().describe('The id returned by annotate.'),
+    text: z.string().optional(),
+    anchor: z.enum(['nw', 'ne', 'sw', 'se', 'top', 'bottom']).optional(),
+    offsetX: z.number().optional(),
+    offsetY: z.number().optional(),
+    style: z.enum(['caveat', 'mono']).optional(),
+    severity: z.enum(['info', 'suggestion', 'warn']).optional(),
+    color: z.string().optional(),
+    author: z.string().optional(),
+    resolved: z.boolean().optional(),
+  }),
+
+  z.object({
+    op: z.literal('removeAnnotation'),
+    sceneId: z.string().optional(),
+    annotationId: z.string(),
   }),
 
   // Declare live-tweak controls — a curated set of sliders / color
@@ -1215,6 +1271,29 @@ export async function handleEdit(input: {
   const session = getSession();
   session.recordToolCall('edit');
 
+  // ─── Phase 0 contract: macros are per-scene only ───────────
+  //
+  // Every mutation op (update, add, delete, clone, move, resize,
+  // scaleSpacing, scaleRadius, scaleShadows, rotateColors,
+  // typographyPreset, iterate, adapt, vary, and future breakGrid)
+  // targets ONE scene via `sceneId`. Composition-level mutations
+  // (apply to all variants/steps at once) are NOT supported in
+  // Phase 0 — they require a separate op kind (e.g. `compositionMacro`)
+  // with explicit per-scene routing internally.
+  //
+  // If a caller passes `compositionId` on any op — throw. Do not
+  // silently apply to the focused scene (hides intent + surprises
+  // the caller later when the other variants diverge).
+  for (const op of input.operations ?? []) {
+    if (op && typeof op === 'object' && 'compositionId' in op) {
+      return makeToolJsonErrorResult(
+        'edit ops are per-scene only in Phase 0 (macros must target a single scene via sceneId, not a composition). Composition-level mutations = future chat-signal activation via a dedicated compositionMacro op kind.',
+        'edit.composition_target_unsupported',
+        { op: op.op ?? '(unknown)', compositionId: (op as any).compositionId },
+      );
+    }
+  }
+
   // Use explicit designMd, or fall back to session brand, or last-resort to
   // project.json's activeBrand. The session singleton may be empty if the
   // process forked between extract and edit (MCP stdio harness behavior),
@@ -1999,6 +2078,137 @@ export async function handleEdit(input: {
         });
         touchedScenes.add(sceneId);
         results.push(`SCALE_SPACING factor=${op.factor} — ${n} fields updated`);
+        break;
+      }
+
+      case 'breakGrid': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('BREAK_GRID ERROR: no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`BREAK_GRID ERROR: scene "${sceneId}" not found`); break; }
+
+        const result = vBreakGrid(stored.graph, stored.rootId, {
+          widthTolerance: op.widthTolerance,
+          middlePaddingFactor: op.middlePaddingFactor,
+          pattern: op.pattern ?? 'bento',
+        });
+        touchedScenes.add(sceneId);
+        const detail = result.skippedIdempotent.length > 0
+          ? ` (${result.skippedIdempotent.length} skipped — already broken)`
+          : '';
+        results.push(`BREAK_GRID pattern=${op.pattern ?? 'bento'} — ${result.broken} containers broken${detail}`);
+        break;
+      }
+
+      case 'annotate': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) {
+          return makeToolJsonErrorResult(
+            'annotate: no sceneId and no prior op established one',
+            'edit.annotate.no_scene',
+          );
+        }
+        const stored = getScene(sceneId);
+        if (!stored) {
+          return makeToolJsonErrorResult(
+            `annotate: scene "${sceneId}" not found`,
+            'edit.annotate.scene_not_found',
+            { sceneId },
+          );
+        }
+        if (!stored.graph.getNode(op.targetNodeId)) {
+          return makeToolJsonErrorResult(
+            `annotate: targetNodeId "${op.targetNodeId}" does not exist in scene "${sceneId}"`,
+            'edit.annotate.target_not_found',
+            { sceneId, targetNodeId: op.targetNodeId },
+          );
+        }
+        const { createAnnotation } = await import('../../../core/src/engine/annotation.js');
+        const anno = createAnnotation({
+          targetNodeId: op.targetNodeId,
+          text: op.text,
+          anchor: op.anchor,
+          offsetX: op.offsetX,
+          offsetY: op.offsetY,
+          style: op.style,
+          severity: op.severity,
+          color: op.color,
+          author: op.author,
+        });
+        stored.graph.annotations.push(anno);
+        touchedScenes.add(sceneId);
+        results.push(`ANNOTATE ${anno.id} → target ${op.targetNodeId} anchor=${op.anchor}${op.severity ? ` severity=${op.severity}` : ''}`);
+        break;
+      }
+
+      case 'updateAnnotation': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) {
+          return makeToolJsonErrorResult(
+            'updateAnnotation: no sceneId and no prior op established one',
+            'edit.annotation.no_scene',
+          );
+        }
+        const stored = getScene(sceneId);
+        if (!stored) {
+          return makeToolJsonErrorResult(
+            `updateAnnotation: scene "${sceneId}" not found`,
+            'edit.annotation.scene_not_found',
+            { sceneId },
+          );
+        }
+        const idx = stored.graph.annotations.findIndex((a) => a.id === op.annotationId);
+        if (idx < 0) {
+          return makeToolJsonErrorResult(
+            `updateAnnotation: annotation "${op.annotationId}" not found in scene "${sceneId}"`,
+            'edit.annotation.not_found',
+            { sceneId, annotationId: op.annotationId },
+          );
+        }
+        const current = stored.graph.annotations[idx];
+        const patched = { ...current };
+        if (op.text !== undefined) patched.text = op.text;
+        if (op.anchor !== undefined) patched.anchor = op.anchor;
+        if (op.offsetX !== undefined) patched.offsetX = op.offsetX;
+        if (op.offsetY !== undefined) patched.offsetY = op.offsetY;
+        if (op.style !== undefined) patched.style = op.style;
+        if (op.severity !== undefined) patched.severity = op.severity;
+        if (op.color !== undefined) patched.color = op.color;
+        if (op.author !== undefined) patched.author = op.author;
+        if (op.resolved !== undefined) patched.resolved = op.resolved;
+        stored.graph.annotations[idx] = patched;
+        touchedScenes.add(sceneId);
+        results.push(`UPDATE_ANNOTATION ${op.annotationId}`);
+        break;
+      }
+
+      case 'removeAnnotation': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) {
+          return makeToolJsonErrorResult(
+            'removeAnnotation: no sceneId and no prior op established one',
+            'edit.annotation.no_scene',
+          );
+        }
+        const stored = getScene(sceneId);
+        if (!stored) {
+          return makeToolJsonErrorResult(
+            `removeAnnotation: scene "${sceneId}" not found`,
+            'edit.annotation.scene_not_found',
+            { sceneId },
+          );
+        }
+        const before = stored.graph.annotations.length;
+        stored.graph.annotations = stored.graph.annotations.filter((a) => a.id !== op.annotationId);
+        if (stored.graph.annotations.length === before) {
+          return makeToolJsonErrorResult(
+            `removeAnnotation: annotation "${op.annotationId}" not found in scene "${sceneId}"`,
+            'edit.annotation.not_found',
+            { sceneId, annotationId: op.annotationId },
+          );
+        }
+        touchedScenes.add(sceneId);
+        results.push(`REMOVE_ANNOTATION ${op.annotationId}`);
         break;
       }
 

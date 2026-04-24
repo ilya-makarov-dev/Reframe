@@ -7,6 +7,13 @@
 
 import type { SceneGraph } from '../engine/scene-graph';
 import type { SceneNode, Color, Fill, Stroke, Effect, GradientTransform, StateOverride, ResponsiveRule, TokenBindings } from '../engine/types';
+import type { AnnotationNode } from '../engine/annotation';
+import {
+  resolveAnchorPoint,
+  resolveAnnotationColor,
+  resolveAnnotationStyle,
+} from '../engine/annotation';
+import { computeAbsolutePosition } from '../engine/geometry';
 import type { DesignSystem } from '../design-system/types';
 import type { ITimeline } from '../animation/types';
 import { timelineToCss } from '../animation/to-css';
@@ -651,12 +658,26 @@ export function exportToHtml(
     ? '\n  ' + behaviorStyles.join('\n  ')
     : '';
 
+  // ── Annotations overlay ─────────────────────────────────────
+  // Scene-level annotations render as absolute-positioned spans placed
+  // AFTER the main scene content so they sit ATOP it in paint order.
+  // Position is computed from the target node's post-Yoga bbox — stored
+  // shape is {targetNodeId, anchor, offset}; absolute coords are derived
+  // here, which means annotations follow their targets through layout
+  // changes (responsive resize, brand swap, user drag).
+  const annotationHtml = graph.annotations.length > 0
+    ? renderAnnotationLayer(graph, rootId)
+    : '';
+  const annotationStyles = graph.annotations.length > 0
+    ? ANNOTATION_BASE_CSS
+    : '';
+
   if (!fullDoc) {
-    if (useCssClasses || tokenBlock || behaviorBlock) {
+    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles) {
       const classBlock = useCssClasses ? generateCssBlock(classes) : '';
-      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}</style>\n${html}`;
+      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}</style>\n${html}${annotationHtml}`;
     }
-    return html;
+    return `${html}${annotationHtml}`;
   }
 
   // Full document with production-quality base styles
@@ -686,13 +707,94 @@ export function exportToHtml(
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility;${rootBgForBody(root, graph)} }
     body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root, graph)} }
     a { color: inherit; text-decoration: none; }
-    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}
+    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}
   </style>${css}
+  ${graph.annotations.length > 0 ? ANNOTATION_FONT_LINK : ''}
 </head>
 <body>
 ${indent(html, 2)}
+${indent(annotationHtml, 2)}
 </body>
 </html>`;
+}
+
+// ─── Annotation overlay rendering ─────────────────────────────
+
+const ANNOTATION_FONT_LINK =
+  '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600&display=swap">';
+
+const ANNOTATION_BASE_CSS = `
+    .reframe-annotation {
+      position: absolute;
+      pointer-events: none;
+      z-index: 9000;
+      font-size: 20px;
+      line-height: 1.1;
+      font-weight: 500;
+      max-width: 240px;
+      white-space: pre-wrap;
+    }
+    .reframe-annotation[data-anno-style="caveat"] {
+      font-family: 'Caveat', cursive, sans-serif;
+      font-size: 22px;
+    }
+    .reframe-annotation[data-anno-style="mono"] {
+      font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+      font-size: 13px;
+      letter-spacing: -0.01em;
+    }
+    .reframe-annotation[data-anno-resolved="true"] { opacity: 0.45; }
+    .reframe-annotation::before {
+      content: '';
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      border: 2px solid currentColor;
+    }
+    .reframe-annotation[data-anno-bracket="nw"]::before {
+      top: -4px; left: -4px; border-right: 0; border-bottom: 0;
+    }
+    .reframe-annotation[data-anno-bracket="ne"]::before {
+      top: -4px; right: -4px; border-left: 0; border-bottom: 0;
+    }
+    .reframe-annotation[data-anno-bracket="sw"]::before {
+      bottom: -4px; left: -4px; border-right: 0; border-top: 0;
+    }
+    .reframe-annotation[data-anno-bracket="se"]::before {
+      bottom: -4px; right: -4px; border-left: 0; border-top: 0;
+    }
+    .reframe-annotation[data-anno-bracket="top"]::before {
+      top: -4px; left: 50%; transform: translateX(-50%); border-right: 0; border-bottom: 0;
+    }
+    .reframe-annotation[data-anno-bracket="bottom"]::before {
+      bottom: -4px; left: 50%; transform: translateX(-50%); border-right: 0; border-top: 0;
+    }
+  `;
+
+function renderAnnotationLayer(graph: SceneGraph, rootId: string): string {
+  const getNode = (id: string) => graph.getNode(id);
+  const rootPos = computeAbsolutePosition(rootId, getNode);
+  const out: string[] = [];
+  for (const a of graph.annotations) {
+    const target = graph.getNode(a.targetNodeId);
+    if (!target) continue; // silently skip — caller surfaced the id
+    const abs = computeAbsolutePosition(a.targetNodeId, getNode);
+    const box = {
+      // Translate target abs pos into root-relative (scene) coordinate space.
+      x: abs.x - rootPos.x,
+      y: abs.y - rootPos.y,
+      width: target.width,
+      height: target.height,
+    };
+    const point = resolveAnchorPoint(a, box);
+    const color = resolveAnnotationColor(a);
+    const style = resolveAnnotationStyle(a);
+    const textHtml = escapeHtml(a.text);
+    out.push(
+      `<span class="reframe-annotation" data-anno-id="${a.id}" data-anno-style="${style}" data-anno-bracket="${point.bracketDirection}"${a.resolved ? ' data-anno-resolved="true"' : ''} style="left:${Math.round(point.x)}px; top:${Math.round(point.y)}px; color:${color};">${textHtml}</span>`,
+    );
+  }
+  return out.join('\n');
 }
 
 // ─── Behavior CSS Helpers ──────────────────────────────────────

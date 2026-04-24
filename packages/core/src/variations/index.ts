@@ -21,5 +21,8 @@ export type { ColorRotation } from './colors';
 export { applyTypographyPreset } from './typography';
 export type { TypographyPreset } from './typography';
 
+export { breakGrid } from './break-grid';
+export type { BreakGridOptions, BreakGridResult } from './break-grid';
+
 export { generateVariationGrid } from './grid';
 export type { VariationAxes, VariationRecipe } from './grid';

@@ -377,6 +377,8 @@ export function buildPlatformContext(): PlatformContext {
 import {
   listScenes as listSessionScenes,
   getScene,
+  storeScene,
+  getWorkspaceRoot,
   deleteScene as deleteSessionScene,
   replaceSessionSceneGraph,
 } from './store.js';
@@ -734,7 +736,29 @@ export function startHttpSidecar(port = 4100): void {
       const dotIdx = tail.lastIndexOf('.');
       const sceneId = dotIdx >= 0 ? tail.slice(0, dotIdx) : tail;
       const ext = dotIdx >= 0 ? tail.slice(dotIdx + 1).toLowerCase() : 'html';
-      const stored = getScene(sceneId);
+      let stored = getScene(sceneId);
+      if (!stored) {
+        // Disk fallback: the HTTP sidecar and MCP stdio run as separate
+        // processes and don't share session state. A scene compiled via
+        // MCP persists to disk but the sidecar's in-memory session is
+        // still empty. Auto-load from disk before 404'ing so composition
+        // mounts (variants / flow / sampler) work against persisted
+        // scenes without a manual "wake up the sidecar" step.
+        try {
+          const { coreProjectIo } = await import('./project-io.js');
+          const projectDir = getWorkspaceRoot();
+          const loaded = coreProjectIo().loadSceneFromProject(projectDir, sceneId);
+          if (loaded?.graph && loaded?.rootId) {
+            storeScene(loaded.graph, loaded.rootId, loaded.timeline, {
+              slug: sceneId,
+              name: loaded.entry?.name ?? sceneId,
+            });
+            stored = getScene(sceneId);
+          }
+        } catch (err) {
+          console.warn(`[preview] disk fallback failed for "${sceneId}"`, err);
+        }
+      }
       if (!stored) {
         res.writeHead(404, { 'Content-Type': 'text/html' });
         res.end('<h1>Scene not found</h1>');

@@ -324,6 +324,21 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
 
   const jsx = renderNode(node, true, indentSize, 1, useCssModules, cssClasses, () => `node${classCounter++}`, useImages, behaviorClassMap, phase3.byNode);
 
+  // ── Annotations (scene-level overlay) ─────────────────────
+  // Pull annotations off the graph via the adapter escape hatch — same
+  // path the timeline uses (`(node as any).graph`). Emit them as JSX
+  // siblings of the root so they paint atop the scene. Storage shape is
+  // target-relative; positions are resolved here against node.x/y/width/
+  // height (post-Yoga) so annotations follow their target through
+  // future layout changes.
+  const graphRef = (node as any).graph as { annotations?: import('../engine/annotation').AnnotationNode[]; getNode?: (id: string) => { x: number; y: number; width: number; height: number; parentId: string | null; type: string } | undefined } | undefined;
+  const annotationJsx = graphRef?.annotations?.length
+    ? renderReactAnnotations(graphRef.annotations, node, graphRef)
+    : '';
+  const annotationCss = graphRef?.annotations?.length
+    ? REACT_ANNOTATION_CSS
+    : '';
+
   const typeAnnotation = ts ? ': React.FC' : '';
   const imports: string[] = [`import React from 'react';`];
   if (useCssModules) {
@@ -337,7 +352,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   const animationBlocks: string[] = [];
   if (timelineCss.keyframes) animationBlocks.push(timelineCss.keyframes);
   for (const rule of timelineCss.classRules.values()) animationBlocks.push(rule);
-  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks].filter(Boolean);
+  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss].filter(Boolean);
   const styleJsx = combinedStyles.length > 0
     ? `\n      <style>{\`\n        ${combinedStyles.join('\n        ')}\n      \`}</style>`
     : '';
@@ -349,6 +364,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     `  return (`,
     `    <>`,
     jsx,
+    annotationJsx ? annotationJsx : '',
     styleJsx ? styleJsx : '',
     `    </>`,
     `  );`,
@@ -1321,3 +1337,57 @@ function formatCssValue(prop: string, val: string | number): string {
   }
   return val;
 }
+
+// ─── Annotation overlay emit (React JSX) ─────────────────────
+
+const REACT_ANNOTATION_CSS = `
+.reframe-annotation {
+  position: absolute; pointer-events: none; z-index: 9000;
+  font-size: 20px; line-height: 1.1; font-weight: 500; max-width: 240px; white-space: pre-wrap;
+}
+.reframe-annotation[data-anno-style="caveat"] { font-family: 'Caveat', cursive, sans-serif; font-size: 22px; }
+.reframe-annotation[data-anno-style="mono"] { font-family: ui-monospace, 'JetBrains Mono', Menlo, monospace; font-size: 13px; }
+.reframe-annotation[data-anno-resolved="true"] { opacity: 0.45; }
+.reframe-annotation::before { content: ''; position: absolute; width: 14px; height: 14px; border: 2px solid currentColor; }
+.reframe-annotation[data-anno-bracket="nw"]::before { top: -4px; left: -4px; border-right: 0; border-bottom: 0; }
+.reframe-annotation[data-anno-bracket="ne"]::before { top: -4px; right: -4px; border-left: 0; border-bottom: 0; }
+.reframe-annotation[data-anno-bracket="sw"]::before { bottom: -4px; left: -4px; border-right: 0; border-top: 0; }
+.reframe-annotation[data-anno-bracket="se"]::before { bottom: -4px; right: -4px; border-left: 0; border-top: 0; }
+.reframe-annotation[data-anno-bracket="top"]::before { top: -4px; left: 50%; transform: translateX(-50%); border-right: 0; border-bottom: 0; }
+.reframe-annotation[data-anno-bracket="bottom"]::before { bottom: -4px; left: 50%; transform: translateX(-50%); border-right: 0; border-top: 0; }
+`.trim();
+
+function renderReactAnnotations(
+  annotations: ReadonlyArray<import('../engine/annotation').AnnotationNode>,
+  rootNode: INode,
+  graphRef: { getNode?: (id: string) => { x: number; y: number; width: number; height: number; parentId: string | null; type: string } | undefined },
+): string {
+  if (!graphRef.getNode) return '';
+  const { resolveAnchorPoint, resolveAnnotationColor, resolveAnnotationStyle } =
+    require('../engine/annotation') as typeof import('../engine/annotation');
+  const { computeAbsolutePosition } =
+    require('../engine/geometry') as typeof import('../engine/geometry');
+  // Wrap in arrow to preserve `this` binding — graphRef.getNode is a
+  // SceneGraph method that reads this.nodes internally; a bare function
+  // reference loses the binding and throws "Cannot read 'nodes' of undefined".
+  const getNode = (id: string) => graphRef.getNode!(id);
+  const rootId = (rootNode as any).id ?? (rootNode as any)._n?.id;
+  const rootPos = computeAbsolutePosition(rootId, getNode as any);
+  const lines: string[] = [];
+  for (const a of annotations) {
+    const t = getNode(a.targetNodeId);
+    if (!t) continue;
+    const abs = computeAbsolutePosition(a.targetNodeId, getNode as any);
+    const box = { x: abs.x - rootPos.x, y: abs.y - rootPos.y, width: t.width, height: t.height };
+    const point = resolveAnchorPoint(a, box);
+    const color = resolveAnnotationColor(a);
+    const style = resolveAnnotationStyle(a);
+    const escapedText = a.text.replace(/[\\`${}]/g, (c) => `\\${c}`);
+    const resolvedAttr = a.resolved ? ' data-anno-resolved="true"' : '';
+    lines.push(
+      `      <span className="reframe-annotation" data-anno-id="${a.id}" data-anno-style="${style}" data-anno-bracket="${point.bracketDirection}"${resolvedAttr} style={{ left: ${Math.round(point.x)}, top: ${Math.round(point.y)}, color: '${color}' }}>${escapedText}</span>`,
+    );
+  }
+  return lines.join('\n');
+}
+

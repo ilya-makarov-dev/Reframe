@@ -190,6 +190,17 @@ export class SceneGraph {
    */
   timeline: any | null = null;
 
+  /**
+   * Scene-level annotations side-channel. Each entry points at any
+   * INode in this scene via targetNodeId. Storage keeps position as
+   * {anchor, offsetX?, offsetY?} — exporters compute absolute coords at
+   * render time against the post-Yoga bbox so annotations follow their
+   * target through layout changes. See engine/annotation.ts.
+   *
+   * Phase 8+ feature. Pre-Phase-8 scenes deserialize with [] — no-op.
+   */
+  annotations: import('./annotation').AnnotationNode[] = [];
+
   // Caches
   private absPosCache = new Map<string, Vector>();
   private instanceIndex = new Map<string, Set<string>>();

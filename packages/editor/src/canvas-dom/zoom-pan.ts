@@ -22,6 +22,15 @@ export function createZoomPan(opts: {
   wrapper: HTMLElement;
   viewport: HTMLElement;
   onChange?: (state: ZoomPanState) => void;
+  /**
+   * Multi-mount gate for window-global Space key and Ctrl+0/1/+/- shortcuts.
+   * When N canvases are mounted, each attaches its own keydown/keyup
+   * listeners; without this predicate every Space press would toggle pan
+   * mode on every canvas. The predicate returns true for the focused
+   * instance only. If omitted, defaults to "always focused" — single-mount
+   * backward compat.
+   */
+  isFocused?: () => boolean;
 }): {
   state: ZoomPanState;
   setZoom: (z: number, anchorX?: number, anchorY?: number) => void;
@@ -59,7 +68,11 @@ export function createZoomPan(opts: {
     return ZOOM_LEVELS[next];
   };
 
-  // Ctrl/Cmd+wheel → zoom at pointer. Plain wheel → pan.
+  const focused = (): boolean => opts.isFocused?.() ?? true;
+
+  // Ctrl/Cmd+wheel → zoom at pointer. Plain wheel → pan. Wheel is
+  // viewport-scoped so pointer position naturally resolves which canvas
+  // receives it — no focus gate needed.
   const onWheel = (e: WheelEvent) => {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
@@ -77,6 +90,10 @@ export function createZoomPan(opts: {
   let spaceHeld = false;
   let dragStart: { x: number; y: number; panX: number; panY: number } | null = null;
   const onKey = (e: KeyboardEvent) => {
+    // Window-global listener; fire only for the focused canvas in
+    // multi-mount. Without this, holding Space toggles pan mode across
+    // every mounted canvas at once.
+    if (!focused()) return;
     if (e.code === 'Space' && !e.repeat) spaceHeld = e.type === 'keydown';
     if (e.type === 'keydown' && (e.ctrlKey || e.metaKey)) {
       if (e.key === '0') { e.preventDefault(); /* fit — caller supplies dims via zoomToFit */ }
@@ -86,6 +103,9 @@ export function createZoomPan(opts: {
     }
   };
   const onMouseDown = (e: MouseEvent) => {
+    // mousedown is viewport-scoped — already routes to the right canvas.
+    // But spaceHeld only flips for focused canvas, so unfocused canvases
+    // naturally don't enter pan drag even though their listener fires.
     if (!spaceHeld) return;
     dragStart = { x: e.clientX, y: e.clientY, panX: state.panX, panY: state.panY };
     opts.viewport.style.cursor = 'grabbing';

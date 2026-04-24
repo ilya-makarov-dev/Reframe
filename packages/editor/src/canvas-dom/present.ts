@@ -48,6 +48,14 @@ export interface PresentModeOptions {
   viewport: HTMLElement;
   /** Called on enter/exit so the host can hide/show editor chrome. */
   onModeChange?: (active: boolean) => void;
+  /**
+   * Multi-mount gate for the window-global parallax mousemove listener
+   * and keydown controls (arrows / 1-5 / 0 / Space). Without it, moving
+   * the mouse over any part of the page would animate every mounted
+   * canvas's camera, and a single arrow press would rotate all of them.
+   * If omitted, defaults to always-focused (single-mount backward compat).
+   */
+  isFocused?: () => boolean;
 }
 
 export interface PresentModeController {
@@ -220,10 +228,15 @@ export function createPresentMode(opts: PresentModeOptions): PresentModeControll
     rafId = requestAnimationFrame(flyLoop);
   };
 
+  const focused = (): boolean => opts.isFocused?.() ?? true;
+
   // Keyboard: arrow rotate, ± zoom, Space cycle filter, Esc exit,
-  // 1-5 cycle camera presets.
+  // 1-5 cycle camera presets. Window-global listener; multi-mount gate
+  // keeps the arrow / number keys scoped to the focused instance even
+  // when several canvases are in present mode simultaneously.
   const onKey = (e: KeyboardEvent) => {
     if (!active) return;
+    if (!focused()) return;
     if (e.key === 'Escape') { e.preventDefault(); ctrl.exit(); return; }
     if (e.key === 'ArrowLeft')  { ry -= 5; applyTransforms(); e.preventDefault(); }
     if (e.key === 'ArrowRight') { ry += 5; applyTransforms(); e.preventDefault(); }
@@ -244,9 +257,14 @@ export function createPresentMode(opts: PresentModeOptions): PresentModeControll
     }
   };
 
-  // Parallax mouse follow (only when camera === 'parallax').
+  // Parallax mouse follow (only when camera === 'parallax'). Mousemove
+  // is window-global; the focus gate prevents cursor motion over
+  // variant[0] from animating variant[1]'s camera. The rect intersection
+  // check below still useful as a fallback (mouse outside viewport) even
+  // for the focused instance.
   const onMove = (e: MouseEvent) => {
     if (!active || camera !== 'parallax') return;
+    if (!focused()) return;
     const rect = opts.viewport.getBoundingClientRect();
     const cx = (e.clientX - rect.left) / rect.width - 0.5;   // -0.5 .. 0.5
     const cy = (e.clientY - rect.top) / rect.height - 0.5;

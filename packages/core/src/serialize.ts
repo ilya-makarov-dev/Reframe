@@ -202,6 +202,12 @@ export interface SceneJSON {
   /** Omitted or null = no timeline (PUT uses explicit null to clear session animation). */
   timeline?: ITimelineJSON | null;
   images?: Record<string, string>;  // hash → base64
+  /**
+   * Scene-level annotations side-channel. Optional — omitted from
+   * serialized envelope when empty so pre-Phase-8 scenes (no annotations)
+   * serialize to identical bytes as before. Deserialize tolerates absence.
+   */
+  annotations?: import('./engine/annotation.js').AnnotationNode[];
 }
 
 export interface SerializeOptions {
@@ -555,6 +561,11 @@ export function serializeGraph(
     for (const [hash, data] of graph.images) {
       result.images[hash] = bufferToBase64(data);
     }
+  }
+
+  // Annotations (omit key when empty — pre-Phase-8 scenes serialize identically).
+  if (graph.annotations.length > 0) {
+    result.annotations = graph.annotations.map((a) => ({ ...a }));
   }
 
   return result;
@@ -983,6 +994,12 @@ export function deserializeScene(scene: SceneJSON): {
 
   // Restore timeline
   const timeline = scene.timeline ? deserializeTimeline(scene.timeline) : undefined;
+
+  // Restore annotations (Phase 8). Absent on pre-Phase-8 scenes — graph
+  // constructor initializes annotations to [] so the default is fine.
+  if (Array.isArray(scene.annotations)) {
+    graph.annotations = scene.annotations.map((a) => ({ ...a }));
+  }
 
   // CANVAS-wrapper unwrap: scenes saved by the variant generator (and
   // some older import paths) serialize as `CANVAS "Page 1" 100×100` →

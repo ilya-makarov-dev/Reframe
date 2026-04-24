@@ -51,7 +51,7 @@ If the triage hit doesn't fix the feeling, THEN walk the full smell table below.
 | Smell | Why it reads fake | Probe | Fix |
 |---|---|---|---|
 | "Trusted by 40,000 engineers" (or any round number) | Invented social proof | Grep compiled HTML for round-number stats near "trusted/used/loved by" | Use neutral labels — "trusted by teams", "built for engineers", no number |
-| 3 feature cards equal-width horizontal | AI-slop template signature | `probe .feature-grid > *` count == 3 + same w/h | Bento / asymmetric / zig-zag / vertical stack |
+| 3 feature cards equal-width horizontal | AI-slop template signature | `probe .feature-grid > *` count ≥ 3 + same w/h + same vertical padding | `reframe_edit op='breakGrid' sceneId=<id> nodeId=<container>` (bento pattern, idempotent) — OR manual zig-zag / vertical stack when bento wrong fit |
 | Hero is centered AND has ≥4 top-level children | Variance too high for centering | Count direct children of the hero frame; if > 3 and `primaryAxisAlign=CENTER` | Left-align, keep the badge/stats off-axis |
 | All corner radii == 16px (or any single value) | Corner inflation | Scan `cornerRadius` across frames; stdev == 0 | Scale by semantics — cards 12–16, buttons 6–8, pills 9999 |
 | Every card has a shadow | Shadow inflation, reads as template | Count shadows per section; if > 2 of same intensity | Pick 1 primary emphasis — remove the rest |

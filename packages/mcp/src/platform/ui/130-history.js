@@ -115,9 +115,15 @@
   async function undoLastOp() {
     var sceneSlug = state.currentSceneSlug;
     if (!sceneSlug) return;
-    // Find the session id for this scene. We get it from the viewport frame.
-    var frame = $('.viewport-frame');
-    var sessionId = frame ? frame.getAttribute('data-session') : null;
+    // Find the session id: prefer state.currentSceneId (written by
+    // composition-focus subscriber for variants / flow / sampler), then
+    // the DOM carrier #reframe-viewport used by post-phase-2 editor,
+    // then the legacy .viewport-frame selector for pre-Phase-2 pages.
+    // The [data-session] attribute is the generic carrier all three
+    // paths agree on.
+    var sessionId = state.currentSceneId
+      || document.querySelector('[data-session]')?.getAttribute('data-session')
+      || null;
     if (!sessionId) return;
     try {
       var res = await api('/platform/api/undo', { sceneId: sessionId });

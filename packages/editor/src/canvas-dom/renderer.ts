@@ -176,6 +176,13 @@ export function createSceneRenderer(opts: SceneRendererOptions): {
 
   // SSE subscription. Scene-level events fire when server-side graph
   // mutates (agent edit, macro, rebrand, user via right-panel).
+  //
+  // TODO: multiplex /events subscription when sampler primitive lands
+  // (N > 10 cells). Each SceneRenderer opens its own EventSource today —
+  // fine for variants (N ≤ 5) and flow (N ≤ ~10 steps), but 20+ sampler
+  // cells × per-cell EventSource = server connection pressure + client
+  // reconnect storms on brief network blips. At that point, move to a
+  // single shared EventSource per page with client-side sceneId routing.
   let es: EventSource | null = null;
   try {
     // SSE lives at top-level `/events` (see `http-server.ts:708`).
