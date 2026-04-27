@@ -74,6 +74,42 @@ Three issues worth fixing:
 Rest holds: <one line of what's good>. Want me to apply these?
 ```
 
+## Emit critique as pinned annotations
+
+After you write the chat-text rubric (≤3 items), **also pin each item to its node** as a scene annotation. The chat output stays — annotations ADD a visual layer the designer can see on the canvas next to the offending element. Without the pin, the designer has to mentally re-locate "headline 72→68" inside a 40-node tree. With the pin, it's already there.
+
+**Flow:**
+
+1. **Get the node tree.** You already called `reframe_inspect sceneId=X` for the rubric — re-use the tree section to find `nodeId` per finding. If a finding is scene-wide (e.g. "rhythm 0.42 across the page"), pin it to the root node.
+2. **For each ≤3 item, pick the offending node.** Audit lines often name `nodeName` already — match by name. For taste findings (genericness, fake content), inspect the tree manually and pick the closest single node (the hero title for a generic-headline note, the stat-row for a fake-stat note).
+3. **Emit one annotate op per item:**
+   ```
+   reframe_edit operations=[{
+     op: 'annotate',
+     sceneId: '<id>',
+     targetNodeId: '<nodeId>',
+     text: '<1–2 sentence critique — same wording as the chat item, trimmed>',
+     anchor: '<ne|se|nw|sw|top|bottom>',
+     severity: '<info|suggestion|warn>',
+     author: 'critic',
+   }]
+   ```
+4. **Severity mapping:**
+   - `warn` → audit / brand-fidelity violations (objective failures: contrast, touch-target, brand-token mismatch, broken text overflow)
+   - `suggestion` → taste / slop calls (genericness, fake content, dated patterns, gradient inflation)
+   - `info` → positive notes or low-priority observations ("hero reads — could push letter-spacing tighter")
+5. **Anchor heuristic:**
+   - Default `se` — sits below-right, doesn't occlude the element
+   - `top` for wide hero elements (full-width headlines, banner sections) where `se` would push the note off-canvas
+   - `nw` / `ne` for compact elements (buttons, badges, small cards) where corner-pinning reads cleanest
+   - **Never `top` on the scene root.** Root sits at y=0; `top` anchor offsets to y=-40 and clips above the canvas. For root-level findings (whitespace / balance / global rhythm), use `bottom` (anchored at root.y+root.height, well inside the painted area) or `nw` / `ne` if you want the note pinned at a top corner.
+   - Avoid stacking two annotations on the same anchor — if items 1 and 2 both target the hero, use `ne` for one and `se` for the other
+6. **Always set `author: 'critic'`** — lets the designer filter "show only critic notes" and lets `designer-qa` verify your work end-to-end via `reframe_inspect`.
+
+**Pin explicitly: chat-text rubric is the primary deliverable. Annotations are a supplemental visual layer — they MUST mirror the chat items, not replace them and not exceed them.** If you wrote 2 chat items, emit 2 annotations. Never 3 chat items + 5 annotations.
+
+**Skip annotations when:** scene `Holds up` (no findings to pin), OR the user explicitly says "just text, no pins", OR the scene is a transient preview the designer is about to throw away.
+
 ## Anti-patterns
 
 - **Critique without reading `reframe_inspect`.** Credibility lives in citations. No numbers = opinion-only = lose the designer.

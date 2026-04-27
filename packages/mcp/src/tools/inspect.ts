@@ -500,6 +500,31 @@ export async function handleInspect(input: {
     }
   }
 
+  // ── d3. Annotations ──────────────────────────────────────────
+  // Scene-level side-channel (Week 2 #1). Always emit the section so
+  // consumers see a consistent shape — `0 entries` vs the listing — and
+  // never have to differentiate "scene has no annotations" from "inspect
+  // forgot to surface them". Critic also reads this section to verify
+  // its own pinned items end-to-end (designer-qa Probe B).
+  {
+    const annos = graph.annotations ?? [];
+    sections.push('');
+    sections.push(`--- Annotations (${annos.length}) ---`);
+    if (annos.length === 0) {
+      sections.push('No annotations on this scene.');
+    } else {
+      for (const a of annos) {
+        const author = a.author ? ` by ${a.author}` : '';
+        const severity = a.severity ?? 'info';
+        const resolved = a.resolved ? ' [resolved]' : '';
+        const target = a.targetNodeId;
+        const text = (a.text ?? '').replace(/\s+/g, ' ').trim();
+        const trimmed = text.length > 80 ? text.slice(0, 77) + '...' : text;
+        sections.push(`  ${a.id} [${severity}] @${a.anchor} → ${target}${author}${resolved}: "${trimmed}"`);
+      }
+    }
+  }
+
   // ── e. Diff ──────────────────────────────────────────────────
 
   let structuredDiffJson: string | null = null;

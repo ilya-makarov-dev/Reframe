@@ -11,6 +11,7 @@ process.env.REFRAME_SKIP_HTTP_SIDECAR = '1';
 
 import { handleCompile } from '../tools/compile.js';
 import { handleEdit } from '../tools/edit.js';
+import { handleInspect } from '../tools/inspect.js';
 import { getScene, getSessionId } from '../store.js';
 import { exportToHtml } from '../../../core/src/exporters/html.js';
 import { exportToReact } from '../../../core/src/exporters/react.js';
@@ -55,14 +56,15 @@ async function compileScene(name: string): Promise<{ sessionId: string; nodes: A
     ?? getSessionId(name) ?? '';
   const stored = sessionId ? getScene(sessionId) : (getSessionId(name) ? getScene(getSessionId(name)!) : undefined);
   if (!stored) throw new Error(`compileScene: no session for ${name} (looked up via ${sessionId || 'slug'})`);
+  const scene = stored;
   const nodes: Array<{ id: string; type: string; name: string }> = [];
   function walk(id: string): void {
-    const n = stored.graph.getNode(id);
+    const n = scene.graph.getNode(id);
     if (!n) return;
     nodes.push({ id: n.id, type: n.type, name: n.name });
     for (const c of n.childIds) walk(c);
   }
-  walk(stored.rootId);
+  walk(scene.rootId);
   return { sessionId, nodes };
 }
 
@@ -246,6 +248,34 @@ async function testSvgEmit(): Promise<void> {
   assert(svg.includes('#d0021b'), 'svg: warn color');
 }
 
+// ─── TEST 9b: inspect surfaces annotations section (with entries) ───
+async function testInspectSurfacesAnnotations(): Promise<void> {
+  const { sessionId, nodes } = await compileScene('anno-inspect-with');
+  const target = nodes.find((n) => n.type === 'TEXT')!;
+  await handleEdit({
+    operations: [
+      { op: 'annotate', sceneId: sessionId, targetNodeId: target.id, text: 'inspect probe', anchor: 'ne', severity: 'suggestion', author: 'critic' },
+    ],
+  } as any);
+  const res = await handleInspect({ sceneId: sessionId, audit: false, preview: false } as any);
+  const text = (res as any).content?.[0]?.text ?? '';
+  assert(text.includes('--- Annotations (1) ---'), `inspect with: section header missing — output:\n${text.slice(0, 500)}`);
+  assert(text.includes('inspect probe'), 'inspect with: annotation text emitted');
+  assert(text.includes('[suggestion]'), 'inspect with: severity tag emitted');
+  assert(text.includes('@ne'), 'inspect with: anchor emitted');
+  assert(text.includes('by critic'), 'inspect with: author emitted');
+  assert(/a:[a-z0-9-]+/.test(text), 'inspect with: annotation id pattern present');
+}
+
+// ─── TEST 9c: inspect emits section even with 0 annotations (consistent shape) ───
+async function testInspectEmptyAnnotations(): Promise<void> {
+  const { sessionId } = await compileScene('anno-inspect-empty');
+  const res = await handleInspect({ sceneId: sessionId, audit: false, preview: false } as any);
+  const text = (res as any).content?.[0]?.text ?? '';
+  assert(text.includes('--- Annotations (0) ---'), `inspect empty: header should always emit — output:\n${text.slice(0, 500)}`);
+  assert(text.includes('No annotations on this scene.'), 'inspect empty: empty-state line emitted');
+}
+
 // ─── TEST 10: serialize round-trip preserves annotations ─────
 async function testSerializeRoundTrip(): Promise<void> {
   const { sessionId, nodes } = await compileScene('anno-serialize');
@@ -283,6 +313,8 @@ async function main(): Promise<void> {
     ['HTML export emits annotation overlay', testHtmlEmit],
     ['React export emits annotation JSX', testReactEmit],
     ['SVG export emits annotation group', testSvgEmit],
+    ['inspect surfaces annotations section with entries', testInspectSurfacesAnnotations],
+    ['inspect emits empty annotations section (consistent shape)', testInspectEmptyAnnotations],
     ['serialize / deserialize roundtrip', testSerializeRoundTrip],
   ];
 

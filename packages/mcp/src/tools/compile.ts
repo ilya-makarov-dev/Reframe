@@ -209,6 +209,20 @@ interface CompileInput {
     steps: CompileInput[];
     transitions?: Array<{ from: number; to: number; label?: string; condition?: string }>;
   };
+  /** Phase 0 Sampler kind composition (Week 3 #25). See handleSamplerCompile. */
+  sampler?: {
+    samplerId: string;
+    name?: string;
+    cells: CompileInput[];
+    grid: {
+      columns: number;
+      rows?: number;
+      gap?: number;
+      cellWidth?: number;
+      cellHeight?: number;
+      labels?: string[];
+    };
+  };
 }
 
 // ─── Handler ──────────────────────────────────────────────────
@@ -246,6 +260,7 @@ export async function handleCompile(input: CompileInput) {
     if (input.file !== undefined) conflictingFields.push('file');
     if (input.content !== undefined) conflictingFields.push('content');
     if (input.blueprint !== undefined) conflictingFields.push('blueprint');
+    if (input.sampler !== undefined) conflictingFields.push('sampler');
     // variants already checked above; if both set, variants wins the
     // dispatch — by the time we reach here, input.variants is undefined.
     if (conflictingFields.length > 0) {
@@ -256,6 +271,23 @@ export async function handleCompile(input: CompileInput) {
       );
     }
     return handleFlowCompile(input.flow);
+  }
+
+  // ─── Sampler dispatch (Week 3 #25 Sampler kind) ─────────────
+  if (input.sampler) {
+    const conflictingFields: string[] = [];
+    if (input.html !== undefined) conflictingFields.push('html');
+    if (input.file !== undefined) conflictingFields.push('file');
+    if (input.content !== undefined) conflictingFields.push('content');
+    if (input.blueprint !== undefined) conflictingFields.push('blueprint');
+    if (conflictingFields.length > 0) {
+      return makeToolJsonErrorResult(
+        `sampler-compile cannot be combined with single-scene input fields (${conflictingFields.join(', ')}). Sampler requires its own cells[] array.`,
+        'compile.input_mode_conflict',
+        { conflictingFields },
+      );
+    }
+    return handleSamplerCompile(input.sampler);
   }
 
   const t0 = Date.now();
@@ -1317,6 +1349,218 @@ async function handleFlowCompile(input: {
             stepSceneIds: requestedNames,
             transitions,
             steps: stepResults,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
+// ─── Sampler compile (Week 3 #25) ────────────────────────────
+//
+// Sampler = N×M grid of pre-compiled scene cells around one canonical
+// composition. Use cases: catalog view, specimen showcase, brand × density
+// × radius matrices. Same-brand invariant matches Flow.
+//
+// Cell slugs are NAMESPACED by samplerId — `${samplerId}-cell-${i}` for
+// auto-named cells. Prevents cross-sampler collisions: two samplers
+// auto-naming `cell-0` would otherwise share storage and overwrite each
+// other on re-compile. The `compile.sampler.invalid_id` /
+// `compile.sampler.reserved_id` regex guards prevent samplerIds that
+// would themselves collide with the namespace pattern.
+//
+// Render strategy: skeleton-upfront + upgrade-on-click + LRU demote.
+// See packages/editor/src/canvas-dom/sampler-renderer.ts for the
+// canonical capability boundary doc.
+async function handleSamplerCompile(input: {
+  samplerId: string;
+  name?: string;
+  cells: CompileInput[];
+  grid: {
+    columns: number;
+    rows?: number;
+    gap?: number;
+    cellWidth?: number;
+    cellHeight?: number;
+    labels?: string[];
+  };
+}) {
+  const { samplerId, name, cells, grid } = input;
+
+  if (!samplerId || typeof samplerId !== 'string') {
+    return makeToolJsonErrorResult(
+      'sampler-compile requires a non-empty samplerId',
+      'compile.sampler.missing_id',
+    );
+  }
+
+  // Strict id regex — alphanumeric + dash. Filesystem-safe (Linux/macOS/
+  // Windows), URL-safe, easy to parse. Underscore intentionally excluded
+  // to keep cell-namespace separator (`-cell-`) unambiguous.
+  if (!/^[a-zA-Z0-9-]+$/.test(samplerId)) {
+    return makeToolJsonErrorResult(
+      `sampler-compile: samplerId "${samplerId}" must match /^[a-zA-Z0-9-]+$/`,
+      'compile.sampler.invalid_id',
+      { samplerId },
+    );
+  }
+
+  // Reserved-pattern check — prevents samplerIds that would collide with
+  // the cell namespace once expanded. e.g. samplerId="foo-cell" produces
+  // cell slugs "foo-cell-cell-0" (legal but confusing); samplerId="cell-7"
+  // collides with a hypothetical standalone scene named cell-7.
+  if (samplerId.endsWith('-cell') || /^cell-\d+$/.test(samplerId)) {
+    return makeToolJsonErrorResult(
+      `sampler-compile: samplerId "${samplerId}" is reserved (must not end with "-cell" or match "cell-N" — collides with namespaced cell slugs)`,
+      'compile.sampler.reserved_id',
+      { samplerId },
+    );
+  }
+
+  if (!Array.isArray(cells) || cells.length < 4) {
+    return makeToolJsonErrorResult(
+      'sampler-compile requires at least 4 cells (below this a grid is unnecessary)',
+      'compile.sampler.too_few_cells',
+      { count: cells?.length ?? 0 },
+    );
+  }
+
+  // Grid validation — columns positive, rows × columns covers cells.
+  if (!grid || typeof grid.columns !== 'number' || grid.columns < 1) {
+    return makeToolJsonErrorResult(
+      `sampler-compile: grid.columns must be a positive integer (got ${grid?.columns})`,
+      'compile.sampler.invalid_grid',
+      { grid },
+    );
+  }
+  if (grid.rows !== undefined && grid.rows * grid.columns < cells.length) {
+    return makeToolJsonErrorResult(
+      `sampler-compile: grid.rows × grid.columns (${grid.rows}×${grid.columns} = ${grid.rows * grid.columns}) is smaller than cells.length (${cells.length})`,
+      'compile.sampler.invalid_grid',
+      { grid, cellCount: cells.length },
+    );
+  }
+  if (grid.labels !== undefined && grid.labels.length !== cells.length) {
+    return makeToolJsonErrorResult(
+      `sampler-compile: grid.labels length (${grid.labels.length}) must match cells length (${cells.length})`,
+      'compile.sampler.invalid_grid',
+      { labelCount: grid.labels.length, cellCount: cells.length },
+    );
+  }
+
+  // Same-brand enforcement — mirrors variants/flow.
+  const firstBrand = cells[0].brand;
+  for (let i = 1; i < cells.length; i++) {
+    if (cells[i].brand !== firstBrand) {
+      return makeToolJsonErrorResult(
+        'sampler-compile requires same-brand across all cells (Phase 0 constraint; cross-brand sampler = future signal activation)',
+        'compile.sampler.brand_mismatch',
+        {
+          brands: cells.map((c) => c.brand ?? null),
+          firstBrand: firstBrand ?? null,
+        },
+      );
+    }
+  }
+
+  // Per-cell designMd override guard — mirrors variants/flow.
+  for (let i = 0; i < cells.length; i++) {
+    if (cells[i].designMd !== undefined) {
+      return makeToolJsonErrorResult(
+        `sampler-compile: cell[${i}] carries an explicit designMd. Phase 0 requires all cells to share brand AND designMd. Per-cell designMd override = future signal activation.`,
+        'compile.sampler.custom_designmd_unsupported',
+        { cellIndex: i, name: cells[i].name ?? null },
+      );
+    }
+  }
+
+  // Resolved namespaced cell names. Auto-name = `${samplerId}-cell-${i}`.
+  // Duplicate guard runs on the resolved names so an explicit cell name
+  // colliding with another cell's auto-fill is still caught.
+  const requestedNames = cells.map((c, i) => c.name ?? `${samplerId}-cell-${i}`);
+  const seenNames = new Set<string>();
+  for (const n of requestedNames) {
+    if (seenNames.has(n)) {
+      return makeToolJsonErrorResult(
+        `sampler-compile: duplicate cell name "${n}" — each cell must map to a unique scene slug (pass distinct names or omit all to get auto-assigned ${samplerId}-cell-0/1/2…)`,
+        'compile.sampler.duplicate_name',
+        { names: requestedNames },
+      );
+    }
+    seenNames.add(n);
+  }
+
+  // Shared designMd resolution.
+  let sharedDesignMd: string | undefined;
+  if (firstBrand) {
+    const loaded = await loadBrandDesignMd(firstBrand);
+    if (loaded) sharedDesignMd = loaded;
+  }
+
+  // Per-cell compile via single-scene handleCompile.
+  const cellResults: Array<{
+    index: number;
+    name: string;
+    result: Awaited<ReturnType<typeof handleCompile>>;
+  }> = [];
+
+  for (let i = 0; i < cells.length; i++) {
+    const base = cells[i];
+    const sceneInput: CompileInput = { ...base };
+    if (sharedDesignMd) {
+      if (!sceneInput.designMd) sceneInput.designMd = sharedDesignMd;
+      sceneInput.brand = undefined;
+    }
+    sceneInput.name = requestedNames[i];
+    sceneInput.preview = false;
+
+    const result = await handleCompile(sceneInput);
+    cellResults.push({
+      index: i,
+      name: sceneInput.name,
+      result,
+    });
+  }
+
+  // Write sampler.json to .reframe/samplers/<samplerId>/.
+  const { writeSamplerSpec } = await import('../../../core/src/project/sampler-store.js');
+  const projectDir = getWorkspaceRoot();
+  const now = new Date().toISOString();
+
+  try {
+    writeSamplerSpec(projectDir, {
+      samplerId,
+      name,
+      sharedBrand: firstBrand,
+      cellSceneIds: requestedNames,
+      grid,
+      createdAt: now,
+      updatedAt: now,
+    });
+  } catch (err: any) {
+    return makeToolJsonErrorResult(
+      `sampler-compile: failed to write sampler spec to disk: ${err?.message ?? String(err)}`,
+      'compile.sampler.write_failed',
+      { samplerId, projectDir },
+    );
+  }
+
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(
+          {
+            kind: 'sampler',
+            samplerId,
+            name: name ?? null,
+            sharedBrand: firstBrand ?? null,
+            cellSceneIds: requestedNames,
+            cellCount: cells.length,
+            grid,
+            cells: cellResults,
           },
           null,
           2,

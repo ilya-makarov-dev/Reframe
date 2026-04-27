@@ -65,7 +65,40 @@ export interface SvgExportOptions {
   includeNames?: boolean;
   /** Background color for the SVG (default: none — transparent) */
   background?: string;
+  /**
+   * Render mode. 'full' (default) emits all visual fidelity. 'skeleton' emits
+   * a deterministic silhouette — text→rect with neutral fill, image→striped
+   * rect, fixed 5-level grayscale ramp regardless of brand, no shadows /
+   * gradients / thin borders / opacity. Bbox + structure preserved exactly.
+   *
+   * Skeleton IS the deterministic finished output — animation or transition
+   * between skeleton and full render is the consumer's responsibility (e.g. a
+   * thumbnail loader fading skeleton out as the full SVG arrives), not this
+   * exporter's. Skeleton always emits opacity 1.
+   */
+  mode?: 'full' | 'skeleton';
 }
+
+// ─── Skeleton mode constants ──────────────────────────────────
+//
+// Brand-agnostic 5-level grayscale ramp. Skeleton is a placeholder; brand
+// identity emerges with the full render. Don't try to compute luminance from
+// brand colors — a fixed ramp is more honest and deterministic.
+
+const SKELETON_RAMP = {
+  background: '#fafafa',
+  surface:    '#f0f0f0',
+  border:     '#d4d4d4',
+  textLow:    '#a0a0a0',
+  textHigh:   '#525252',
+} as const;
+
+const SKELETON_IMAGE_PATTERN_ID = 'reframe-skeleton-img';
+const SKELETON_IMAGE_PATTERN =
+  `<pattern id="${SKELETON_IMAGE_PATTERN_ID}" patternUnits="userSpaceOnUse" ` +
+  `width="8" height="8" patternTransform="rotate(45)">` +
+  `<line x1="0" y1="0" x2="0" y2="8" stroke="${SKELETON_RAMP.border}" stroke-width="2"/>` +
+  `</pattern>`;
 
 // ─── Color Helpers ─────────────────────────────────────────────
 
@@ -84,10 +117,48 @@ function colorToRgba(c: Color): string {
 
 let _defCounter = 0;
 let _defs: string[] = [];
+let _skeletonNeedsImagePattern = false;
 
 function resetDefs(): void {
   _defCounter = 0;
   _defs = [];
+  _skeletonNeedsImagePattern = false;
+}
+
+// ─── Skeleton-mode helpers ────────────────────────────────────
+
+function nodeHasImageFill(fills?: Fill[]): boolean {
+  return !!fills?.some((f) => f.type === 'IMAGE' && f.visible !== false);
+}
+
+type SkeletonRole = keyof typeof SKELETON_RAMP | 'image';
+
+function classifySkeletonRole(node: SceneNodeLike, isRoot: boolean): SkeletonRole {
+  if (nodeHasImageFill(node.fills)) return 'image';
+  if (node.type === 'TEXT') {
+    const size = node.fontSize ?? 16;
+    const weight = node.fontWeight ?? 400;
+    if (size >= 20 || weight >= 600) return 'textHigh';
+    return 'textLow';
+  }
+  if (isRoot) return 'background';
+  return 'surface';
+}
+
+function getFillAttrSkeleton(node: SceneNodeLike, isRoot: boolean): { fill: string } {
+  const role = classifySkeletonRole(node, isRoot);
+  if (role === 'image') {
+    _skeletonNeedsImagePattern = true;
+    return { fill: `url(#${SKELETON_IMAGE_PATTERN_ID})` };
+  }
+  return { fill: SKELETON_RAMP[role] };
+}
+
+function getStrokeAttrsSkeleton(strokes?: Stroke[]): Record<string, string> {
+  if (!strokes?.length) return {};
+  const s = strokes.find((x) => x.visible !== false);
+  if (!s || s.weight < 2) return {}; // thin/decorative borders dropped
+  return { stroke: SKELETON_RAMP.border, 'stroke-width': String(s.weight) };
 }
 
 function addDef(def: string): string {
@@ -227,12 +298,15 @@ function renderNode(
   // Group-level attributes
   const groupAttrs: Record<string, string | undefined> = {};
   if (transform) groupAttrs.transform = transform;
-  if (node.opacity !== undefined && node.opacity < 1) groupAttrs.opacity = node.opacity.toFixed(3);
+  // Skeleton always emits opacity 1 — it IS the deterministic finished output.
+  if (opts.mode !== 'skeleton' && node.opacity !== undefined && node.opacity < 1) {
+    groupAttrs.opacity = node.opacity.toFixed(3);
+  }
   if (opts.includeNames && node.name) groupAttrs['data-name'] = escapeXml(node.name);
 
-  // Effects
+  // Effects — dropped entirely in skeleton mode (silhouette, not styled placeholder).
   const filterIds: string[] = [];
-  if (node.effects?.length) {
+  if (opts.mode !== 'skeleton' && node.effects?.length) {
     const shadowFilter = buildDropShadowFilter(node.effects);
     if (shadowFilter) filterIds.push(shadowFilter);
     const blurFilter = buildBlurFilter(node.effects);
@@ -257,6 +331,19 @@ function renderNode(
 
   switch (type) {
     case 'TEXT': {
+      // Skeleton: text → <rect> with same bbox + classified grayscale fill.
+      // No glyphs, no font, no <text> element. Preserves layout silhouette.
+      if (opts.mode === 'skeleton') {
+        const { fill } = getFillAttrSkeleton(node, false);
+        const rectAttrs: Record<string, string | undefined> = {
+          ...groupAttrs,
+          width: String(nw),
+          height: String(nh),
+          fill,
+        };
+        lines.push(`${indent}<rect ${attrs(rectAttrs)}/>`);
+        break;
+      }
       const { fill, fillOpacity } = getFillAttr(node.fills);
       const textAttrs: Record<string, string | undefined> = {
         ...groupAttrs,
@@ -303,6 +390,19 @@ function renderNode(
     }
 
     case 'ELLIPSE': {
+      if (opts.mode === 'skeleton') {
+        const { fill } = getFillAttrSkeleton(node, false);
+        const cx = nw / 2; const cy = nh / 2;
+        const ellipseAttrs: Record<string, string | undefined> = {
+          ...groupAttrs,
+          cx: String(cx), cy: String(cy),
+          rx: String(cx), ry: String(cy),
+          fill,
+          ...getStrokeAttrsSkeleton(node.strokes),
+        };
+        lines.push(`${indent}<ellipse ${attrs(ellipseAttrs)}/>`);
+        break;
+      }
       const { fill, fillOpacity } = getFillAttr(node.fills);
       const cx = nw / 2;
       const cy = nh / 2;
@@ -342,12 +442,27 @@ function renderNode(
         lines.push(`${indent}<g ${attrs(groupAttrs)}>`);
 
         // Background rect for frames/rectangles with fills
-        if (node.fills?.length && node.fills.some(f => f.visible !== false)) {
-          const { fill, fillOpacity } = getFillAttr(node.fills);
-          const strokeAttrs = getStrokeAttrs(node.strokes, node.dashPattern);
+        const skel = opts.mode === 'skeleton';
+        const hasNodeFill = node.fills?.length && node.fills.some(f => f.visible !== false);
+        const skelHasImage = skel && nodeHasImageFill(node.fills);
+        // Skeleton: emit a background rect when EITHER the node has a real
+        // fill (so the silhouette stands out from its parent) OR it carries
+        // an image fill (always rendered as patterned rect).
+        if (hasNodeFill || skelHasImage) {
+          const { fill, fillOpacity } = skel
+            ? { fill: getFillAttrSkeleton(node, false).fill, fillOpacity: undefined as string | undefined }
+            : getFillAttr(node.fills);
+          const strokeAttrs = skel
+            ? getStrokeAttrsSkeleton(node.strokes)
+            : getStrokeAttrs(node.strokes, node.dashPattern);
           if (node.independentCorners && hasDistinctCorners(node)) {
             const d = roundedRectPath(nw, nh, node.topLeftRadius || 0, node.topRightRadius || 0, node.bottomRightRadius || 0, node.bottomLeftRadius || 0);
-            lines.push(`${indent}${opts.indent}<path d="${d}" fill="${fill}" fill-opacity="${fillOpacity}" ${attrs(strokeAttrs)}/>`);
+            const pathAttrs: Record<string, string | undefined> = {
+              d, fill,
+              'fill-opacity': fillOpacity,
+              ...strokeAttrs,
+            };
+            lines.push(`${indent}${opts.indent}<path ${attrs(pathAttrs)}/>`);
           } else {
             const rx = node.cornerRadius || 0;
             const rectAttrs: Record<string, string | undefined> = {
@@ -380,8 +495,13 @@ function renderNode(
         lines.push(`${indent}</g>`);
       } else {
         // Leaf rectangle
-        const { fill, fillOpacity } = getFillAttr(node.fills);
-        const strokeAttrs = getStrokeAttrs(node.strokes, node.dashPattern);
+        const skel = opts.mode === 'skeleton';
+        const { fill, fillOpacity } = skel
+          ? { fill: getFillAttrSkeleton(node, false).fill, fillOpacity: undefined as string | undefined }
+          : getFillAttr(node.fills);
+        const strokeAttrs = skel
+          ? getStrokeAttrsSkeleton(node.strokes)
+          : getStrokeAttrs(node.strokes, node.dashPattern);
         if (node.independentCorners && hasDistinctCorners(node)) {
           const d = roundedRectPath(nw, nh, node.topLeftRadius || 0, node.topRightRadius || 0, node.bottomRightRadius || 0, node.bottomLeftRadius || 0);
           const pathAttrs: Record<string, string | undefined> = {
@@ -436,6 +556,7 @@ export function exportToSvg(
     indent: options?.indent ?? '  ',
     includeNames: options?.includeNames ?? false,
     background: options?.background ?? '',
+    mode: options?.mode ?? 'full',
   };
 
   const root = 'root' in scene ? scene.root : scene;
@@ -452,7 +573,10 @@ export function exportToSvg(
   }
 
   // Background fill of the root frame
-  if (root.fills?.length && root.fills.some(f => f.visible !== false)) {
+  if (opts.mode === 'skeleton') {
+    // Skeleton always paints background ramp regardless of brand fill.
+    bodyParts.push(`${opts.indent}<rect width="${root.width}" height="${root.height}" fill="${SKELETON_RAMP.background}"/>`);
+  } else if (root.fills?.length && root.fills.some(f => f.visible !== false)) {
     const { fill, fillOpacity } = getFillAttr(root.fills);
     bodyParts.push(`${opts.indent}<rect width="${root.width}" height="${root.height}" fill="${fill}"${fillOpacity ? ` fill-opacity="${fillOpacity}"` : ''}/>`);
   }
@@ -474,10 +598,14 @@ export function exportToSvg(
 
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${root.width}" height="${root.height}" viewBox="0 0 ${root.width} ${root.height}">`);
 
-  // Defs
-  if (_defs.length) {
+  // Skeleton: prepend the fixed image-pattern def when any node used it.
+  // Fixed id (not from counter) keeps determinism across runs.
+  const allDefs = opts.mode === 'skeleton' && _skeletonNeedsImagePattern
+    ? [SKELETON_IMAGE_PATTERN, ..._defs]
+    : _defs;
+  if (allDefs.length) {
     parts.push(`${opts.indent}<defs>`);
-    for (const def of _defs) {
+    for (const def of allDefs) {
       parts.push(`${opts.indent}${opts.indent}${def}`);
     }
     parts.push(`${opts.indent}</defs>`);
@@ -503,6 +631,10 @@ export function exportSceneGraphToSvg(
 
   const tree = graphNodeToTree(graph, rootId);
   const baseSvg = exportToSvg(tree, options);
+
+  // Skeleton mode is a deterministic silhouette — annotations are debug
+  // overlays, not structure, so they're omitted.
+  if (options?.mode === 'skeleton') return baseSvg;
 
   // Annotations: inject as a <g class="reframe-annotations"> block just
   // before </svg>. Each annotation renders as a <g> with a text and a

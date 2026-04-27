@@ -749,14 +749,42 @@ export function startHttpSidecar(port = 4100): void {
           const projectDir = getWorkspaceRoot();
           const loaded = coreProjectIo().loadSceneFromProject(projectDir, sceneId);
           if (loaded?.graph && loaded?.rootId) {
-            storeScene(loaded.graph, loaded.rootId, loaded.timeline, {
+            // storeScene's uniqueSlug treats manifest entries as collisions
+            // when the in-memory slugIndex is empty (cold sidecar start),
+            // appending `-1`, `-2` suffixes. Look up by the returned
+            // sessionId (`s1`, `s2`, …) which is always exact, so we get
+            // the scene regardless of slug renaming.
+            const sessionId = storeScene(loaded.graph, loaded.rootId, loaded.timeline, {
               slug: sceneId,
               name: loaded.entry?.name ?? sceneId,
             });
-            stored = getScene(sceneId);
+            stored = getScene(sessionId) ?? getScene(sceneId);
           }
-        } catch (err) {
-          console.warn(`[preview] disk fallback failed for "${sceneId}"`, err);
+        } catch {
+          // Manifest didn't list the scene. Try the file directly — a
+          // composition compile run in a separate process can leave the
+          // scene FILE on disk even if the manifest update was racy. The
+          // Sampler / Flow paths are particularly susceptible because they
+          // batch-write N cell files. Reading the file directly bypasses
+          // the manifest read entirely; if it deserializes cleanly, hand
+          // it to storeScene which adds the entry on its own.
+          try {
+            const fs2 = await import('node:fs');
+            const path2 = await import('node:path');
+            const projectDir = getWorkspaceRoot();
+            const directPath = path2.join(projectDir, '.reframe', 'scenes', `${sceneId}.scene.json`);
+            if (fs2.existsSync(directPath)) {
+              const { deserializeScene } = await import('../../core/src/serialize.js');
+              const raw = JSON.parse(fs2.readFileSync(directPath, 'utf-8'));
+              const { graph, rootId } = deserializeScene(raw);
+              if (graph && rootId) {
+                storeScene(graph, rootId, undefined, { slug: sceneId, name: raw.root?.name ?? sceneId });
+                stored = getScene(sceneId);
+              }
+            }
+          } catch (err2) {
+            console.warn(`[preview] disk fallback (direct file) failed for "${sceneId}"`, err2);
+          }
         }
       }
       if (!stored) {

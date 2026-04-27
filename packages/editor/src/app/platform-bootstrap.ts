@@ -20,10 +20,12 @@ import { createDOMCanvas } from '../canvas-dom/index.js';
 import { installLegacyGlobalShim, getFocusedCanvas } from '../canvas-dom/registry.js';
 import { mountCompositionRenderer, type CompositionRendererHandle } from '../canvas-dom/composition-renderer.js';
 import { mountFlowRenderer, type FlowRendererHandle } from '../canvas-dom/flow-renderer.js';
+import { mountSamplerRenderer, type SamplerRendererHandle } from '../canvas-dom/sampler-renderer.js';
 
 let domCanvas: ReturnType<typeof createDOMCanvas> | null = null;
 let compositionHandle: CompositionRendererHandle | null = null;
 let flowHandle: FlowRendererHandle | null = null;
+let samplerHandle: SamplerRendererHandle | null = null;
 
 /**
  * Mount the DOM canvas. Entry point called by `/platform/viewport.js`
@@ -158,6 +160,68 @@ export async function initPlatformViewport(): Promise<void> {
       console.warn(`[platform-bootstrap] flow "${flowParam}" not found or malformed — falling through to single-scene mode`);
     } catch (err) {
       console.warn('[platform-bootstrap] flow fetch failed — falling through', err);
+    }
+  }
+
+  // Sampler URL: ?sampler=<samplerId> — mount a sampler composition by
+  // fetching its spec + cell envelopes from the server, then rendering
+  // each cell as an SVG skeleton (upgrade-on-click via SamplerRenderer).
+  // Sampler wins over variants when both present, falls through to
+  // single-scene if spec not found or empty.
+  const samplerParam = urlParams.get('sampler');
+  if (samplerParam) {
+    try {
+      const [specResp, cellsResp] = await Promise.all([
+        fetch(`/platform/api/sampler/${encodeURIComponent(samplerParam)}`),
+        fetch(`/platform/api/sampler/${encodeURIComponent(samplerParam)}/cells`),
+      ]);
+      if (specResp.ok && cellsResp.ok) {
+        const { spec } = await specResp.json() as { spec: {
+          samplerId: string;
+          cellSceneIds: string[];
+          grid: { columns: number; rows?: number; gap?: number; cellWidth?: number; cellHeight?: number; labels?: string[] };
+        } };
+        const { cells } = await cellsResp.json() as { cells: Array<{
+          index: number;
+          slug: string;
+          envelope: any;
+          skeletonSvg: string | null;
+        }> };
+        if (spec?.cellSceneIds?.length >= 4 && cells?.length === spec.cellSceneIds.length) {
+          // Skeleton SVG was rendered server-side — see sampler-api.ts
+          // for the rationale. Client just paints what arrives. Empty /
+          // failed cell falls back to a neutral placeholder rect.
+          const cellDescriptors = cells.map((c) => ({
+            sceneId: c.slug,
+            label: spec.grid.labels?.[c.index],
+            skeletonSvg:
+              c.skeletonSvg ??
+              '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#f0f0f0"/><text x="50" y="55" text-anchor="middle" font-size="10" fill="#a0a0a0">missing</text></svg>',
+          }));
+          samplerHandle = mountSamplerRenderer({
+            host: container,
+            samplerId: spec.samplerId,
+            cells: cellDescriptors,
+            grid: spec.grid,
+            onCanvasSelect: (sceneId, ids) => {
+              const focused = getFocusedCanvas();
+              const selfCanvas = samplerHandle?.canvases.get(`${spec.samplerId}-cell-${spec.cellSceneIds.indexOf(sceneId)}`);
+              if (focused === selfCanvas) dispatchCanvasSelect(ids);
+            },
+          });
+          window.addEventListener('reframe:layer-select', ((evt: CustomEvent) => {
+            const nodeId = evt.detail?.nodeId;
+            if (!nodeId) return;
+            const target = getFocusedCanvas();
+            if (target) target.select(nodeId);
+          }) as EventListener);
+          installCompositionFocusSubscriber();
+          return;
+        }
+      }
+      console.warn(`[platform-bootstrap] sampler "${samplerParam}" not found or malformed — falling through to single-scene mode`);
+    } catch (err) {
+      console.warn('[platform-bootstrap] sampler fetch failed — falling through', err);
     }
   }
 

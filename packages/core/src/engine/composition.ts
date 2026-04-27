@@ -16,9 +16,43 @@ import type { SceneGraph } from './scene-graph';
 export type SceneComposition =
   | { kind: 'single'; scene: SceneGraph }
   | { kind: 'variants'; scenes: SceneGraph[]; labels?: string[] }
-  | { kind: 'flow'; flowId: string; steps: SceneGraph[]; transitions: FlowTransition[]; state: FlowState };
+  | { kind: 'flow'; flowId: string; steps: SceneGraph[]; transitions: FlowTransition[]; state: FlowState }
+  | { kind: 'sampler'; samplerId: string; name?: string; cells: SceneGraph[]; grid: SamplerGrid };
 
 export type CompositionKind = SceneComposition['kind'];
+
+// ── Sampler kind support types ───────────────────────────────
+//
+// Sampler = N×M grid of pre-compiled scene cells around one canonical
+// composition (catalog view, specimen showcase). Use case: 20 versions of
+// the same hero with brand × density × radius variations side-by-side.
+//
+// Cells are SceneGraph references — the sampler is a view, not an owner.
+// Cell scenes live under .reframe/scenes/ like any other project scene
+// and can be edited independently. The sampler.json on disk only carries
+// cellSceneIds (slugs) + grid spec.
+//
+// Render strategy (see SamplerRenderer): skeleton-upfront +
+// upgrade-on-click + LRU demote at MAX_ACTIVE_IFRAMES. Reuses the SVG
+// skeleton exporter from #11 — each cell is a tiny <svg> until the user
+// clicks to engage. See `packages/editor/src/canvas-dom/sampler-renderer.ts`
+// for the canonical capability boundary doc (also referenced by T1 #6
+// thumbnail and T2 #5 overlay).
+
+export interface SamplerGrid {
+  /** Number of columns. */
+  columns: number;
+  /** Number of rows. Auto = ceil(cells.length / columns) when omitted. */
+  rows?: number;
+  /** Pixels between cells. Default 16. */
+  gap?: number;
+  /** Fixed cell width. Default = (viewport - gaps) / columns. */
+  cellWidth?: number;
+  /** Fixed cell height. Default = max(cells.bbox.h). */
+  cellHeight?: number;
+  /** Per-cell captions; length must equal cells.length when set. */
+  labels?: string[];
+}
 
 // ── Flow kind support types ──────────────────────────────────
 //
@@ -96,11 +130,30 @@ export function flowComposition(
   return { kind: 'flow', flowId, steps, transitions, state };
 }
 
+export function samplerComposition(
+  samplerId: string,
+  cells: SceneGraph[],
+  grid: SamplerGrid,
+  name?: string,
+): SceneComposition {
+  if (cells.length < 4) {
+    throw new Error('samplerComposition requires at least 4 cells (below this a grid is unnecessary)');
+  }
+  if (grid.columns < 1) {
+    throw new Error('samplerComposition grid.columns must be >= 1');
+  }
+  if (grid.labels && grid.labels.length !== cells.length) {
+    throw new Error('samplerComposition grid.labels length must match cells length');
+  }
+  return { kind: 'sampler', samplerId, name, cells, grid };
+}
+
 export function sceneCount(c: SceneComposition): number {
   switch (c.kind) {
     case 'single': return 1;
     case 'variants': return c.scenes.length;
     case 'flow': return c.steps.length;
+    case 'sampler': return c.cells.length;
   }
 }
 
@@ -109,5 +162,6 @@ export function scenesOf(c: SceneComposition): SceneGraph[] {
     case 'single': return [c.scene];
     case 'variants': return c.scenes;
     case 'flow': return c.steps;
+    case 'sampler': return c.cells;
   }
 }

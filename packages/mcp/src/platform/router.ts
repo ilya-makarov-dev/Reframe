@@ -323,6 +323,13 @@ export default async function(o){
       const { handleFlowApi } = await import('./api/flow-api.js');
       return handleFlowApi(req, res, ctx);
     }
+    // Sampler spec + cell endpoints (Week 3 #25 Sampler kind):
+    //   GET /platform/api/sampler/:id              → sampler.json spec
+    //   GET /platform/api/sampler/:id/cells        → cell scene envelopes
+    if (pathname.startsWith('/platform/api/sampler/')) {
+      const { handleSamplerApi } = await import('./api/sampler-api.js');
+      return handleSamplerApi(req, res, ctx);
+    }
     // Resize / viewport adapt endpoint — spawns a tablet/phone variant
     // via core's adaptFromGraph without routing through the chat agent.
     if (pathname.startsWith('/platform/api/resize/')) {
