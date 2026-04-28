@@ -348,6 +348,13 @@ export default async function(o){
       const { handleSamplerApi } = await import('./api/sampler-api.js');
       return handleSamplerApi(req, res, ctx);
     }
+    // Overlay spec + base-scene endpoints (T2 #5 Overlay kind):
+    //   GET /platform/api/overlay/:id        → overlay.json spec
+    //   GET /platform/api/overlay/:id/base   → base scene envelope
+    if (pathname.startsWith('/platform/api/overlay/')) {
+      const { handleOverlayApi } = await import('./api/overlay-api.js');
+      return handleOverlayApi(req, res, ctx);
+    }
     // Brand mark serving (Week 5 #21):
     //   GET /platform/api/brand/:slug/mark/:variant  → SVG file bytes
     if (pathname.startsWith('/platform/api/brand/') && pathname.includes('/mark/')) {

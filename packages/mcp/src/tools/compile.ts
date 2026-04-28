@@ -223,6 +223,25 @@ interface CompileInput {
       labels?: string[];
     };
   };
+  /** T2 #5 Overlay kind composition. See handleOverlayCompile. */
+  overlay?: {
+    overlayId: string;
+    name: string;
+    /** Single base scene compiled via the standard single-scene path. */
+    base: CompileInput;
+    /**
+     * 1..3 layers stacked over the base. Each layer.id is optional;
+     * compile fills with `layer-${i}` when omitted. Layer.config schema
+     * is layer-type-specific — validated by overlay-layers registry.
+     */
+    layers: Array<{
+      id?: string;
+      type: string;
+      config?: Record<string, unknown>;
+      zIndex?: number;
+      blendMode?: 'source-over' | 'lighter' | 'screen' | 'multiply';
+    }>;
+  };
 }
 
 // ─── Handler ──────────────────────────────────────────────────
@@ -288,6 +307,23 @@ export async function handleCompile(input: CompileInput) {
       );
     }
     return handleSamplerCompile(input.sampler);
+  }
+
+  // ─── Overlay dispatch (T2 #5 Overlay kind) ──────────────────
+  if (input.overlay) {
+    const conflictingFields: string[] = [];
+    if (input.html !== undefined) conflictingFields.push('html');
+    if (input.file !== undefined) conflictingFields.push('file');
+    if (input.content !== undefined) conflictingFields.push('content');
+    if (input.blueprint !== undefined) conflictingFields.push('blueprint');
+    if (conflictingFields.length > 0) {
+      return makeToolJsonErrorResult(
+        `overlay-compile cannot be combined with single-scene input fields (${conflictingFields.join(', ')}). Overlay carries its own base scene under overlay.base.`,
+        'compile.input_mode_conflict',
+        { conflictingFields },
+      );
+    }
+    return handleOverlayCompile(input.overlay);
   }
 
   const t0 = Date.now();
@@ -1599,6 +1635,213 @@ async function handleSamplerCompile(input: {
             cellCount: cells.length,
             grid,
             cells: cellResults,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
+// ─── Overlay handler (T2 #5) ─────────────────────────────────
+//
+// Overlay = base scene + 1..3 peer-element <canvas> layers stacked
+// over it. Compile validates layer types/configs via the overlay-layers
+// registry, compiles the base scene through the standard single-scene
+// path, then writes overlay.json under .reframe/overlays/<id>/.
+//
+// Layer config validation runs BEFORE base scene compile — fail-fast
+// on bad input avoids leaving an orphan base scene on disk when the
+// layers are wrong. Same fail-ordering as samplerId regex check
+// preceding cell compiles.
+//
+// Phase 0 caps:
+//   - 1..3 layers (engine-level OVERLAY_MAX_LAYERS)
+//   - layer.type ∈ {noise-grain, gradient-pulse, particle-dust}
+//   - layer.id unique within layers[] (auto-fills `layer-<i>` if omitted)
+//   - overlayId regex /^[a-zA-Z0-9-]+$/ — filesystem + URL safe
+
+async function handleOverlayCompile(input: {
+  overlayId: string;
+  name: string;
+  base: CompileInput;
+  layers: Array<{
+    id?: string;
+    type: string;
+    config?: Record<string, unknown>;
+    zIndex?: number;
+    blendMode?: 'source-over' | 'lighter' | 'screen' | 'multiply';
+  }>;
+}): Promise<any> {
+  const { overlayId, name, base, layers } = input;
+
+  if (!overlayId || typeof overlayId !== 'string') {
+    return makeToolJsonErrorResult(
+      'overlay-compile requires a non-empty overlayId',
+      'compile.overlay.missing_id',
+    );
+  }
+  if (!/^[a-zA-Z0-9-]+$/.test(overlayId)) {
+    return makeToolJsonErrorResult(
+      `overlay-compile: overlayId "${overlayId}" must match /^[a-zA-Z0-9-]+$/`,
+      'compile.overlay.invalid_id',
+      { overlayId },
+    );
+  }
+  if (!name || typeof name !== 'string') {
+    return makeToolJsonErrorResult(
+      'overlay-compile requires a non-empty name',
+      'compile.overlay.missing_name',
+    );
+  }
+  if (!base || typeof base !== 'object') {
+    return makeToolJsonErrorResult(
+      'overlay-compile requires a base scene under overlay.base',
+      'compile.overlay.missing_base',
+    );
+  }
+  if (!Array.isArray(layers) || layers.length < 1) {
+    return makeToolJsonErrorResult(
+      'overlay-compile requires at least 1 layer',
+      'compile.overlay.no_layers',
+      { count: layers?.length ?? 0 },
+    );
+  }
+
+  // Phase 0 cap from engine constant — keeping the source of truth in
+  // composition.ts so future raises only need one edit.
+  const { OVERLAY_MAX_LAYERS } = await import('../../../core/src/engine/composition.js');
+  if (layers.length > OVERLAY_MAX_LAYERS) {
+    return makeToolJsonErrorResult(
+      `overlay-compile: layers.length (${layers.length}) exceeds Phase 0 cap of ${OVERLAY_MAX_LAYERS}`,
+      'compile.overlay.too_many_layers',
+      { count: layers.length, cap: OVERLAY_MAX_LAYERS },
+    );
+  }
+
+  // Layer-type + per-config validation via the registry. Errors carry the
+  // failing param name in the envelope so the caller can correct the
+  // exact field instead of guessing.
+  const { LAYER_REGISTRY, isKnownLayerType } = await import(
+    '../../../core/src/engine/overlay-layers/index.js'
+  );
+
+  // Resolve layer ids first (fill `layer-<i>` for omitted), then guard
+  // duplicates. Mirrors sampler cell-name resolution.
+  const resolvedIds = layers.map((l, i) => l.id ?? `layer-${i}`);
+  const seenIds = new Set<string>();
+  for (let i = 0; i < resolvedIds.length; i++) {
+    const id = resolvedIds[i];
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+      return makeToolJsonErrorResult(
+        `overlay-compile: layer[${i}].id "${id}" must match /^[a-zA-Z0-9_-]+$/`,
+        'compile.overlay.invalid_layer_id',
+        { layerIndex: i, id },
+      );
+    }
+    if (seenIds.has(id)) {
+      return makeToolJsonErrorResult(
+        `overlay-compile: duplicate layer id "${id}" (each layer must have a unique id; auto-fill is layer-${i})`,
+        'compile.overlay.duplicate_layer_id',
+        { id, layerIndex: i },
+      );
+    }
+    seenIds.add(id);
+  }
+
+  const resolvedLayers: Array<{
+    id: string;
+    type: string;
+    config: Record<string, unknown>;
+    zIndex?: number;
+    blendMode?: 'source-over' | 'lighter' | 'screen' | 'multiply';
+  }> = [];
+
+  for (let i = 0; i < layers.length; i++) {
+    const layer = layers[i];
+    if (!isKnownLayerType(layer.type)) {
+      return makeToolJsonErrorResult(
+        `overlay-compile: layer[${i}].type "${layer.type}" is not a known layer type. Known: ${Object.keys(LAYER_REGISTRY).join(', ')}`,
+        'compile.overlay.unknown_layer_type',
+        { layerIndex: i, type: layer.type, knownTypes: Object.keys(LAYER_REGISTRY) },
+      );
+    }
+    const impl = LAYER_REGISTRY[layer.type];
+    const validation = impl.validate((layer.config ?? {}) as Record<string, any>);
+    if (!validation.ok) {
+      return makeToolJsonErrorResult(
+        `overlay-compile: layer[${i}] (${layer.type}) invalid config — param "${validation.param}": ${validation.message}`,
+        'compile.overlay.invalid_layer_config',
+        { layerIndex: i, type: layer.type, param: validation.param, message: validation.message },
+      );
+    }
+    if (layer.blendMode !== undefined) {
+      const allowed = ['source-over', 'lighter', 'screen', 'multiply'];
+      if (!allowed.includes(layer.blendMode)) {
+        return makeToolJsonErrorResult(
+          `overlay-compile: layer[${i}].blendMode "${layer.blendMode}" must be one of ${allowed.join(', ')}`,
+          'compile.overlay.invalid_layer_config',
+          { layerIndex: i, param: 'blendMode', message: `must be one of ${allowed.join(', ')}` },
+        );
+      }
+    }
+    resolvedLayers.push({
+      id: resolvedIds[i],
+      type: layer.type,
+      config: validation.resolved as Record<string, unknown>,
+      zIndex: layer.zIndex,
+      blendMode: layer.blendMode,
+    });
+  }
+
+  // Compile the base scene via the standard single-scene path. Reserve a
+  // namespaced slug so the overlay's base doesn't collide with a stand-
+  // alone scene of the same name. Convention mirrors sampler cells:
+  // `${overlayId}-base`.
+  const baseSceneInput: CompileInput = { ...base };
+  baseSceneInput.name = base.name ?? `${overlayId}-base`;
+  baseSceneInput.preview = false;
+
+  const baseResult: any = await handleCompile(baseSceneInput);
+
+  // Write overlay.json to .reframe/overlays/<overlayId>/.
+  const { writeOverlaySpec } = await import(
+    '../../../core/src/project/overlay-store.js'
+  );
+  const projectDir = getWorkspaceRoot();
+  const now = new Date().toISOString();
+
+  try {
+    writeOverlaySpec(projectDir, {
+      overlayId,
+      name,
+      baseSceneId: baseSceneInput.name,
+      layers: resolvedLayers as any,  // Resolved shape matches OverlayLayer modulo unknown→JsonValue cast
+      createdAt: now,
+      updatedAt: now,
+    });
+  } catch (err: any) {
+    return makeToolJsonErrorResult(
+      `overlay-compile: failed to write overlay spec to disk: ${err?.message ?? String(err)}`,
+      'compile.overlay.write_failed',
+      { overlayId, projectDir },
+    );
+  }
+
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(
+          {
+            kind: 'overlay',
+            overlayId,
+            name,
+            baseSceneId: baseSceneInput.name,
+            layerCount: resolvedLayers.length,
+            layers: resolvedLayers,
+            base: baseResult,
           },
           null,
           2,

@@ -1493,3 +1493,159 @@ function indent(s: string, spaces: number): string {
   const pad = ' '.repeat(spaces);
   return s.split('\n').map(l => pad + l).join('\n');
 }
+
+// ─── Overlay export (T2 #5) ──────────────────────────────────
+//
+// Standalone HTML emission for the 'overlay' composition kind.
+// Output shape:
+//
+//   <!DOCTYPE html>...
+//   <head>
+//     ...base scene's <head>...
+//     <style>html, body { margin:0 } .rfd-overlay-root { position: relative }</style>
+//   </head>
+//   <body>
+//     <div class="rfd-overlay-root" style="width:Wpx;height:Hpx">
+//       <div class="rfd-overlay-base">...base scene body content...</div>
+//       <canvas data-layer-id="layer-0" style="...absolute, pointer-events:none"></canvas>
+//       ...
+//       <script>
+//         /* ALL_LAYERS_BROWSER_SOURCE inlined here */
+//         (function () {
+//           var layerSpecs = [...];
+//           var canvases = layerSpecs.map(spec => document.querySelector('[data-layer-id="' + spec.id + '"]'));
+//           var instances = layerSpecs.map((spec, i) => factories[spec.type](canvases[i], spec.config, baseSize, spec.id));
+//           function tick(t) { instances.forEach((inst, i) => inst.render(canvases[i].getContext('2d'), t)); requestAnimationFrame(tick); }
+//           requestAnimationFrame(function() {
+//             instances.forEach((inst, i) => inst.render(canvases[i].getContext('2d'), 0));
+//             requestAnimationFrame(tick);
+//           });
+//         })();
+//       </script>
+//     </body>
+//   </html>
+//
+// Bundle size: 3 layer impls + utils ≈ 5 KB. Acceptable for Phase 0 —
+// inline JS keeps the file truly portable (no fetch dependency, runs
+// from `file://`). Future opt: lazy-load layer impls on demand if a
+// 5 KB hit becomes meaningful, but that's not Phase 0.
+
+export interface OverlayExportLayer {
+  id: string;
+  type: string;
+  config: Record<string, unknown>;
+  zIndex?: number;
+  blendMode?: string;
+}
+
+export interface OverlayHtmlExportOptions {
+  /** Width override in CSS px. Default = base graph root width. */
+  width?: number;
+  /** Height override in CSS px. Default = base graph root height. */
+  height?: number;
+}
+
+export function exportOverlayToHtml(
+  baseGraph: SceneGraph,
+  baseRootId: string,
+  layers: OverlayExportLayer[],
+  layerRuntimeSource: string,
+  options: OverlayHtmlExportOptions = {},
+): string {
+  const root = baseGraph.getNode(baseRootId);
+  if (!root) throw new Error(`exportOverlayToHtml: base root ${baseRootId} not found`);
+
+  // Inline base as fullDoc so we get the <head> with fonts. We'll then
+  // inject our overlay <div> + layer canvases into the body, and append
+  // the runtime <script>.
+  const baseHtml = exportToHtml(baseGraph, baseRootId, { fullDocument: true });
+
+  const width = options.width ?? (root as any).width ?? 1440;
+  const height = options.height ?? (root as any).height ?? 900;
+
+  // Sort layers by zIndex (default = array index) for stable z-stack.
+  const sortedLayers = layers
+    .map((l, i) => ({ l, i, z: l.zIndex ?? i }))
+    .sort((a, b) => (a.z - b.z) || (a.i - b.i))
+    .map(({ l }) => l);
+
+  const layerCanvasesHtml = sortedLayers.map((l, i) => {
+    const z = (l.zIndex ?? i) + 1;
+    const blend = l.blendMode ? `mix-blend-mode:${escapeHtml(l.blendMode)};` : '';
+    return `<canvas data-layer-id="${escapeHtml(l.id)}" data-layer-type="${escapeHtml(l.type)}" width="${width}" height="${height}" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:${z};${blend}"></canvas>`;
+  }).join('\n');
+
+  const layerSpecsLiteral = JSON.stringify(sortedLayers.map(l => ({
+    id: l.id,
+    type: l.type,
+    config: l.config,
+  })));
+
+  const runtimeIIFE = `
+<script>
+${layerRuntimeSource}
+(function() {
+  var layerSpecs = ${layerSpecsLiteral};
+  var factories = {};
+  ${sortedLayers.map(l => {
+    const fname = 'factory_' + l.type.replace(/-/g, '_');
+    return `factories[${JSON.stringify(l.type)}] = (typeof ${fname} === 'function') ? ${fname} : null;`;
+  }).join('\n  ')}
+  var baseSize = { width: ${width}, height: ${height} };
+  var canvases = layerSpecs.map(function(s) { return document.querySelector('canvas[data-layer-id="' + s.id + '"]'); });
+  var instances = [];
+  for (var i = 0; i < layerSpecs.length; i++) {
+    var f = factories[layerSpecs[i].type];
+    if (f && canvases[i]) {
+      try { instances.push(f(canvases[i], layerSpecs[i].config, baseSize, layerSpecs[i].id)); }
+      catch (e) { console.warn('[overlay] factory threw for ' + layerSpecs[i].type, e); instances.push(null); }
+    } else {
+      instances.push(null);
+    }
+  }
+  function tick(t) {
+    for (var i = 0; i < instances.length; i++) {
+      var inst = instances[i];
+      var canvas = canvases[i];
+      if (!inst || !canvas) continue;
+      try { inst.render(canvas.getContext('2d'), t); }
+      catch (e) { console.warn('[overlay] render threw', e); }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(function(t) {
+    // First-frame render at t=0 explicitly for determinism.
+    for (var i = 0; i < instances.length; i++) {
+      var inst = instances[i];
+      var canvas = canvases[i];
+      if (!inst || !canvas) continue;
+      try { inst.render(canvas.getContext('2d'), 0); }
+      catch (e) { console.warn('[overlay] initial render threw', e); }
+    }
+    requestAnimationFrame(tick);
+  });
+})();
+</script>`;
+
+  // Wrap base body content inside .rfd-overlay-base then add layers.
+  // Strategy: split baseHtml at </body> close tag; insert our wrapper-
+  // close + canvases + script before it.
+  const closeBodyIdx = baseHtml.lastIndexOf('</body>');
+  if (closeBodyIdx === -1) {
+    throw new Error('exportOverlayToHtml: base HTML missing </body> close — non-fullDocument export?');
+  }
+  const openBodyMatch = baseHtml.match(/<body[^>]*>/);
+  if (!openBodyMatch) {
+    throw new Error('exportOverlayToHtml: base HTML missing <body> open tag');
+  }
+  const openBodyIdx = openBodyMatch.index! + openBodyMatch[0].length;
+
+  const beforeBody = baseHtml.slice(0, openBodyIdx);
+  const bodyContent = baseHtml.slice(openBodyIdx, closeBodyIdx);
+  const afterBody = baseHtml.slice(closeBodyIdx);
+
+  const wrapperOpen = `<div class="rfd-overlay-root" style="position:relative;width:${width}px;height:${height}px;overflow:hidden;">\n<div class="rfd-overlay-base" style="position:absolute;inset:0;z-index:0;">`;
+  const wrapperClose = `</div>\n${layerCanvasesHtml}\n</div>\n${runtimeIIFE}\n`;
+
+  return beforeBody + '\n' + wrapperOpen + bodyContent + wrapperClose + afterBody;
+}

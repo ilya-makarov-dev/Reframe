@@ -21,11 +21,13 @@ import { installLegacyGlobalShim, getFocusedCanvas } from '../canvas-dom/registr
 import { mountCompositionRenderer, type CompositionRendererHandle } from '../canvas-dom/composition-renderer.js';
 import { mountFlowRenderer, type FlowRendererHandle } from '../canvas-dom/flow-renderer.js';
 import { mountSamplerRenderer, type SamplerRendererHandle } from '../canvas-dom/sampler-renderer.js';
+import { mountOverlayRenderer, type OverlayRendererHandle } from '../canvas-dom/overlay-renderer.js';
 
 let domCanvas: ReturnType<typeof createDOMCanvas> | null = null;
 let compositionHandle: CompositionRendererHandle | null = null;
 let flowHandle: FlowRendererHandle | null = null;
 let samplerHandle: SamplerRendererHandle | null = null;
+let overlayHandle: OverlayRendererHandle | null = null;
 
 /**
  * Mount the DOM canvas. Entry point called by `/platform/viewport.js`
@@ -222,6 +224,24 @@ export async function initPlatformViewport(): Promise<void> {
       console.warn(`[platform-bootstrap] sampler "${samplerParam}" not found or malformed — falling through to single-scene mode`);
     } catch (err) {
       console.warn('[platform-bootstrap] sampler fetch failed — falling through', err);
+    }
+  }
+
+  // Overlay URL: ?overlay=<overlayId> — mount a base scene iframe + N
+  // peer-element <canvas> layers driven by RAF. The renderer fetches
+  // its own spec + runtime source from /platform/api/overlay/:id, so
+  // we just hand it the host element and let it build.
+  const overlayParam = urlParams.get('overlay');
+  if (overlayParam) {
+    try {
+      overlayHandle = await mountOverlayRenderer({
+        host: container,
+        overlayId: overlayParam,
+      });
+      installCompositionFocusSubscriber();
+      return;
+    } catch (err) {
+      console.warn(`[platform-bootstrap] overlay "${overlayParam}" mount failed — falling through to single-scene`, err);
     }
   }
 
