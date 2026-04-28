@@ -227,8 +227,61 @@ export interface DesignSystem {
   responsive: DesignSystemResponsive;
   depth?: DesignSystemDepth;
 
+  /**
+   * Brand-mark variants (Week 5 #21). Logo SVGs live alongside DESIGN.md
+   * under `.reframe/brands/<slug>/marks/<variant>.svg`. Parser surfaces
+   * whatever's on disk via the `## Brand Mark` section in DESIGN.md.
+   * Absent when the brand has no `marks/` directory — gracefully optional.
+   */
+  brandMark?: DesignSystemBrandMark;
+
+  /**
+   * Brand vocabulary (Week 5 #4). Power-words auto-emphasized at import
+   * via `<strong>` wrap with brand accent color; industry terms recognized
+   * for inspect surfacing but not styled. Section-absent → undefined,
+   * importer skips wrap pass, output byte-identical to non-vocab build.
+   */
+  vocabulary?: BrandVocabulary;
+
   /** Raw markdown source (for debugging / re-export). */
   rawMarkdown?: string;
+}
+
+/**
+ * Logo SVG variants for a brand. `variants` is the discovered set,
+ * `defaultVariant` is the recommended one (`primary` when present).
+ * `paths` map variant → repo-relative path (.reframe/brands/<slug>/marks/<variant>.svg).
+ */
+export interface DesignSystemBrandMark {
+  variants: string[];
+  defaultVariant: string;
+  paths: Record<string, string>;
+}
+
+/**
+ * Brand vocabulary — voice signature in the content layer.
+ *
+ * `powerWords` = phrases the importer auto-emphasizes (wraps in
+ * `<strong>` with the resolved style attrs). Case-insensitive match
+ * with case-preserved output. Multi-word phrases supported (sorted
+ * longest-first to avoid sub-string mis-matches).
+ *
+ * `industryTerms` = phrases the parser recognizes but does NOT style.
+ * Surfaced as occurrence counts in `reframe_inspect` for taste audits
+ * (future #22 critic enhancements).
+ *
+ * `style.color` accepts: `'accent'` (resolves to brand primary at wrap
+ * time), `'text-high'` / `'text-low'`, a hex literal, or a brand-token
+ * name. Phase 0 resolves only the keyword shorthands + hex.
+ */
+export interface BrandVocabulary {
+  powerWords: string[];
+  industryTerms: string[];
+  style: {
+    weight: number;
+    color: string;
+    decoration: 'none' | 'underline' | 'highlight';
+  };
 }
 
 // ---------------------------------------------------------------------------

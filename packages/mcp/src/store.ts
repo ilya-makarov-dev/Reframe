@@ -206,8 +206,12 @@ export function storeScene(
   const height = Math.round(root.height);
   const desiredSlug = options?.slug ?? toSlug(name);
 
-  // Check if scene with this slug already exists — UPDATE instead of creating duplicate
-  const existingSessionId = slugIndex.get(desiredSlug);
+  // Check if scene with this slug already exists — UPDATE instead of creating
+  // duplicate. resolveSessionId handles memory-first + disk-load fallback,
+  // which fixes the cold-start collision: when the manifest has the slug but
+  // the in-memory slugIndex is empty (fresh sidecar process), we'd otherwise
+  // hit the cold-start path below and uniqueSlug would append `-1`.
+  const existingSessionId = resolveSessionId(desiredSlug);
   if (existingSessionId) {
     const existing = scenes.get(existingSessionId);
     if (existing) {
@@ -228,15 +232,12 @@ export function storeScene(
     }
   }
 
-  // New scene — generate unique slug
+  // Genuinely new scene — generate sessionId + uniqueSlug against in-memory
+  // index. (Manifest is no longer consulted for collision detection because
+  // resolveSessionId above already loaded any disk-listed scene into memory,
+  // so its slug is in slugIndex by now.)
   const sessionId = `s${nextId++}`;
   const allSlugs = new Set(slugIndex.keys());
-  if (_projectDir) {
-    try {
-      const manifest = coreProjectIo().loadProject(_projectDir);
-      for (const s of manifest.scenes) allSlugs.add(s.slug ?? s.id);
-    } catch {}
-  }
   const slug = uniqueSlug(desiredSlug, allSlugs);
 
   const stored: StoredScene = {
@@ -370,6 +371,106 @@ export function findSessionId(idOrSlug: string): string | undefined {
   return slugIndex.get(idOrSlug);
 }
 
+/**
+ * Canonical id resolver: memory-first lookup, then disk-load fallback.
+ *
+ * Returns the canonical sessionId if the scene exists in memory OR can
+ * be loaded from disk into memory. Returns null when not found anywhere.
+ *
+ * Use cases (5+ occurrences before extraction):
+ *   - storeScene cold-start (avoid uniqueSlug counter when manifest has slug)
+ *   - /preview, /cover, /preview-react disk fallbacks (cross-process state divergence)
+ *   - resaveScene (was slug-blind — silent data loss on edit ops)
+ *   - bumpSceneSessionRevision + replaceSessionSceneGraph (memory-only, but use
+ *     findSessionId — they don't need disk fallback)
+ *
+ * Pure memory lookup → use `findSessionId`. Lookup-with-disk-load → use this.
+ *
+ * Idempotent: subsequent calls with the same id reuse cached state. The
+ * first call may load from disk (mutating in-memory state); after that,
+ * the same id resolves entirely in memory.
+ */
+export function resolveSessionId(idOrSlug: string): string | null {
+  // 1. Memory hit by sessionId
+  if (scenes.has(idOrSlug)) return idOrSlug;
+
+  // 2. Memory hit via slug→sessionId map
+  const fromIndex = slugIndex.get(idOrSlug);
+  if (fromIndex && scenes.has(fromIndex)) return fromIndex;
+
+  // 3. Disk fallback — only when project is open
+  if (!_projectDir) return null;
+  return loadAndRegisterFromDisk(idOrSlug, _projectDir);
+}
+
+/**
+ * Load a scene from disk by slug, register it directly into in-memory
+ * state with the EXACT slug (no uniqueSlug suffix). Returns the assigned
+ * sessionId, or null when load failed (file missing, deserialize error,
+ * project corrupt).
+ *
+ * Two paths:
+ *   1. Manifest entry → loadSceneFromProject (full hydration, expanded instances)
+ *   2. No manifest entry but file exists → direct deserialize fallback
+ *      (handles batch-write race in composition compiles where the manifest
+ *      update lagged the per-scene file write)
+ *
+ * Direct registration (bypassing storeScene's uniqueSlug logic) is correct
+ * here: we're RESTORING state, not creating new state. The slug on disk
+ * is authoritative — no collision-renaming.
+ */
+function loadAndRegisterFromDisk(slug: string, projectDir: string): string | null {
+  // Path 1: manifest-listed scene.
+  try {
+    const loaded = coreProjectIo().loadSceneFromProject(projectDir, slug);
+    if (loaded?.graph && loaded?.rootId) {
+      return registerLoadedScene(slug, loaded.graph, loaded.rootId, loaded.timeline, loaded.entry?.name);
+    }
+  } catch {
+    // Path 2: file exists but manifest doesn't list it (composition batch-write race).
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const fs = require('fs');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const path = require('path');
+      const directPath = path.join(projectDir, '.reframe', 'scenes', `${slug}.scene.json`);
+      if (!fs.existsSync(directPath)) return null;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { deserializeScene } = require('../../core/src/serialize.js');
+      const raw = JSON.parse(fs.readFileSync(directPath, 'utf-8'));
+      const { graph, rootId } = deserializeScene(raw);
+      if (!graph || !rootId) return null;
+      return registerLoadedScene(slug, graph, rootId, undefined, raw.root?.name);
+    } catch { /* best-effort */ }
+  }
+  return null;
+}
+
+function registerLoadedScene(
+  slug: string,
+  graph: SceneGraph,
+  rootId: string,
+  timeline?: ITimeline,
+  name?: string,
+): string {
+  const sessionId = `s${nextId++}`;
+  const root = graph.getNode(rootId);
+  const stored: StoredScene = {
+    graph, rootId,
+    name: name ?? root?.name ?? slug,
+    slug, // EXACT — no uniqueSlug suffix; disk slug is source of truth
+    width: Math.round(root?.width ?? 0),
+    height: Math.round(root?.height ?? 0),
+    nodeCount: countNodes(graph, rootId),
+    createdAt: Date.now(),
+    timeline,
+    sessionRevision: 1,
+  };
+  scenes.set(sessionId, stored);
+  slugIndex.set(slug, sessionId);
+  return sessionId;
+}
+
 /** Remove a scene by session ID or slug. */
 export function deleteScene(idOrSlug: string): boolean {
   let sessionId = idOrSlug;
@@ -451,7 +552,12 @@ function autoSaveToProject(stored: StoredScene): void {
 }
 
 /** Re-save a scene after mutation (e.g. audit auto-fix). */
-export function resaveScene(sessionId: string): void {
+export function resaveScene(idOrSlug: string): void {
+  // Memory-first resolve via the canonical helper. Disk fallback unwanted
+  // here — resaveScene is "persist what's in memory"; if not in memory,
+  // there's nothing to save.
+  const sessionId = findSessionId(idOrSlug);
+  if (!sessionId) return;
   const stored = scenes.get(sessionId);
   if (!stored) return;
   autoSaveToProject(stored);
@@ -459,7 +565,7 @@ export function resaveScene(sessionId: string): void {
 
 /** Increment session revision and notify SSE subscribers (Studio pull). */
 export function bumpSceneSessionRevision(idOrSlug: string): number | undefined {
-  const sessionId = scenes.has(idOrSlug) ? idOrSlug : slugIndex.get(idOrSlug);
+  const sessionId = findSessionId(idOrSlug);
   if (!sessionId) return undefined;
   const stored = scenes.get(sessionId);
   if (!stored) return undefined;
@@ -483,7 +589,7 @@ export function replaceSessionSceneGraph(
   timeline?: ITimeline | null,
   options?: { updateTimeline?: boolean },
 ): { sessionId: string; revision: number } | null {
-  const sessionId = scenes.has(idOrSlug) ? idOrSlug : slugIndex.get(idOrSlug);
+  const sessionId = findSessionId(idOrSlug);
   if (!sessionId) return null;
   const stored = scenes.get(sessionId);
   if (!stored) return null;

@@ -342,6 +342,18 @@
           showExportPreview(sessionId, format);
         });
       });
+      // Live React preview button (#8 Week 4) — opens /platform/preview-react/<id>
+      // in a new tab. Babel + React + ReactDOM run in the browser; no
+      // export-overlay path because there's no file to download — just a
+      // running React app to look at.
+      exportMenu.querySelectorAll('button[data-action="preview-react"]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          exportMenu.classList.add('hidden');
+          var sessionId = currentSceneId();
+          if (!sessionId) { flash('No scene to preview', 'error'); return; }
+          window.open('/platform/preview-react/' + encodeURIComponent(sessionId), '_blank', 'noopener');
+        });
+      });
     }
 
     // Editor-shell header `#btn-detach` — applies detach-from-layout to

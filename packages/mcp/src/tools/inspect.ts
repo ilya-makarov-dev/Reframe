@@ -500,6 +500,31 @@ export async function handleInspect(input: {
     }
   }
 
+  // ── d2.5 Brand Vocabulary matches (#4 Week 5) ────────────────
+  // Power-word + industry-term occurrence counts populated by the
+  // importer when the active brand carries a `## Brand Vocabulary`
+  // section. Surfaced for taste audits / future critic enhancements.
+  // Always emit the section so consumers see consistent shape (empty
+  // counts === "no vocab matches", not "feature absent").
+  {
+    const vm = (graph as any).vocabularyMatches as
+      | { powerWords: Array<{ word: string; occurrences: number }>;
+          industryTerms: Array<{ term: string; occurrences: number }>; }
+      | null;
+    if (vm && (vm.powerWords.length > 0 || vm.industryTerms.length > 0)) {
+      sections.push('');
+      sections.push(`--- Brand Vocabulary (${vm.powerWords.length} power, ${vm.industryTerms.length} industry) ---`);
+      if (vm.powerWords.length > 0) {
+        sections.push('Power words:');
+        for (const p of vm.powerWords) sections.push(`  ${p.word} × ${p.occurrences}`);
+      }
+      if (vm.industryTerms.length > 0) {
+        sections.push('Industry terms:');
+        for (const t of vm.industryTerms) sections.push(`  ${t.term} × ${t.occurrences}`);
+      }
+    }
+  }
+
   // ── d3. Annotations ──────────────────────────────────────────
   // Scene-level side-channel (Week 2 #1). Always emit the section so
   // consumers see a consistent shape — `0 entries` vs the listing — and

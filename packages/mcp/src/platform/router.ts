@@ -145,6 +145,15 @@ export async function handlePlatformRequest(
   }
 
   // ── Clean canvas test — NO old platform UI, just CanvasKit ──
+  // Live React preview (Week 4 #8): full HTML doc with vendor scripts
+  // (Babel + React + ReactDOM) and inline JSX from the React exporter.
+  // Browser-side Babel transforms JSX → JS, React mounts. New-tab affordance
+  // wired into the editor export menu via data-action="preview-react".
+  if (pathname.startsWith('/platform/preview-react/') && req.method === 'GET') {
+    const { handlePreviewReact } = await import('./api/preview-react.js');
+    return handlePreviewReact(req, res);
+  }
+
   if (pathname === '/platform/canvas-test' && req.method === 'GET') {
     const scenes = ctx.sessionScenes || [];
     const sceneId = scenes.length > 0 ? scenes[0].id : '';
@@ -216,6 +225,15 @@ export default async function(o){
       filePath = join(process.cwd(), 'node_modules', 'canvaskit-wasm', 'bin', vendorPath.replace('canvaskit/', ''));
     } else if (vendorPath.startsWith('open-pencil-core/')) {
       filePath = join(process.cwd(), 'node_modules', '@open-pencil', 'core', 'dist', vendorPath.replace('open-pencil-core/', ''));
+    } else if (vendorPath === 'babel-standalone.min.js') {
+      // Pinned via @babel/standalone in packages/mcp/package.json. The same
+      // build serves /preview-react/<id> consumers (Babel transforms the
+      // inline JSX in-browser at preview time — no server-side step).
+      filePath = join(process.cwd(), 'node_modules', '@babel', 'standalone', 'babel.min.js');
+    } else if (vendorPath === 'react.production.min.js') {
+      filePath = join(process.cwd(), 'node_modules', 'react', 'umd', 'react.production.min.js');
+    } else if (vendorPath === 'react-dom.production.min.js') {
+      filePath = join(process.cwd(), 'node_modules', 'react-dom', 'umd', 'react-dom.production.min.js');
     }
 
     if (filePath && existsSync(filePath)) {
@@ -329,6 +347,12 @@ export default async function(o){
     if (pathname.startsWith('/platform/api/sampler/')) {
       const { handleSamplerApi } = await import('./api/sampler-api.js');
       return handleSamplerApi(req, res, ctx);
+    }
+    // Brand mark serving (Week 5 #21):
+    //   GET /platform/api/brand/:slug/mark/:variant  → SVG file bytes
+    if (pathname.startsWith('/platform/api/brand/') && pathname.includes('/mark/')) {
+      const { handleBrandMarkApi } = await import('./api/brand-mark.js');
+      return handleBrandMarkApi(req, res, ctx);
     }
     // Resize / viewport adapt endpoint — spawns a tablet/phone variant
     // via core's adaptFromGraph without routing through the chat agent.

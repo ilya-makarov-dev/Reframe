@@ -158,6 +158,7 @@ export function renderShell(props: ShellProps): string {
         <div class="export-menu hidden">
           <button data-format="html">HTML</button>
           <button data-format="react">React TSX</button>
+          <button data-action="preview-react">⚛ Preview React (live)</button>
           <button data-format="svg">SVG</button>
           <button data-format="png">PNG</button>
           <button data-format="pdf">PDF</button>

@@ -23,7 +23,7 @@ import { buildTimeline as buildTimelineCore } from '../../../core/src/animation/
 import type { ITimeline, INodeAnimation } from '../../../core/src/animation/types.js';
 import { exportToRaster, initCanvasKit } from '../../../core/src/exporters/raster.js';
 import { exportSvgFromGraph } from '../engine.js';
-import { resolveScene, getScene, getExportsBaseDir } from '../store.js';
+import { resolveScene, getScene, getExportsBaseDir, getWorkspaceRoot } from '../store.js';
 import { getSession } from '../session.js';
 import type { SceneGraph } from '../../../core/src/engine/scene-graph.js';
 import { ensureSceneLayout } from '../../../core/src/engine/layout.js';
@@ -33,7 +33,7 @@ import { makeToolJsonErrorResult } from '../tool-result.js';
 
 export const exportInputSchema = {
   sceneId: z.string().describe('Scene ID to export.'),
-  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'lottie', 'video', 'pptx'])
+  format: z.enum(['html', 'svg', 'png', 'pdf', 'react', 'lottie', 'video', 'pptx', 'bundle', 'react-spa'])
     .describe('Output format. `html` respects `animate:true` to embed the scene timeline as inline CSS keyframes / GSAP (replaces the old "animated_html" format). `video` produces an MP4 via hyperframes render (Puppeteer + FFmpeg). `pptx` emits a PowerPoint deck — one PNG-backed slide per scene (use sceneIds for multi-slide decks). Multi-page projects: call `reframe_export format=html` per scene — no "site" format needed.'),
 
   // HTML options
@@ -151,7 +151,7 @@ export async function handleExport(input: {
   sceneId: string;
   /** Comma-separated list of sceneIds to include as additional slides (pptx only). */
   sceneIds?: string;
-  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'lottie' | 'video' | 'pptx';
+  format: 'html' | 'svg' | 'png' | 'pdf' | 'react' | 'lottie' | 'video' | 'pptx' | 'bundle' | 'react-spa';
   fullDocument?: boolean;
   dataAttributes?: boolean;
   cssClasses?: boolean;
@@ -180,6 +180,15 @@ export async function handleExport(input: {
   videoQuality?: 'draft' | 'standard' | 'high';
 }) {
   const { format, sceneId } = input;
+
+  // ─── react-spa: dispatch BEFORE scene resolution ───────────
+  // Phase 0 scope: Flow-only. The `sceneId` arg is interpreted as a
+  // flowId (flows live under .reframe/flows/<flowId>/, sibling to
+  // scenes/). Single-scene → use format='bundle'; variants/sampler
+  // throw composition.unsupported.
+  if (format === 'react-spa') {
+    return await handleReactSpaExport(sceneId);
+  }
 
   // ─── 1. Resolve scene ───────────────────────────────────────
   let graph: SceneGraph;
@@ -271,6 +280,22 @@ export async function handleExport(input: {
             dataAttributes: input.dataAttributes ?? false,
             cssClasses: input.cssClasses ?? false,
           });
+        }
+        break;
+      }
+
+      case 'bundle': {
+        // Single-file portable HTML — fonts + images inlined as data
+        // URIs. Foundation for #20 stateful prototype + #26 always-on
+        // tweaks. Async because the inliners issue network fetches.
+        const { exportSceneGraphToBundle } = await import('../../../core/src/exporters/bundle.js');
+        const result = await exportSceneGraphToBundle(graph, rootId, {
+          projectDir: getWorkspaceRoot(),
+        });
+        content = result.html;
+        // Surface warnings via the inline summary line emitted later.
+        if (result.warnings.length > 0) {
+          (input as any)._bundleWarnings = result.warnings;
         }
         break;
       }
@@ -652,4 +677,108 @@ export async function handleExport(input: {
     content: [{ type: 'text' as const, text: sections.join('\n') }],
   };
   });
+}
+
+// ─── React-SPA dispatch (#20 Stateful prototype) ─────────────
+//
+// Loads a Flow spec from .reframe/flows/<flowId>/, plus each step scene
+// from .reframe/scenes/<slug>.scene.json + initial state, then hands off
+// to exportFlowToReactSpa. Phase 0 scope = Flow only. Single-scene
+// callers should use format='bundle'; variants/sampler are
+// composition-mismatched.
+
+async function handleReactSpaExport(flowId: string) {
+  const projectDir = getWorkspaceRoot();
+  if (!projectDir) {
+    return makeToolJsonErrorResult(
+      'react-spa export requires an open project (no workspace root).',
+      'export.react-spa.no_project',
+    );
+  }
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+
+  // Detect composition mismatch — single-scene + variants + sampler all
+  // throw the same code with format hints.
+  const sceneFile = path.join(projectDir, '.reframe', 'scenes', `${flowId}.scene.json`);
+  if (fs.existsSync(sceneFile)) {
+    return makeToolJsonErrorResult(
+      `react-spa expects a flowId; "${flowId}" resolves to a single scene. Use format='bundle' for single-scene portable HTML.`,
+      'export.react-spa.unsupported_composition',
+      { resolvedAs: 'single', hint: "format='bundle'" },
+    );
+  }
+  const samplerSpec = path.join(projectDir, '.reframe', 'samplers', flowId, 'sampler.json');
+  if (fs.existsSync(samplerSpec)) {
+    return makeToolJsonErrorResult(
+      `react-spa cannot export a sampler grid as a stateful SPA (no per-cell state model in Phase 0). "${flowId}" resolves to a sampler.`,
+      'export.react-spa.unsupported_composition',
+      { resolvedAs: 'sampler' },
+    );
+  }
+
+  const { readFlowSpec, readFlowState } = await import('../../../core/src/project/flow-store.js');
+  const spec = readFlowSpec(projectDir, flowId);
+  if (!spec) {
+    return makeToolJsonErrorResult(
+      `Flow "${flowId}" not found at ${path.join(projectDir, '.reframe', 'flows', flowId, 'flow.json')}.`,
+      'export.react-spa.flow_not_found',
+      { flowId },
+    );
+  }
+  const state = readFlowState(projectDir, flowId);
+
+  // Load each step scene from disk.
+  const { deserializeScene } = await import('../../../core/src/serialize.js');
+  const steps: Array<{ graph: any; rootId: string }> = [];
+  for (const slug of spec.stepSceneIds) {
+    const stepPath = path.join(projectDir, '.reframe', 'scenes', `${slug}.scene.json`);
+    if (!fs.existsSync(stepPath)) {
+      return makeToolJsonErrorResult(
+        `Flow "${flowId}" references missing step scene "${slug}".`,
+        'export.react-spa.step_missing',
+        { flowId, slug, stepPath },
+      );
+    }
+    try {
+      const env = JSON.parse(fs.readFileSync(stepPath, 'utf8'));
+      const { graph } = deserializeScene(env);
+      const rootId = env.root?.id ?? env.rootId;
+      steps.push({ graph, rootId });
+    } catch (err: any) {
+      return makeToolJsonErrorResult(
+        `Failed to deserialize step scene "${slug}": ${err?.message ?? err}`,
+        'export.react-spa.step_load_failed',
+        { flowId, slug },
+      );
+    }
+  }
+
+  const { exportFlowToReactSpa } = await import('../../../core/src/exporters/react-spa.js');
+  const result = await exportFlowToReactSpa({
+    flowId,
+    flowName: spec.name,
+    steps: steps.map((s) => s.graph),
+    stepRootIds: steps.map((s) => s.rootId),
+    transitions: spec.transitions,
+    state,
+  }, { projectDir });
+
+  // Write to disk under .reframe/exports/.
+  const exportDir = getExportsBaseDir();
+  if (!fs.existsSync(exportDir)) fs.mkdirSync(exportDir, { recursive: true });
+  const outPath = path.join(exportDir, `${flowId}.react-spa.html`);
+  fs.writeFileSync(outPath, result.html, 'utf8');
+
+  const lines: string[] = [];
+  const fileUrl = `file:///${outPath.replace(/\\/g, '/')}`;
+  lines.push(`Exported **${flowId}** (react-spa)  ${fileUrl} → [${flowId}.react-spa.html](${outPath}) (${(result.sizeBytes / 1024).toFixed(1)}KB)`);
+  lines.push(`Inlined: ${result.inlinedAssets.fonts} font face(s), ${result.inlinedAssets.images} image(s)`);
+  if (result.sizeWarning) lines.push(`⚠ ${result.sizeWarning}`);
+  if (result.warnings.length > 0) {
+    lines.push('');
+    lines.push('Warnings:');
+    for (const w of result.warnings) lines.push(`  - ${w}`);
+  }
+  return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
 }

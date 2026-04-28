@@ -1,14 +1,24 @@
 /**
- * Procedural project covers.
+ * Cover SVG resolver — two-mode source for the /cover/<id>.svg endpoint.
  *
- * When a scene's rasterized thumbnail is unavailable (CanvasKit not yet
- * initialized, export failed, or cold-start slow) the dashboard needs
- * *something* behind the card. A broken-image icon or a scaled iframe
- * hack both look amateur. Instead we render a deterministic, brand-
- * aware SVG cover from the scene id + name + optional brand slug.
+ * Mode 1 (skeleton, #6 Week 4): when a scene exists for `sceneId`, return
+ * its #11 SVG skeleton — a structural silhouette of the actual layout
+ * (grayscale rects for text, striped pattern for images). This is what
+ * the user sees behind the PNG raster while CanvasKit is rendering.
+ * Cached at .reframe/scenes/<sceneId>.skeleton.svg, written eagerly on
+ * compile and invalidated on edit.
  *
- * The output is pure SVG (no fonts loaded, no external refs) so it
- * renders instantly as a CSS background-image or <img src>.
+ * Mode 2 (procedural fallback): when no scene exists for the requested
+ * id (empty project state, scene file missing, deserialize fails) the
+ * dashboard still needs *something* behind the card — a broken-image
+ * icon would look amateur. The procedural cover renders a deterministic,
+ * brand-aware SVG from id + name + optional brand slug. Pure SVG, no
+ * fonts loaded, no external refs.
+ *
+ * The endpoint never returns 404 for an unknown id — graceful
+ * degradation to procedural is always possible. Pin: a project newly
+ * created without compiled scenes, or one whose only scene file got
+ * corrupted, still renders something dashboard-worthy.
  */
 
 const BRAND_PALETTES: Record<string, [string, string, string]> = {
@@ -154,4 +164,99 @@ export function renderCoverSvg(opts: CoverOptions): string {
 /** Lowercase slug → palette existence check (exported for tests). */
 export function hasBrandPalette(slug: string): boolean {
   return BRAND_PALETTES[slug.toLowerCase()] !== undefined;
+}
+
+// ─── Two-mode resolver ───────────────────────────────────────
+
+export type CoverMode = 'skeleton' | 'procedural';
+
+export interface CoverResolveResult {
+  svg: string;
+  mode: CoverMode;
+  etag: string;
+  /** Cache-Control max-age in seconds. */
+  maxAge: number;
+}
+
+export interface CoverResolverDeps {
+  /** Returns the scene's graph + rootId + brand if available; null otherwise. */
+  getScene: (sceneId: string) => { graph: any; rootId: string; brand?: string; name?: string; width?: number; height?: number } | null;
+  /** Project root for cache I/O. */
+  projectDir: string | null;
+}
+
+/**
+ * Resolve the cover SVG for a sceneId using the two-mode contract.
+ *
+ * Order:
+ *   1. Cache hit (skeleton on disk) → return cached
+ *   2. Scene available in store → render skeleton, write cache, return
+ *   3. Fall through → procedural (does NOT cache to disk; ETag is stable
+ *      anyway based on inputs, so browser cache absorbs it)
+ *
+ * The procedural path also runs when no projectDir is set (in-memory only
+ * runs, tests without disk).
+ */
+export async function resolveCover(
+  opts: CoverOptions,
+  deps: CoverResolverDeps,
+): Promise<CoverResolveResult> {
+  const sceneId = opts.sceneId;
+
+  // 1. Cache hit
+  if (deps.projectDir) {
+    try {
+      const { readSkeleton } = await import('../../../core/src/project/skeleton-cache.js');
+      const cached = readSkeleton(deps.projectDir, sceneId);
+      if (cached) {
+        return {
+          svg: cached.svg,
+          mode: 'skeleton',
+          etag: `W/"skel-${cached.mtime.toISOString()}"`,
+          maxAge: 60,
+        };
+      }
+    } catch { /* fall through */ }
+  }
+
+  // 2. Scene available — render fresh skeleton, write cache
+  const stored = deps.getScene(sceneId);
+  if (stored && stored.graph && stored.rootId) {
+    try {
+      const { exportSceneGraphToSvg } = await import('../../../core/src/exporters/svg.js');
+      const svg = exportSceneGraphToSvg(stored.graph, stored.rootId, { mode: 'skeleton' });
+      if (deps.projectDir) {
+        try {
+          const { writeSkeleton } = await import('../../../core/src/project/skeleton-cache.js');
+          writeSkeleton(deps.projectDir, sceneId, svg);
+        } catch { /* best-effort cache write */ }
+      }
+      // Hash ETag from svg bytes — stable for identical scene state.
+      const { createHash } = await import('node:crypto');
+      const hashHex = createHash('sha1').update(svg).digest('hex').slice(0, 16);
+      return {
+        svg,
+        mode: 'skeleton',
+        etag: `W/"skel-${hashHex}"`,
+        maxAge: 60,
+      };
+    } catch {
+      // Skeleton render failed (corrupt graph, exporter bug) — degrade
+      // to procedural rather than 500.
+    }
+  }
+
+  // 3. Fall through — procedural
+  const procSvg = renderCoverSvg(opts);
+  const { createHash } = await import('node:crypto');
+  // Stable input-hash ETag — procedural output is deterministic from
+  // (sceneId, brand, name).
+  const procKey = `${sceneId}|${opts.brand ?? ''}|${opts.name ?? ''}`;
+  const procHash = createHash('sha1').update(procKey).digest('hex').slice(0, 16);
+  return {
+    svg: procSvg,
+    mode: 'procedural',
+    etag: `W/"proc-${procHash}"`,
+    maxAge: 86400,
+  };
 }

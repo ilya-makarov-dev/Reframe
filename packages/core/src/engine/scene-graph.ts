@@ -201,6 +201,18 @@ export class SceneGraph {
    */
   annotations: import('./annotation').AnnotationNode[] = [];
 
+  /**
+   * Brand vocabulary match counts (Week 5 #4). Populated by the importer
+   * when the active brand carries a `## Brand Vocabulary` section AND
+   * matches were found in source HTML. Surfaced via `reframe_inspect`
+   * as a side-channel for taste audits — not serialized to disk
+   * (re-import recomputes; no need to round-trip).
+   */
+  vocabularyMatches: {
+    powerWords: Array<{ word: string; occurrences: number }>;
+    industryTerms: Array<{ term: string; occurrences: number }>;
+  } | null = null;
+
   // Caches
   private absPosCache = new Map<string, Vector>();
   private instanceIndex = new Map<string, Set<string>>();

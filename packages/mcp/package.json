@@ -16,7 +16,10 @@
   "dependencies": {
     "@reframe/core": "*",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "zod": "^3.24.0"
+    "zod": "^3.24.0",
+    "@babel/standalone": "^7.26.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.37",

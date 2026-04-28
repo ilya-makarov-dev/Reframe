@@ -671,7 +671,23 @@ export async function handleCompile(input: CompileInput) {
         // caller overrides by asking for a different viewport.
         const isMultiSize = Array.isArray(input.sizes) && input.sizes.length > 0;
         const hasExplicitViewport = typeof input.width === 'number' || typeof input.height === 'number';
-        const importResult = await importFromHtml(input.html!, {
+        // Brand vocabulary pre-pass (#4 Week 5): wrap power-words in
+        // <strong> with brand accent color BEFORE the main importer
+        // runs, so the wrapped emphasis flows through the existing
+        // styled-runs pipeline (no exporter changes needed). Match
+        // counts are stashed onto the graph for inspect surfacing.
+        let preprocessedHtml = input.html!;
+        let vocabMatches: import('../../../core/src/importers/vocabulary-wrap.js').WrapResult | null = null;
+        if (ds?.vocabulary) {
+          const { wrapVocabulary } = await import('../../../core/src/importers/vocabulary-wrap.js');
+          const accent = (ds.colors as any)?.primary
+            ?? (ds.colors as any)?.accent
+            ?? '#000000';
+          vocabMatches = await wrapVocabulary(input.html!, ds.vocabulary, accent);
+          preprocessedHtml = vocabMatches.html;
+        }
+
+        const importResult = await importFromHtml(preprocessedHtml, {
           name: input.name,
           width: size.width || undefined,
           height: size.height || undefined,
@@ -684,6 +700,12 @@ export async function handleCompile(input: CompileInput) {
         });
         graph = importResult.graph;
         rootId = importResult.rootId;
+        if (vocabMatches && (vocabMatches.powerWordMatches.length > 0 || vocabMatches.industryTermMatches.length > 0)) {
+          graph.vocabularyMatches = {
+            powerWords: vocabMatches.powerWordMatches,
+            industryTerms: vocabMatches.industryTermMatches,
+          };
+        }
         // Surface importer warnings inline (script/iframe/style stripping)
         if (importResult.stats.unsupported.length > 0) {
           for (const u of importResult.stats.unsupported) {
@@ -865,6 +887,22 @@ export async function handleCompile(input: CompileInput) {
     });
     sceneIds.push(sceneId);
     autoSaveScene(sceneId, graph, rootId);
+
+    // Eager skeleton write (#6 Week 4) — generate the structural SVG
+    // alongside scene.json so the first /cover/<id>.svg request hits cache
+    // instead of paying generation latency on the user's dashboard load.
+    // Best-effort: a failure here doesn't break the compile (cover endpoint
+    // will lazy-regen on miss).
+    try {
+      const stored = getScene(sceneId);
+      if (stored) {
+        const { exportSceneGraphToSvg } = await import('../../../core/src/exporters/svg.js');
+        const { writeSkeleton } = await import('../../../core/src/project/skeleton-cache.js');
+        const skel = exportSceneGraphToSvg(stored.graph, stored.rootId, { mode: 'skeleton' });
+        const projectDir = getWorkspaceRoot();
+        if (projectDir) writeSkeleton(projectDir, stored.slug ?? sceneId, skel);
+      }
+    } catch { /* best-effort */ }
 
     session.trackImport(
       sceneId,

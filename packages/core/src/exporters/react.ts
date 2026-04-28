@@ -821,6 +821,7 @@ function tagForNode(node: INode): { tag: string; attrs: string } {
   const role = (node as any).semanticRole as string | undefined;
   const sourceTag = ((node as any).meta?.sourceTag as string | undefined) ?? '';
   const href = (node as any).href as string | undefined;
+  const sourceData = ((node as any).meta?.sourceData as Record<string, string> | undefined) ?? {};
 
   // Interactive / semantic leaf tags first — they carry attributes too.
   if (role === 'link' || sourceTag === 'a') {
@@ -829,6 +830,44 @@ function tagForNode(node: INode): { tag: string; attrs: string } {
   }
   if (role === 'button' || sourceTag === 'button') {
     return { tag: 'button', attrs: ' type="button"' };
+  }
+
+  // Form inputs — preserve as real React inputs. When the node carries
+  // `data-flow-state="<field>"` (#20 stateful prototype), emit a controlled
+  // value+onChange binding into props.state[<field>]. Without that attr,
+  // the input renders uncontrolled (default text input — caller's choice).
+  // Type defaults to "text"; original `type` from source preserved if set.
+  const flowField = sourceData['data-flow-state'];
+  if (sourceTag === 'input') {
+    const typeAttr = ` type="${(sourceData['type'] || 'text').replace(/"/g, '&quot;')}"`;
+    if (flowField) {
+      const safe = flowField.replace(/"/g, '\\"');
+      return {
+        tag: 'input',
+        attrs: `${typeAttr} value={(props.state && props.state["${safe}"]) || ""} onChange={e => props.setState({...(props.state || {}), "${safe}": e.target.value})}`,
+      };
+    }
+    return { tag: 'input', attrs: typeAttr };
+  }
+  if (sourceTag === 'textarea') {
+    if (flowField) {
+      const safe = flowField.replace(/"/g, '\\"');
+      return {
+        tag: 'textarea',
+        attrs: ` value={(props.state && props.state["${safe}"]) || ""} onChange={e => props.setState({...(props.state || {}), "${safe}": e.target.value})}`,
+      };
+    }
+    return { tag: 'textarea', attrs: '' };
+  }
+  if (sourceTag === 'select') {
+    if (flowField) {
+      const safe = flowField.replace(/"/g, '\\"');
+      return {
+        tag: 'select',
+        attrs: ` value={(props.state && props.state["${safe}"]) || ""} onChange={e => props.setState({...(props.state || {}), "${safe}": e.target.value})}`,
+      };
+    }
+    return { tag: 'select', attrs: '' };
   }
 
   // Sectioning / landmark tags from raw source.
@@ -912,6 +951,26 @@ function renderNode(
 
   // Text node — keep as leaf but honor headings/paragraphs/labels.
   if (node.type === NodeType.Text) {
+    // Form input passthrough — the importer collapses <input>/<textarea>/<select>
+    // into TEXT nodes (with the value/placeholder as characters). When the
+    // semantic tag picked them out, emit as the real form element with
+    // optional data-flow-state binding into props.state.
+    if (semantic.tag === 'input') {
+      // Self-closing void element. Value comes from binding (when present)
+      // or falls through to default uncontrolled input.
+      return `${pad}<input ${styleAttr}${semantic.attrs} />`;
+    }
+    if (semantic.tag === 'textarea' || semantic.tag === 'select') {
+      // <select> needs its options as children — but the importer only
+      // captured the selected option's text as `characters`. For Phase 0
+      // we render as a single-option select; multi-option selects await a
+      // signal. <textarea> takes the text as its value when controlled.
+      const text = escapeJsx(node.characters ?? '');
+      if (semantic.tag === 'textarea') {
+        return `${pad}<textarea ${styleAttr}${semantic.attrs} defaultValue="${text.replace(/"/g, '&quot;')}" />`;
+      }
+      return `${pad}<select ${styleAttr}${semantic.attrs}><option value="${text.replace(/"/g, '&quot;')}">${text}</option></select>`;
+    }
     const text = escapeJsx(node.characters ?? '');
     const textTag = semantic.tag && /^(h[1-6]|p|label|a|button|code|li|blockquote)$/.test(semantic.tag)
       ? semantic.tag
@@ -923,6 +982,32 @@ function renderNode(
       return `${pad}<${textTag} ${styleAttr}${attrs}>\n${pad}  ${content}\n${pad}</${textTag}>`;
     }
     return `${pad}<${textTag} ${styleAttr}${attrs}>${text}</${textTag}>`;
+  }
+
+  // Form input passthrough at container level — the importer wraps
+  // <input>/<textarea>/<select> as FRAME+TEXT-child, so the FRAME hits
+  // this branch with sourceTag='input'/etc. Render as the real form
+  // element WITHOUT children (a void <input> with `<span>` children
+  // throws React error #137). The TEXT child is the value/placeholder,
+  // which for controlled inputs we don't want anyway.
+  if (semantic.tag === 'input') {
+    return `${pad}<input ${styleAttr}${semantic.attrs} />`;
+  }
+  if (semantic.tag === 'textarea') {
+    // textarea may have a default text content from the import — pull
+    // from the first text child (importer collapses placeholder/value
+    // into a span child).
+    const textChild = (node.children ?? []).find((c) => c.type === NodeType.Text);
+    const defaultText = textChild ? escapeJsx(textChild.characters ?? '') : '';
+    const defaultAttr = defaultText && !semantic.attrs.includes('value=')
+      ? ` defaultValue="${defaultText.replace(/"/g, '&quot;')}"`
+      : '';
+    return `${pad}<textarea ${styleAttr}${semantic.attrs}${defaultAttr} />`;
+  }
+  if (semantic.tag === 'select') {
+    const textChild = (node.children ?? []).find((c) => c.type === NodeType.Text);
+    const optText = textChild ? escapeJsx(textChild.characters ?? '') : '';
+    return `${pad}<select ${styleAttr}${semantic.attrs}><option value="${optText.replace(/"/g, '&quot;')}">${optText}</option></select>`;
   }
 
   // Container / shape — pick a semantic tag when the importer recorded one.

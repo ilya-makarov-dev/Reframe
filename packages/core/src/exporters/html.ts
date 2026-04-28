@@ -36,6 +36,29 @@ function gradientTransformToAngle(t: GradientTransform): number {
 }
 
 /**
+ * System / generic font families that should NEVER trigger a Google Fonts
+ * <link> emission. Requesting these returns 404 from the CDN and wastes a
+ * fetch round-trip; they're already available in the OS / browser.
+ */
+const SYSTEM_FONT_FAMILIES = new Set<string>([
+  'system-ui',
+  'sans-serif',
+  'serif',
+  'monospace',
+  'cursive',
+  'fantasy',
+  'ui-sans-serif',
+  'ui-serif',
+  'ui-monospace',
+  'ui-rounded',
+  '-apple-system',
+  'blinkmacsystemfont',
+  'inherit',
+  'initial',
+  'unset',
+]);
+
+/**
  * Guard against emitting Google Fonts <link> tags for obviously-invalid font names.
  * This catches parser mis-extractions (e.g. "typeface for headings", "primary sans font")
  * and generic descriptors that would produce a 400 from fonts.googleapis.com.
@@ -526,9 +549,13 @@ export function exportToHtml(
       return `<${tag} ${attrStr}>${textHtml}</${tag}>`;
     }
 
-    // Self-closing tags
+    // Self-closing tags. Image src lives on fills[0].imageHash (set by the
+    // HTML importer at line 3120) — preserve it back to the rendered tag
+    // so the image actually loads + bundle exporter can find URLs to inline.
     if (tag === 'img') {
-      return `<${tag} ${attrStr} alt="${escapeHtml(node.name)}" />`;
+      const imgFill = (node.fills ?? []).find((f: any) => f && f.type === 'IMAGE' && typeof f.imageHash === 'string');
+      const src = imgFill ? ` src="${escapeHtml(String((imgFill as any).imageHash))}"` : '';
+      return `<${tag} ${attrStr}${src} alt="${escapeHtml(node.name)}" />`;
     }
 
     // ─── Hybrid SVG rendering ──────────────────────────
@@ -626,7 +653,7 @@ export function exportToHtml(
     if (!n) return;
     if (n.type === 'TEXT' && n.fontFamily) {
       const family = n.fontFamily;
-      if (family !== 'monospace' && family !== 'serif' && family !== 'sans-serif' && isPlausibleWebFontName(family)) {
+      if (!SYSTEM_FONT_FAMILIES.has(family.toLowerCase()) && isPlausibleWebFontName(family)) {
         usedFonts.add(family);
         if (!usedWeights.has(family)) usedWeights.set(family, new Set());
         usedWeights.get(family)!.add(n.fontWeight || 400);

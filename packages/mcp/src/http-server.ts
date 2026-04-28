@@ -381,6 +381,7 @@ import {
   getWorkspaceRoot,
   deleteScene as deleteSessionScene,
   replaceSessionSceneGraph,
+  resolveSessionId,
 } from './store.js';
 
 /** Broadcast current scene list to all SSE clients. */
@@ -670,21 +671,51 @@ export function startHttpSidecar(port = 4100): void {
       const covTail = url.pathname.split('/cover/')[1];
       const covDot = covTail.lastIndexOf('.');
       const covSceneId = covDot >= 0 ? covTail.slice(0, covDot) : covTail;
-      const covStored = getScene(covSceneId);
-      const { renderCoverSvg } = await import('./platform/cover.js');
-      const svg = renderCoverSvg({
-        name: covStored?.name ?? covStored?.slug ?? covSceneId,
-        sceneId: covSceneId,
-        brand: (covStored as any)?.brand,
-        width: covStored?.width,
-        height: covStored?.height,
-        variants: Number(url.searchParams?.get('variants') ?? 0) || undefined,
-      });
+      // Memory + disk-fallback so the cover endpoint serves real skeletons
+      // for scenes compiled in another process. Without resolveSessionId
+      // we'd silently degrade to procedural cover for any on-disk-only scene.
+      const covSessionId = resolveSessionId(covSceneId);
+      const covStored = covSessionId ? getScene(covSessionId) : undefined;
+      // Two-mode resolver (#6): skeleton when scene exists, procedural fallback
+      // otherwise. Same URL, different content + cache profile per mode.
+      const { resolveCover } = await import('./platform/cover.js');
+      const projectDir = getWorkspaceRoot();
+      // Cache key uses the stable slug (matches `.reframe/scenes/<slug>.scene.json`
+      // pattern); the URL may carry session id (s1) OR slug. getScene handles
+      // both lookups, then we read .slug from the result.
+      const cacheKey = covStored?.slug ?? covSceneId;
+      const resolved = await resolveCover(
+        {
+          name: covStored?.name ?? covStored?.slug ?? covSceneId,
+          sceneId: cacheKey,
+          brand: (covStored as any)?.brand,
+          width: covStored?.width,
+          height: covStored?.height,
+          variants: Number(url.searchParams?.get('variants') ?? 0) || undefined,
+        },
+        {
+          projectDir,
+          getScene: () => {
+            const s = covStored;
+            if (!s) return null;
+            return { graph: s.graph, rootId: s.rootId, brand: (s as any).brand, name: s.name, width: s.width, height: s.height };
+          },
+        },
+      );
+      // ETag short-circuit — if client sent matching If-None-Match, 304.
+      const ifNoneMatch = req.headers['if-none-match'];
+      if (ifNoneMatch && ifNoneMatch === resolved.etag) {
+        res.writeHead(304, { ETag: resolved.etag });
+        res.end();
+        return;
+      }
       res.writeHead(200, {
         'Content-Type': 'image/svg+xml; charset=utf-8',
-        'Cache-Control': 'public, max-age=300',
+        'Cache-Control': `public, max-age=${resolved.maxAge}`,
+        ETag: resolved.etag,
+        'X-Cover-Mode': resolved.mode,
       });
-      res.end(svg);
+      res.end(resolved.svg);
       return;
     }
 
@@ -736,57 +767,13 @@ export function startHttpSidecar(port = 4100): void {
       const dotIdx = tail.lastIndexOf('.');
       const sceneId = dotIdx >= 0 ? tail.slice(0, dotIdx) : tail;
       const ext = dotIdx >= 0 ? tail.slice(dotIdx + 1).toLowerCase() : 'html';
-      let stored = getScene(sceneId);
-      if (!stored) {
-        // Disk fallback: the HTTP sidecar and MCP stdio run as separate
-        // processes and don't share session state. A scene compiled via
-        // MCP persists to disk but the sidecar's in-memory session is
-        // still empty. Auto-load from disk before 404'ing so composition
-        // mounts (variants / flow / sampler) work against persisted
-        // scenes without a manual "wake up the sidecar" step.
-        try {
-          const { coreProjectIo } = await import('./project-io.js');
-          const projectDir = getWorkspaceRoot();
-          const loaded = coreProjectIo().loadSceneFromProject(projectDir, sceneId);
-          if (loaded?.graph && loaded?.rootId) {
-            // storeScene's uniqueSlug treats manifest entries as collisions
-            // when the in-memory slugIndex is empty (cold sidecar start),
-            // appending `-1`, `-2` suffixes. Look up by the returned
-            // sessionId (`s1`, `s2`, …) which is always exact, so we get
-            // the scene regardless of slug renaming.
-            const sessionId = storeScene(loaded.graph, loaded.rootId, loaded.timeline, {
-              slug: sceneId,
-              name: loaded.entry?.name ?? sceneId,
-            });
-            stored = getScene(sessionId) ?? getScene(sceneId);
-          }
-        } catch {
-          // Manifest didn't list the scene. Try the file directly — a
-          // composition compile run in a separate process can leave the
-          // scene FILE on disk even if the manifest update was racy. The
-          // Sampler / Flow paths are particularly susceptible because they
-          // batch-write N cell files. Reading the file directly bypasses
-          // the manifest read entirely; if it deserializes cleanly, hand
-          // it to storeScene which adds the entry on its own.
-          try {
-            const fs2 = await import('node:fs');
-            const path2 = await import('node:path');
-            const projectDir = getWorkspaceRoot();
-            const directPath = path2.join(projectDir, '.reframe', 'scenes', `${sceneId}.scene.json`);
-            if (fs2.existsSync(directPath)) {
-              const { deserializeScene } = await import('../../core/src/serialize.js');
-              const raw = JSON.parse(fs2.readFileSync(directPath, 'utf-8'));
-              const { graph, rootId } = deserializeScene(raw);
-              if (graph && rootId) {
-                storeScene(graph, rootId, undefined, { slug: sceneId, name: raw.root?.name ?? sceneId });
-                stored = getScene(sceneId);
-              }
-            }
-          } catch (err2) {
-            console.warn(`[preview] disk fallback (direct file) failed for "${sceneId}"`, err2);
-          }
-        }
-      }
+      // Disk fallback handled by resolveSessionId — covers both the
+      // manifest-listed and direct-file paths. Cross-process state
+      // divergence between the HTTP sidecar and MCP stdio resolves
+      // cleanly here. Falls through to 404 only if the scene file
+      // genuinely doesn't exist.
+      const sessionId = resolveSessionId(sceneId);
+      const stored = sessionId ? getScene(sessionId) : undefined;
       if (!stored) {
         res.writeHead(404, { 'Content-Type': 'text/html' });
         res.end('<h1>Scene not found</h1>');

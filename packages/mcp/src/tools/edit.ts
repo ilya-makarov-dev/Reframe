@@ -2566,6 +2566,23 @@ export async function handleEdit(input: {
     try { autoSaveScene(sceneId); } catch { /* best-effort */ }
   }
 
+  // Skeleton thumbnail cache invalidation (#6 Week 4) — delete cached
+  // .skeleton.svg per touched scene so the next /cover/<id>.svg request
+  // regenerates from the updated scene state. Lazy regen on next request
+  // keeps the edit op response fast; the user pays generation latency
+  // only when they navigate to a surface that actually shows the cover.
+  try {
+    const projectDir = getWorkspaceRoot();
+    if (projectDir) {
+      const { invalidateSkeleton } = await import('../../../core/src/project/skeleton-cache.js');
+      for (const sceneId of touchedScenes) {
+        const stored = getScene(sceneId);
+        const slug = stored?.slug ?? sceneId;
+        invalidateSkeleton(projectDir, slug);
+      }
+    }
+  } catch { /* best-effort */ }
+
   // ── Build response with context ────────────────────────────
   const lines: string[] = [];
 

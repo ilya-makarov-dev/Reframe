@@ -1526,6 +1526,10 @@ export function parseDesignMd(markdown: string): DesignSystem {
   const depthSection = findSection(sections, 'depth', 'elevation', 'shadow');
   const responsiveSection = findSection(sections, 'responsive', 'breakpoint', 'adaptive');
   const rulesSection = findSection(sections, 'rules', 'do', 'don');
+  // Week 5 #21: ## Brand Mark section enumerates logo SVG variants on disk.
+  const brandMarkSection = findSection(sections, 'brand mark', 'logo', 'mark');
+  // Week 5 #4: ## Brand Vocabulary — power words + industry terms + style.
+  const vocabularySection = findSection(sections, 'brand vocabulary', 'vocabulary', 'voice');
 
   // Parse layout, then overlay radius if separate section exists
   const parsedLayout = parseLayout(layoutSection);
@@ -1598,6 +1602,150 @@ export function parseDesignMd(markdown: string): DesignSystem {
     layout: parsedLayout,
     responsive: parseResponsive(responsiveSection),
     depth: parseDepth(depthSection),
+    brandMark: parseBrandMark(brandMarkSection),
+    vocabulary: parseBrandVocabulary(vocabularySection),
     rawMarkdown: markdown,
   };
+}
+
+/**
+ * Parse the `## Brand Vocabulary` section (Week 5 #4).
+ *
+ * Recognized format (matches the brief):
+ *
+ *   ## Brand Vocabulary
+ *
+ *   Power words (auto-emphasized at import):
+ *   - Built for, Built to
+ *   - Powering, Powers
+ *   - Scale, Scales
+ *
+ *   Industry terms (recognized, not styled):
+ *   - developers, engineers, founders
+ *   - infrastructure, platform
+ *
+ *   Style:
+ *     weight: 600
+ *     color: accent
+ *     decoration: none
+ *
+ * Returns undefined when section is absent OR when both word lists are
+ * empty — vocabulary is opt-in per brand, not an error to omit.
+ *
+ * Comma-splitting on bullet items is intentional: brands often pack
+ * multiple variants of one phrase on one line ("Built for, Built to,
+ * Built with") to keep the section scannable.
+ */
+function parseBrandVocabulary(
+  section: Section | undefined,
+): import('./types.js').BrandVocabulary | undefined {
+  if (!section) return undefined;
+  const body = section.body;
+
+  // Subsection header conventions: "Power words" / "Industry terms" /
+  // "Style". Carve the body into three buckets by header line.
+  const subsections = splitVocabSubsections(body);
+
+  const powerWords = extractWordList(subsections.power);
+  const industryTerms = extractWordList(subsections.industry);
+  const style = extractVocabStyle(subsections.style);
+
+  if (powerWords.length === 0 && industryTerms.length === 0) return undefined;
+
+  return {
+    powerWords,
+    industryTerms,
+    style,
+  };
+}
+
+function splitVocabSubsections(body: string): { power: string; industry: string; style: string } {
+  const lines = body.split(/\r?\n/);
+  let bucket: 'power' | 'industry' | 'style' | null = null;
+  const out = { power: '', industry: '', style: '' };
+  for (const line of lines) {
+    const trimmed = line.trim().toLowerCase();
+    if (/power\s*words?/i.test(trimmed)) { bucket = 'power'; continue; }
+    if (/industry\s*terms?/i.test(trimmed)) { bucket = 'industry'; continue; }
+    if (/^style\s*[:]?\s*$/i.test(trimmed)) { bucket = 'style'; continue; }
+    if (bucket) out[bucket] += line + '\n';
+  }
+  return out;
+}
+
+function extractWordList(text: string): string[] {
+  if (!text) return [];
+  const words: string[] = [];
+  // Bullet items: `- A, B, C` or `* A`. Split each bullet body on commas.
+  const bulletRe = /^\s*[-*]\s*(.+)$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = bulletRe.exec(text)) !== null) {
+    const items = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+    for (const item of items) {
+      // Strip trailing punctuation that's clearly not part of the phrase.
+      const cleaned = item.replace(/[.;:]+$/, '').trim();
+      if (cleaned && !words.includes(cleaned)) words.push(cleaned);
+    }
+  }
+  return words;
+}
+
+function extractVocabStyle(text: string): import('./types.js').BrandVocabulary['style'] {
+  const defaults = { weight: 600, color: 'accent', decoration: 'none' as const };
+  if (!text) return defaults;
+  const weightMatch = text.match(/weight\s*:\s*(\d{3})/i);
+  const colorMatch = text.match(/color\s*:\s*([A-Za-z0-9_#-]+)/i);
+  const decorationMatch = text.match(/decoration\s*:\s*(none|underline|highlight)/i);
+  return {
+    weight: weightMatch ? parseInt(weightMatch[1], 10) : defaults.weight,
+    color: colorMatch ? colorMatch[1] : defaults.color,
+    decoration: (decorationMatch ? decorationMatch[1].toLowerCase() : defaults.decoration) as 'none' | 'underline' | 'highlight',
+  };
+}
+
+/**
+ * Parse the `## Brand Mark` section. Looks for `<variant>: marks/<file>.svg`
+ * lines and a `Default: <variant>` line. Returns undefined when the section
+ * is absent or carries no variant entries — brand-mark is opt-in per brand,
+ * not an error to omit.
+ *
+ * Format the parser recognizes (matches what reframe_design extraction
+ * emits when marks are auto-detected):
+ *
+ *   ## Brand Mark
+ *
+ *   Variants available:
+ *   - primary: marks/primary.svg
+ *   - mono:    marks/mono.svg
+ *
+ *   Default: primary
+ */
+function parseBrandMark(
+  section: Section | undefined,
+): import('./types.js').DesignSystemBrandMark | undefined {
+  if (!section) return undefined;
+  const body = section.body;
+  // Match `- <variant>: marks/<file>.svg` (path optional after the colon).
+  // The variant id must be a bare word, the path must end in .svg.
+  const variantRe = /^\s*[-*]\s*([A-Za-z0-9_-]+)\s*:\s*([^\s]+\.svg)\s*$/gim;
+  const paths: Record<string, string> = {};
+  const variants: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = variantRe.exec(body)) !== null) {
+    const variant = m[1].toLowerCase();
+    if (!paths[variant]) {
+      paths[variant] = m[2];
+      variants.push(variant);
+    }
+  }
+  if (variants.length === 0) return undefined;
+  // Default: explicit `Default: <variant>` line, else `primary` if present,
+  // else first variant in source order.
+  const defaultMatch = body.match(/^\s*default\s*:\s*([A-Za-z0-9_-]+)\s*$/im);
+  const explicit = defaultMatch?.[1]?.toLowerCase();
+  const defaultVariant =
+    explicit && variants.includes(explicit) ? explicit
+    : variants.includes('primary') ? 'primary'
+    : variants[0];
+  return { variants, defaultVariant, paths };
 }
