@@ -25,20 +25,30 @@ import { windImpl } from './wind.js';
 import { snowImpl } from './snow.js';
 import { electricImpl } from './electric.js';
 import { goldImpl } from './gold.js';
+import { shaderGradientFlowImpl } from './shader-gradient-flow.js';
+import { shaderNoiseFieldImpl } from './shader-noise-field.js';
+import { shaderAuroraImpl } from './shader-aurora.js';
 import { OVERLAY_UTILS_BROWSER_SOURCE } from './utils.js';
+import { VERTEX_QUAD_BROWSER_SOURCE } from './webgl/vertex-quad.glsl.js';
+import { SHADER_HELPERS_BROWSER_SOURCE } from './webgl/shader-helpers.js';
+import { SHADER_FALLBACK_BROWSER_SOURCE } from './webgl/shader-fallback.js';
 
 export const LAYER_REGISTRY: Record<OverlayLayerType, LayerImpl> = {
-  // Phase 0 (#5) — ambient atmospherics
+  // Phase 0 (#5) — ambient atmospherics (canvas 2D)
   'noise-grain': noiseGrainImpl,
   'gradient-pulse': gradientPulseImpl,
   'particle-dust': particleDustImpl,
-  // T2 (#10) — physics-driven effects
+  // T2 (#10) — physics-driven effects (canvas 2D)
   'fire': fireImpl,
   'smoke': smokeImpl,
   'wind': windImpl,
   'snow': snowImpl,
   'electric': electricImpl,
   'gold': goldImpl,
+  // T2 (#28) — GPU shader layers (WebGL fragment shaders)
+  'shader-gradient-flow': shaderGradientFlowImpl,
+  'shader-noise-field': shaderNoiseFieldImpl,
+  'shader-aurora': shaderAuroraImpl,
 };
 
 /**
@@ -63,15 +73,27 @@ export function isKnownLayerType(t: string): t is OverlayLayerType {
 
 /**
  * Concatenated browser source for the entire registry — utils first,
- * then each layer's factory_<type>(). Used by:
+ * then WebGL helpers (#28), then each layer's factory_<type>(). Used by:
  *   - overlay-renderer.ts (eval'd at module load → factories table)
  *   - html.ts overlay export (inlined into <script> block in exported file)
  *
  * The factory naming convention `factory_<type>` (with `-` → `_` in the
  * name) lets the consumer build a dispatch table without parsing JS.
+ *
+ * WebGL helper bundle adds ~1.5 KB to ALL_LAYERS_BROWSER_SOURCE
+ * regardless of whether shader layers are used in a given overlay.
+ * Conditional injection (only ship helpers when a shader type appears)
+ * = future opt; trivial vs the determinism-of-output benefit of one
+ * source artifact across all overlay exports.
  */
 export const ALL_LAYERS_BROWSER_SOURCE: string =
   OVERLAY_UTILS_BROWSER_SOURCE +
+  '\n' +
+  VERTEX_QUAD_BROWSER_SOURCE +
+  '\n' +
+  SHADER_HELPERS_BROWSER_SOURCE +
+  '\n' +
+  SHADER_FALLBACK_BROWSER_SOURCE +
   '\n' +
   Object.values(LAYER_REGISTRY).map(l => l.BROWSER_SOURCE).join('\n');
 

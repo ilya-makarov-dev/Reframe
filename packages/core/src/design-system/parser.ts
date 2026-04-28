@@ -37,6 +37,7 @@ import type {
   FontFeature,
   ShadowLayer,
   ColorRole,
+  TweakDef,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -1530,6 +1531,9 @@ export function parseDesignMd(markdown: string): DesignSystem {
   const brandMarkSection = findSection(sections, 'brand mark', 'logo', 'mark');
   // Week 5 #4: ## Brand Vocabulary — power words + industry terms + style.
   const vocabularySection = findSection(sections, 'brand vocabulary', 'vocabulary', 'voice');
+  // T2 #26: ## Tweak Surface — tokens marked end-user-customizable
+  // for bundle exports with tweakable=true.
+  const tweakSurfaceSection = findSection(sections, 'tweak surface', 'tweak', 'tweakable');
 
   // Parse layout, then overlay radius if separate section exists
   const parsedLayout = parseLayout(layoutSection);
@@ -1604,8 +1608,110 @@ export function parseDesignMd(markdown: string): DesignSystem {
     depth: parseDepth(depthSection),
     brandMark: parseBrandMark(brandMarkSection),
     vocabulary: parseBrandVocabulary(vocabularySection),
+    tweakSurface: parseTweakSurface(tweakSurfaceSection),
     rawMarkdown: markdown,
   };
+}
+
+/**
+ * Parse the `## Tweak Surface` section (T2 #26).
+ *
+ * Recognized format:
+ *
+ *   ## Tweak Surface
+ *
+ *   Tweakable tokens (end-user customizable in bundle exports):
+ *
+ *   - color/primary
+ *     type: color
+ *     label: Primary brand color
+ *   - radius/medium
+ *     type: range
+ *     min: 0
+ *     max: 24
+ *     step: 2
+ *     unit: px
+ *     label: Border radius
+ *
+ * Each `- <tokenPath>` opens a TweakDef. Following indented `key: value`
+ * lines populate fields until the next `- ` or end of section. Unknown
+ * keys silently ignored — schema is intentionally additive.
+ *
+ * Returns undefined when section is absent or contains no parseable
+ * entries (graceful: bundle exporter then skips tweak machinery).
+ */
+function parseTweakSurface(section: Section | undefined): TweakDef[] | undefined {
+  if (!section) return undefined;
+  const body = section.body;
+  // Lines starting with `- ` open a new tweak def. We collect the
+  // following indented `key: value` lines as field assignments.
+  const lines = body.split('\n');
+  const defs: TweakDef[] = [];
+  let current: { tokenPath: string; type?: string; label?: string; min?: number; max?: number; step?: number; unit?: string } | null = null;
+
+  function commit(): void {
+    if (!current) return;
+    // Validate minimum required fields. Unknown type → skip with warn.
+    const type = current.type;
+    if (type !== 'color' && type !== 'range') {
+      console.warn(`[design-system] tweak surface entry "${current.tokenPath}" has invalid type "${type}", skipping (must be 'color' or 'range')`);
+      current = null;
+      return;
+    }
+    if (type === 'range' && (current.min === undefined || current.max === undefined)) {
+      console.warn(`[design-system] tweak surface entry "${current.tokenPath}" type=range missing min/max, skipping`);
+      current = null;
+      return;
+    }
+    defs.push({
+      tokenPath: current.tokenPath,
+      type,
+      label: current.label ?? current.tokenPath,
+      ...(type === 'range' ? {
+        min: current.min,
+        max: current.max,
+        step: current.step ?? 1,
+        unit: current.unit ?? '',
+      } : {}),
+    });
+    current = null;
+  }
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    // New entry — commit previous, open new.
+    const newEntry = line.match(/^-\s+([a-zA-Z][a-zA-Z0-9_-]*\/[a-zA-Z][a-zA-Z0-9_-]*)\s*$/);
+    if (newEntry) {
+      commit();
+      current = { tokenPath: newEntry[1] };
+      continue;
+    }
+    // Field line `key: value` (only inside a current entry).
+    if (!current) continue;
+    const fieldMatch = line.match(/^([a-zA-Z]+)\s*:\s*(.+?)\s*$/);
+    if (!fieldMatch) continue;
+    const key = fieldMatch[1].toLowerCase();
+    const value = fieldMatch[2];
+    if (key === 'type') current.type = value.toLowerCase();
+    else if (key === 'label') current.label = value;
+    else if (key === 'min') {
+      const n = parseFloat(value);
+      if (Number.isFinite(n)) current.min = n;
+    } else if (key === 'max') {
+      const n = parseFloat(value);
+      if (Number.isFinite(n)) current.max = n;
+    } else if (key === 'step') {
+      const n = parseFloat(value);
+      if (Number.isFinite(n)) current.step = n;
+    } else if (key === 'unit') {
+      current.unit = value;
+    }
+    // Unknown keys silently dropped — schema is additive.
+  }
+  commit();
+
+  return defs.length > 0 ? defs : undefined;
 }
 
 /**

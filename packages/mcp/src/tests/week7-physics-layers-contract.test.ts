@@ -85,7 +85,10 @@ const DIFFUSE_TYPES = new Set(['smoke', 'snow', 'wind']);
 // ─── TEST 1: registry shape ──
 async function testRegistryShape(): Promise<void> {
   const keys = Object.keys(LAYER_REGISTRY);
-  assert(keys.length === 9, `registry: 9 entries (got ${keys.length})`);
+  // Registry size grows as new layer categories land. Physics adds 6
+  // entries on top of #5's 3; #28 shader layers add 3 more. Assert the
+  // 6 physics entries specifically, not the registry size.
+  assert(keys.length >= 9, `registry: at least 9 entries (got ${keys.length})`);
   for (const t of PHYSICS_TYPES) {
     const impl = LAYER_REGISTRY[t];
     assert(typeof impl?.validate === 'function', `registry: ${t} has validate()`);

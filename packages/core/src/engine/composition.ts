@@ -129,10 +129,12 @@ export interface FlowState {
 // drifts between runs, breaks visual diff testing.
 
 export type OverlayLayerType =
-  // Phase 0 (#5): ambient atmospherics
+  // Phase 0 (#5): ambient atmospherics — canvas 2D
   | 'noise-grain' | 'gradient-pulse' | 'particle-dust'
-  // T2 (#10): physics-driven effects
-  | 'fire' | 'smoke' | 'wind' | 'snow' | 'electric' | 'gold';
+  // T2 (#10): physics-driven effects — canvas 2D
+  | 'fire' | 'smoke' | 'wind' | 'snow' | 'electric' | 'gold'
+  // T2 (#28): GPU shader layers — WebGL fragment shaders
+  | 'shader-gradient-flow' | 'shader-noise-field' | 'shader-aurora';
 export type OverlayBlendMode = 'source-over' | 'lighter' | 'screen' | 'multiply';
 
 export interface OverlayLayer {

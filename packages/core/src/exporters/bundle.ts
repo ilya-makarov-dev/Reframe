@@ -70,6 +70,15 @@ import {
 } from './inline-fonts.js';
 import { inlineImages } from './inline-images.js';
 import { ANNOTATION_FONT } from '../engine/annotation.js';
+import type { DesignSystem, TweakDef } from '../design-system/types.js';
+import {
+  generatePanelHtml,
+  generatePanelCss,
+  generateRootVarsCss,
+  varNameForToken,
+  type InitialValues,
+} from './tweak-panel.js';
+import { TWEAK_RUNTIME_SOURCE } from './tweak-runtime.js';
 
 // ─── Public API ──────────────────────────────────────────────
 
@@ -91,6 +100,29 @@ export interface BundleOptions {
    * Required when scenes reference brand marks; harmless when they don't.
    */
   projectDir?: string;
+  /**
+   * T2 #26 — emit an end-user tweak surface (sliders + color pickers
+   * persisted via localStorage). Default false. When true:
+   *   - reads `designSystem.tweakSurface` for the list of tweakable tokens
+   *   - resolves each token's initial value from `designSystem`
+   *   - emits a :root CSS var block with those initials
+   *   - swaps inline style values with `var(...)` references where the
+   *     literal value matches a tweakable token's initial value
+   *   - injects floating panel HTML + scoped CSS + runtime IIFE
+   *
+   * Backward compat strict: tweakable=false (default) → byte-identical
+   * to pre-#26 baseline. Tweakable=true on a brand without a `## Tweak
+   * Surface` section → graceful no-op (warning logged, output identical
+   * to non-tweakable bundle).
+   */
+  tweakable?: boolean;
+  /**
+   * Resolved DesignSystem to read tweakSurface defs + initial token
+   * values from. Required when tweakable=true; ignored otherwise.
+   * Caller (export.ts handler) loads + parses the brand DESIGN.md before
+   * invoking the bundle exporter.
+   */
+  designSystem?: DesignSystem;
 }
 
 export interface BundleResult {
@@ -156,11 +188,189 @@ export async function exportSceneGraphToBundle(
     warnings.push(...result.warnings);
   }
 
+  // Step 5 (T2 #26): tweakable surface — value→var substitution +
+  // panel injection + runtime IIFE. Strictly opt-in; tweakable=false
+  // (default) leaves output byte-identical to pre-#26 baseline.
+  if (options.tweakable) {
+    const result = applyTweakableSurface(html, options.designSystem);
+    html = result.html;
+    if (result.warning) warnings.push(result.warning);
+  }
+
   return {
     html,
     warnings,
     inlinedAssets: { fonts: fontsInlined, images: imagesInlined },
   };
+}
+
+// ─── Tweak surface integration (T2 #26) ──────────────────────
+
+/**
+ * Resolve the initial value for a tokenPath against a DesignSystem.
+ *
+ * Phase 0 supported paths:
+ *   color/<role>     → DesignSystem.colors.semantic[<role>]?.value (hex)
+ *   radius/<role>    → DesignSystem.layout.borderRadiusScale (heuristic by role label)
+ *   spacing/scale    → 1 (multiplier semantics — designer-defined)
+ *
+ * Returns `undefined` for paths the resolver can't map. Caller skips
+ * those defs (with a warning), so a minor schema mismatch doesn't kill
+ * the whole tweak panel.
+ */
+function resolveInitialValue(
+  tokenPath: string,
+  ds: DesignSystem | undefined,
+): string | undefined {
+  if (!ds) return undefined;
+  const [domain, role] = tokenPath.split('/');
+  if (!domain || !role) return undefined;
+
+  if (domain === 'color') {
+    const semantic = (ds.colors as any)?.semantic;
+    if (semantic && semantic[role]?.value) {
+      return String(semantic[role].value);
+    }
+    // Fallback — try `colors[role]` as a flat lookup.
+    const flat = (ds.colors as any)?.[role];
+    if (typeof flat === 'string') return flat;
+    return undefined;
+  }
+  if (domain === 'radius') {
+    // Resolve from borderRadiusScale by heuristic role mapping. Phase 0
+    // picks the lower-median: for [4,8,12,16] it returns 8 (not 12),
+    // matching designer convention where "medium" sits at the typical
+    // card / button radius — usually the second-smallest entry of a
+    // 4-step scale. Pill-radius outliers (>=200) filtered before pick.
+    const scale = ds.layout?.borderRadiusScale;
+    if (Array.isArray(scale) && scale.length > 0) {
+      const sorted = [...scale].sort((a, b) => a - b);
+      const usable = sorted.filter((n) => n < 200);
+      const pool = usable.length > 0 ? usable : sorted;
+      const mid = pool[Math.floor((pool.length - 1) / 2)];
+      return String(mid);
+    }
+    return undefined;
+  }
+  if (domain === 'spacing' && role === 'scale') {
+    // Multiplier semantics — 1.0 is "no change". Designer-defined.
+    return '1';
+  }
+  return undefined;
+}
+
+interface TweakApplyResult {
+  html: string;
+  warning?: string;
+}
+
+function applyTweakableSurface(html: string, ds: DesignSystem | undefined): TweakApplyResult {
+  const defs = ds?.tweakSurface;
+  if (!defs || defs.length === 0) {
+    return {
+      html,
+      warning:
+        'tweakable=true but no `## Tweak Surface` section in DESIGN.md (or it parsed empty); ' +
+        'bundle emitted without tweak panel — output identical to non-tweakable build.',
+    };
+  }
+
+  // Resolve initial values per def. Drop defs we can't resolve (warn,
+  // continue with the rest) — partial panel is more useful than no panel.
+  const initial: InitialValues = {};
+  const resolved: TweakDef[] = [];
+  const skipped: string[] = [];
+  for (const def of defs) {
+    const value = resolveInitialValue(def.tokenPath, ds);
+    if (value === undefined) {
+      skipped.push(def.tokenPath);
+      continue;
+    }
+    initial[def.tokenPath] = value;
+    resolved.push(def);
+  }
+  if (resolved.length === 0) {
+    return {
+      html,
+      warning:
+        `tweakable=true: every tweak surface entry failed to resolve an initial value (${skipped.join(', ')}); ` +
+        'bundle emitted without tweak panel.',
+    };
+  }
+
+  // Build value-to-var substitution map. Each tweakable token's initial
+  // value becomes the search key; var() reference is the replacement.
+  // Phase 0 substitution is literal-string match inside style="..." attrs
+  // and embedded <style> blocks.
+  const rootCss = generateRootVarsCss(resolved, initial);
+  const panelCss = generatePanelCss();
+  const panelHtml = generatePanelHtml(resolved, initial);
+
+  // Substitution — value-based literal replacement. We search inline
+  // style attribute values + <style> block contents. Skipping the
+  // <head> font links + base CSS keeps font URLs and antialiasing
+  // settings untouched even if a token value happens to overlap.
+  let mutated = html;
+  for (const def of resolved) {
+    const initialValue = initial[def.tokenPath];
+    const varName = varNameForToken(def.tokenPath);
+    const unit = def.type === 'range' ? (def.unit ?? '') : '';
+    if (def.type === 'color' && /^#[0-9a-fA-F]{3,8}$/.test(initialValue)) {
+      // Match the exact hex (case-insensitive, word-bounded by non-hex).
+      // Use both lowercase and uppercase forms so designer-written
+      // styles in either case get covered.
+      const hexLower = initialValue.toLowerCase();
+      const hexUpper = initialValue.toUpperCase();
+      mutated = swapValueOccurrences(mutated, hexLower, `var(${varName}, ${hexLower})`);
+      if (hexUpper !== hexLower) {
+        mutated = swapValueOccurrences(mutated, hexUpper, `var(${varName}, ${hexUpper})`);
+      }
+    } else if (def.type === 'range') {
+      const literal = `${initialValue}${unit}`;
+      // Only substitute when the literal is non-trivial (not '1' / '0' / '0px'
+      // alone — those would clobber unrelated values). Phase 0 heuristic:
+      // require at least 2 chars OR a non-zero unit suffix.
+      if (literal.length >= 2 && literal !== '0px' && literal !== '0') {
+        mutated = swapValueOccurrences(mutated, literal, `var(${varName}, ${literal})`);
+      }
+    }
+  }
+
+  // Inject :root vars + panel CSS into the existing <style> block,
+  // panel HTML + runtime <script> before </body>.
+  // The base style is between the FIRST `<style>` after `<head>` and
+  // its closing `</style>`. Append our blocks to that style content.
+  const styleClose = mutated.indexOf('</style>');
+  if (styleClose !== -1) {
+    const insert = `\n${rootCss}${panelCss}`;
+    mutated = mutated.slice(0, styleClose) + insert + mutated.slice(styleClose);
+  }
+  // Inject panel HTML + runtime IIFE before </body>. Both go together
+  // so the runtime always finds the panel in the DOM.
+  const bodyClose = mutated.lastIndexOf('</body>');
+  if (bodyClose !== -1) {
+    const insert = `\n${panelHtml}\n<script>${TWEAK_RUNTIME_SOURCE}</script>\n`;
+    mutated = mutated.slice(0, bodyClose) + insert + mutated.slice(bodyClose);
+  }
+
+  const warning = skipped.length > 0
+    ? `tweakable: ${skipped.length} tweak surface entr${skipped.length === 1 ? 'y' : 'ies'} failed to resolve initial value (${skipped.join(', ')}) — those controls omitted from panel.`
+    : undefined;
+  return { html: mutated, warning };
+}
+
+/**
+ * Replace every occurrence of `needle` with `replacement` in `haystack`.
+ * Plain string replace (no regex) — needle treated as literal. Used for
+ * value substitution in tweakable bundles; intentionally simple — Phase 0
+ * takes the corpus risk of accidental match (e.g. a hex color string
+ * appearing as a non-style coincidence) in exchange for not building a
+ * full CSS parser. Future Variant 2 schema-driven controls will replace
+ * this with structural substitution against parsed style attrs.
+ */
+function swapValueOccurrences(haystack: string, needle: string, replacement: string): string {
+  // Avoid ReDoS / regex escaping by using split+join — O(n) on string length.
+  return haystack.split(needle).join(replacement);
 }
 
 // ─── Variant walker ──────────────────────────────────────────

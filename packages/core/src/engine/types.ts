@@ -523,6 +523,25 @@ export interface NodeMeta {
    */
   interactive?: INodeInteractive;
 
+  // ── Text entrance animation (T2 #32) ──────────────────────
+  /**
+   * Per-text-node entrance animation triggered when the element scrolls
+   * into viewport (IntersectionObserver). Same metadata-on-meta pattern
+   * as `interactive` — auto round-trips via the existing meta serializer.
+   *
+   * Four types cover the canonical text-entrance vocabulary:
+   *   streaming    — characters fade in sequentially (default 15ms stagger)
+   *   typing       — characters reveal char-by-char with steps(1) easing
+   *                  + blinking caret pseudo-element (50ms stagger)
+   *   word-reveal  — words fade-translate up sequentially (80ms stagger)
+   *   fade-up      — whole text fades + translates up as one block
+   *
+   * Splitting (per-char / per-word) happens at runtime mount, not at
+   * import — keeps source HTML clean + designer-editable without
+   * pre-split spans bloating the markup.
+   */
+  entrance?: INodeEntrance;
+
   // ── Project-as-INode metadata ──────────────────────────────
   // Used when the project manifest itself is stored as a SceneGraph.
   // Scene-ref nodes in the project graph carry these fields.
@@ -579,6 +598,47 @@ export type InteractiveType = 'mouse-tilt' | 'mouse-glow' | 'mouse-tilt-glow';
 export interface INodeInteractive {
   type: InteractiveType;
   config: InteractiveConfig;
+}
+
+/**
+ * Text entrance animation (T2 #32) — declarative metadata, runtime
+ * splits + animates on viewport entry.
+ *
+ * Caps (enforced by runtime, not validate): per-char types fall back
+ * to fade-up when text exceeds 200 chars; word-reveal falls back at
+ * >50 words. Cap exists to protect frame budget — N spans × M frames
+ * each starts to thrash compositing past those thresholds.
+ *
+ * Unicode notes (Phase 0):
+ *   - splitting uses Array.from(text) so surrogate-pair codepoints
+ *     (most emoji, CJK extension blocks) iterate as one unit instead
+ *     of fragmenting into 2 chars
+ *   - combining marks (e.g. Devanagari conjuncts, accented chars in
+ *     decomposed normalization) still split at codepoint boundaries —
+ *     not grapheme cluster boundaries. Visible misalignment can occur
+ *     for those scripts. Future: Intl.Segmenter when its Safari
+ *     support stabilizes.
+ *   - RTL text: spans render LTR; explicit `dir="rtl"` on the parent
+ *     element doesn't reverse splitting order. Future signal.
+ */
+export type EntranceType = 'streaming' | 'typing' | 'word-reveal' | 'fade-up';
+
+export interface INodeEntrance {
+  type: EntranceType;
+  config: EntranceConfig;
+}
+
+export interface EntranceConfig {
+  /** Total animation duration ms (whole element). Default per-type. */
+  duration?: number;
+  /** Pre-trigger delay ms (added on top of viewport entry). Default 0. */
+  delay?: number;
+  /** Per-char or per-word stagger ms. Default per-type. Ignored for fade-up. */
+  stagger?: number;
+  /** CSS easing string. Default 'ease-out'. */
+  easing?: string;
+  /** Animate once and disconnect observer (default true) vs replay on each viewport re-entry. */
+  once?: boolean;
 }
 
 export interface InteractiveConfig {

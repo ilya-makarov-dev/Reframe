@@ -1816,17 +1816,22 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
 
   // Preserve raw data-* attrs (sans reframe internals) so exports can
   // round-trip e.g. analytics hooks, test-ids, or custom author metadata.
-  // Interactive attrs (data-reframe-interactive + data-reframe-{tilt,glow}-*)
-  // are EXTRACTED into meta.interactive separately — exporter re-emits
-  // them from the typed structure, not raw sourceData. This prevents
-  // double-emission and lets editors mutate config typed-ly.
+  // Typed metadata fields (interactive #27, entrance #32) are EXTRACTED
+  // separately — exporter re-emits them from the typed structure, not
+  // raw sourceData. Prevents double-emission and lets editors mutate
+  // config typed-ly.
   const data: Record<string, string> = {};
   const interactiveAttrs: Record<string, string> = {};
+  const entranceAttrs: Record<string, string> = {};
   for (const [k, v] of Object.entries(el.attrs)) {
     if (!k.startsWith('data-')) continue;
     if (k === 'data-reframe-idx' || k === 'data-reframe-import-wrap') continue;
     if (k === 'data-reframe-interactive' || k.startsWith('data-reframe-tilt-') || k.startsWith('data-reframe-glow-')) {
       interactiveAttrs[k] = v;
+      continue;
+    }
+    if (k === 'data-reframe-entrance' || k.startsWith('data-reframe-entrance-')) {
+      entranceAttrs[k] = v;
       continue;
     }
     data[k] = v;
@@ -1837,6 +1842,12 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
   if (interactiveAttrs['data-reframe-interactive']) {
     const interactive = parseInteractiveAttrs(interactiveAttrs);
     if (interactive) meta.interactive = interactive;
+  }
+
+  // Build the typed entrance metadata if data-reframe-entrance is set.
+  if (entranceAttrs['data-reframe-entrance']) {
+    const entrance = parseEntranceAttrs(entranceAttrs);
+    if (entrance) meta.entrance = entrance;
   }
 
   return meta;
@@ -1882,6 +1893,52 @@ function parseInteractiveAttrs(
   if (glowRadius !== undefined) config.glowRadius = glowRadius;
   const glowColor = attrs['data-reframe-glow-color'];
   if (glowColor !== undefined) config.glowColor = glowColor;
+
+  return { type, config };
+}
+
+/**
+ * Parse data-reframe-entrance attributes into typed INodeEntrance.
+ * Returns undefined when type is unknown (skipped, warning logged).
+ *
+ * Same tolerance posture as parseInteractiveAttrs: bad number → fall
+ * back to default + warn, not throw. Designer iterates fast; one
+ * malformed attr shouldn't block import.
+ */
+function parseEntranceAttrs(
+  attrs: Record<string, string>,
+): { type: 'streaming' | 'typing' | 'word-reveal' | 'fade-up'; config: Record<string, number | string | boolean> } | undefined {
+  const rawType = attrs['data-reframe-entrance'];
+  const KNOWN = new Set(['streaming', 'typing', 'word-reveal', 'fade-up']);
+  if (!KNOWN.has(rawType)) {
+    console.warn(`[html-import] data-reframe-entrance="${rawType}" — unknown type, ignoring (known: streaming, typing, word-reveal, fade-up)`);
+    return undefined;
+  }
+  const type = rawType as 'streaming' | 'typing' | 'word-reveal' | 'fade-up';
+  const config: Record<string, number | string | boolean> = {};
+
+  function asNumber(key: string): number | undefined {
+    if (attrs[key] === undefined) return undefined;
+    const n = Number(attrs[key]);
+    if (!Number.isFinite(n)) {
+      console.warn(`[html-import] ${key}="${attrs[key]}" — not a finite number, using default`);
+      return undefined;
+    }
+    return n;
+  }
+
+  const duration = asNumber('data-reframe-entrance-duration');
+  if (duration !== undefined) config.duration = duration;
+  const delay = asNumber('data-reframe-entrance-delay');
+  if (delay !== undefined) config.delay = delay;
+  const stagger = asNumber('data-reframe-entrance-stagger');
+  if (stagger !== undefined) config.stagger = stagger;
+  const easing = attrs['data-reframe-entrance-easing'];
+  if (easing !== undefined) config.easing = easing;
+  const onceRaw = attrs['data-reframe-entrance-once'];
+  if (onceRaw !== undefined) {
+    config.once = onceRaw === 'true' || onceRaw === '1' || onceRaw === '';
+  }
 
   return { type, config };
 }

@@ -15,6 +15,10 @@ import {
   MOUSE_REACTIVE_RUNTIME_SOURCE,
   MOUSE_REACTIVE_CSS,
 } from '../engine/interactive/mouse-reactive-runtime';
+import {
+  TEXT_ENTRANCE_RUNTIME_SOURCE,
+  entranceCssFor,
+} from '../engine/text-entrance/text-entrance-runtime';
 
 /**
  * Walk an INode subtree, return true if any node has `meta.interactive`
@@ -28,6 +32,20 @@ function treeHasInteractive(node: INode): boolean {
     if (treeHasInteractive(c)) return true;
   }
   return false;
+}
+
+/**
+ * Walk an INode subtree, collect the set of entrance.type values used.
+ * Same drive as treeHasInteractive but produces the subset spec for
+ * entranceCssFor() — only ship CSS for types actually present.
+ */
+function collectEntranceTypes(node: INode, into: Set<string>): void {
+  const e = (node as any).meta?.entrance;
+  if (e?.type) into.add(e.type);
+  for (const c of node.children ?? []) {
+    if (c.removed || c.visible === false) continue;
+    collectEntranceTypes(c, into);
+  }
 }
 
 // ─── Types ────────────────────────────────────────────────────
@@ -373,6 +391,17 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     ? `\n      <script dangerouslySetInnerHTML={{ __html: ${JSON.stringify(MOUSE_REACTIVE_RUNTIME_SOURCE)} }} />`
     : '';
 
+  // T2 #32 — text entrance runtime + subset CSS injection. Walk tree
+  // to collect entrance.type values; emit only the keyframes for types
+  // actually used. Runtime IIFE is one source regardless of which
+  // subset is active.
+  const entranceTypes = new Set<string>();
+  collectEntranceTypes(node, entranceTypes);
+  const entranceCss = entranceTypes.size > 0 ? entranceCssFor(entranceTypes) : '';
+  const entranceScriptJsx = entranceTypes.size > 0
+    ? `\n      <script dangerouslySetInnerHTML={{ __html: ${JSON.stringify(TEXT_ENTRANCE_RUNTIME_SOURCE)} }} />`
+    : '';
+
   // Build style tag for :root tokens + states + responsive + animations, if any.
   const rootBlock = phase3.rootVars.size > 0
     ? `:root { ${[...phase3.rootVars].map(([k, v]) => `${k}: ${v}`).join('; ')} }`
@@ -380,7 +409,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   const animationBlocks: string[] = [];
   if (timelineCss.keyframes) animationBlocks.push(timelineCss.keyframes);
   for (const rule of timelineCss.classRules.values()) animationBlocks.push(rule);
-  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss, interactiveCss].filter(Boolean);
+  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss, interactiveCss, entranceCss].filter(Boolean);
   const styleJsx = combinedStyles.length > 0
     ? `\n      <style>{\`\n        ${combinedStyles.join('\n        ')}\n      \`}</style>`
     : '';
@@ -395,6 +424,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     annotationJsx ? annotationJsx : '',
     styleJsx ? styleJsx : '',
     interactiveScriptJsx ? interactiveScriptJsx : '',
+    entranceScriptJsx ? entranceScriptJsx : '',
     `    </>`,
     `  );`,
     `};`,
@@ -863,7 +893,14 @@ function tagForNode(node: INode): { tag: string; attrs: string } {
   const interactiveAttrs = interactive
     ? ` data-reframe-interactive="${interactive.type}" data-reframe-interactive-config='${JSON.stringify(interactive.config).replace(/'/g, '&apos;')}'`
     : '';
-  const fin = (r: { tag: string; attrs: string }) => ({ tag: r.tag, attrs: r.attrs + interactiveAttrs });
+  // T2 #32 — text entrance metadata. Same shape rules as interactive.
+  const entrance = ((node as any).meta?.entrance as
+    | { type: string; config: Record<string, unknown> }
+    | undefined);
+  const entranceAttrs = entrance
+    ? ` data-reframe-entrance="${entrance.type}" data-reframe-entrance-config='${JSON.stringify(entrance.config).replace(/'/g, '&apos;')}'`
+    : '';
+  const fin = (r: { tag: string; attrs: string }) => ({ tag: r.tag, attrs: r.attrs + interactiveAttrs + entranceAttrs });
 
   // Interactive / semantic leaf tags first — they carry attributes too.
   if (role === 'link' || sourceTag === 'a') {
@@ -1017,12 +1054,13 @@ function renderNode(
     const textTag = semantic.tag && /^(h[1-6]|p|label|a|button|code|li|blockquote)$/.test(semantic.tag)
       ? semantic.tag
       : 'span';
-    // T2 #27: even when textTag falls back to 'span' (no semantic tag),
-    // preserve interactive data-* attrs so the runtime can attach. The
-    // pass-through happens via meta.interactive — exporter still emits
-    // the data-reframe-interactive-config blob it'd otherwise drop.
+    // T2 #27 / #32: even when textTag falls back to 'span' (no semantic
+    // tag), preserve interactive / entrance data-* attrs so the runtime
+    // can attach. The pass-through happens via meta.interactive +
+    // meta.entrance — exporter still emits config blobs it'd drop.
     const hasInteractive = !!(node as any).meta?.interactive;
-    const attrs = (textTag === semantic.tag || hasInteractive) ? semantic.attrs : '';
+    const hasEntrance = !!(node as any).meta?.entrance;
+    const attrs = (textTag === semantic.tag || hasInteractive || hasEntrance) ? semantic.attrs : '';
     if (text.includes('\n')) {
       const lines = text.split('\n');
       const content = lines.map((l, i) => i < lines.length - 1 ? `${l}<br />` : l).join(`\n${pad}  `);
@@ -1058,13 +1096,14 @@ function renderNode(
   }
 
   // Container / shape — pick a semantic tag when the importer recorded one.
-  // T2 #27: even when there's no semantic tag, propagate attrs that
-  // tagForNode appended for `meta.interactive` (data-reframe-interactive*).
-  // Without this, generic <div> interactive nodes lose their data-* attrs
-  // and the runtime can't see them.
+  // T2 #27 / #32: even when there's no semantic tag, propagate attrs that
+  // tagForNode appended for `meta.interactive` / `meta.entrance` so the
+  // runtime can find the element. Without this, generic <div> nodes
+  // carrying typed metadata would lose their data-* attrs.
   const containerTag = semantic.tag || 'div';
   const hasInteractive = !!(node as any).meta?.interactive;
-  const containerAttrs = (semantic.tag || hasInteractive) ? semantic.attrs : '';
+  const hasEntrance = !!(node as any).meta?.entrance;
+  const containerAttrs = (semantic.tag || hasInteractive || hasEntrance) ? semantic.attrs : '';
   const children = (node.children ?? []).filter(c => !c.removed && c.visible !== false);
 
   if (children.length === 0) {

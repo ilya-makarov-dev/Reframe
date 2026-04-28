@@ -243,8 +243,53 @@ export interface DesignSystem {
    */
   vocabulary?: BrandVocabulary;
 
+  /**
+   * Tweak surface (T2 #26) — token paths the brand author has marked
+   * end-user-customizable. Bundle export with `tweakable: true` reads
+   * this list, emits :root CSS vars for the listed paths, swaps inline
+   * style values with var() references, and injects a floating tweak
+   * panel + runtime IIFE that wires inputs to var updates +
+   * localStorage persistence.
+   *
+   * Section absent in DESIGN.md → undefined. Bundle exporter then ignores
+   * the `tweakable` option (graceful: no vars, no panel, warning logged).
+   */
+  tweakSurface?: TweakDef[];
+
   /** Raw markdown source (for debugging / re-export). */
   rawMarkdown?: string;
+}
+
+/**
+ * Single tweakable token declared under `## Tweak Surface` in DESIGN.md.
+ *
+ * Phase 0 supports two control types:
+ *   - `color` → `<input type="color">` rendered in panel; tokenPath value
+ *     stored as hex (#rrggbb). Substituted into scene styles wherever the
+ *     resolved initial color appears as a literal.
+ *   - `range` → `<input type="range">` with min/max/step/unit. Substituted
+ *     into scene styles wherever the resolved initial value appears with
+ *     matching unit.
+ *
+ * Future signals: enum (dropdown), boolean (toggle), text (free input),
+ * derived (computed-from-other-tokens). Reserved for Variant 2 schema-
+ * driven controls.
+ */
+export interface TweakDef {
+  /** Slash-separated path, e.g. 'color/primary', 'radius/medium', 'spacing/scale'. */
+  tokenPath: string;
+  /** Control type. Phase 0 supports 'color' | 'range' only. */
+  type: 'color' | 'range';
+  /** Human-readable label rendered above the input in the panel. */
+  label: string;
+  /** Range min (numeric). Required when `type: 'range'`. */
+  min?: number;
+  /** Range max (numeric). Required when `type: 'range'`. */
+  max?: number;
+  /** Range step (numeric). Default 1 when omitted on range types. */
+  step?: number;
+  /** Unit suffix appended at substitution time, e.g. 'px', 'x', '%', ''. */
+  unit?: string;
 }
 
 /**

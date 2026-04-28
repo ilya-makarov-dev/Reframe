@@ -24,6 +24,10 @@ import {
   MOUSE_REACTIVE_CSS,
 } from '../engine/interactive/mouse-reactive-runtime';
 import {
+  TEXT_ENTRANCE_RUNTIME_SOURCE,
+  entranceCssFor,
+} from '../engine/text-entrance/text-entrance-runtime';
+import {
   shouldRenderAsSvg,
   shouldRenderTextAsSvg,
   isIconLikeFrame,
@@ -300,6 +304,10 @@ export function exportToHtml(
   // injection per scene regardless of how many interactive nodes exist
   // (one document-level mousemove handler covers all of them).
   let sceneHasInteractive = false;
+  // T2 #32 — collects entrance.type values used in the scene. CSS for
+  // unused types is omitted (subset emission). Single runtime IIFE
+  // when the set is non-empty.
+  const sceneEntranceTypes = new Set<string>();
 
   function getClassName(): string {
     return `${prefix}${classCounter++}`;
@@ -552,6 +560,19 @@ export function exportToHtml(
       attrs.push(`data-reframe-interactive-config='${cfgStr.replace(/'/g, '&apos;')}'`);
     }
 
+    // T2 #32 — text entrance animation metadata. Same shape as
+    // interactive: data-reframe-entrance + JSON config blob. Runtime
+    // IIFE attaches IntersectionObserver per element, splits + animates
+    // on viewport entry. CSS keyframes for entrance.type emitted at
+    // scene level (subset of the 4 known types).
+    if (node.meta?.entrance) {
+      sceneEntranceTypes.add(node.meta.entrance.type);
+      const entrance = node.meta.entrance;
+      attrs.push(`data-reframe-entrance="${escapeHtml(entrance.type)}"`);
+      const cfgStr = JSON.stringify(entrance.config);
+      attrs.push(`data-reframe-entrance-config='${cfgStr.replace(/'/g, '&apos;')}'`);
+    }
+
     const attrStr = attrs.join(' ');
 
     // Text node
@@ -732,12 +753,23 @@ export function exportToHtml(
     ? `<script>${MOUSE_REACTIVE_RUNTIME_SOURCE}</script>`
     : '';
 
+  // T2 #32 — text entrance runtime + CSS injected when scene contains
+  // any node with meta.entrance. CSS is subset-only (just the keyframes
+  // for types actually used in the scene); runtime IIFE is the same
+  // single source regardless of which subset is active. Cap-fallback
+  // (>200 char / >50 word elements downgrade to fade-up) is handled
+  // entirely by the runtime — no exporter coordination needed.
+  const entranceCss = sceneEntranceTypes.size > 0 ? entranceCssFor(sceneEntranceTypes) : '';
+  const entranceScript = sceneEntranceTypes.size > 0
+    ? `<script>${TEXT_ENTRANCE_RUNTIME_SOURCE}</script>`
+    : '';
+
   if (!fullDoc) {
-    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles || interactiveCss) {
+    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles || interactiveCss || entranceCss) {
       const classBlock = useCssClasses ? generateCssBlock(classes) : '';
-      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}${interactiveCss}</style>\n${html}${annotationHtml}${interactiveScript}`;
+      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}</style>\n${html}${annotationHtml}${interactiveScript}${entranceScript}`;
     }
-    return `${html}${annotationHtml}${interactiveScript}`;
+    return `${html}${annotationHtml}${interactiveScript}${entranceScript}`;
   }
 
   // Full document with production-quality base styles
@@ -767,7 +799,7 @@ export function exportToHtml(
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility;${rootBgForBody(root, graph)} }
     body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root, graph)} }
     a { color: inherit; text-decoration: none; }
-    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}${interactiveCss}
+    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}
   </style>${css}
   ${graph.annotations.length > 0 ? ANNOTATION_FONT_LINK : ''}
 </head>
@@ -775,6 +807,7 @@ export function exportToHtml(
 ${indent(html, 2)}
 ${indent(annotationHtml, 2)}
 ${interactiveScript ? indent(interactiveScript, 2) : ''}
+${entranceScript ? indent(entranceScript, 2) : ''}
 </body>
 </html>`;
 }

@@ -6,7 +6,7 @@
  */
 
 import { z } from 'zod';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import { join, dirname, sep } from 'path';
 import { exportToHtml } from '../../../core/src/exporters/html.js';
 import { exportToReact, exportToReactTree } from '../../../core/src/exporters/react.js';
@@ -118,6 +118,11 @@ export const exportInputSchema = {
   ),
   videoFps: z.number().optional().default(30).describe('For format="video" with renderVideo: frames per second. Default 30.'),
   videoQuality: z.enum(['draft', 'standard', 'high']).optional().default('standard').describe('For format="video" with renderVideo: encoder quality preset. Default "standard".'),
+
+  // Bundle options (T2 #26)
+  tweakable: z.boolean().optional().default(false).describe(
+    'For format="bundle" only: emit an end-user tweak surface (sliders + color pickers persisted via localStorage) for tokens listed under `## Tweak Surface` in the brand DESIGN.md. Default false — bundle output stays byte-identical to non-tweakable build. Brands without a tweak surface section are no-op (warning logged).',
+  ),
 };
 
 // ─── Timeline builder ─────────────────────────────────────────
@@ -178,6 +183,7 @@ export async function handleExport(input: {
   renderVideo?: boolean;
   videoFps?: number;
   videoQuality?: 'draft' | 'standard' | 'high';
+  tweakable?: boolean;
 }) {
   const { format, sceneId } = input;
 
@@ -289,8 +295,34 @@ export async function handleExport(input: {
         // URIs. Foundation for #20 stateful prototype + #26 always-on
         // tweaks. Async because the inliners issue network fetches.
         const { exportSceneGraphToBundle } = await import('../../../core/src/exporters/bundle.js');
+
+        // T2 #26: when tweakable=true, load the brand DESIGN.md so the
+        // bundle exporter can read tweakSurface + resolve initial token
+        // values. Brand slug comes from the stored scene metadata; if
+        // absent (scene has no brand), tweakable=true is a no-op with
+        // a warning logged inside the bundle exporter.
+        let designSystem: import('../../../core/src/design-system/types.js').DesignSystem | undefined;
+        if (input.tweakable) {
+          const stored = getScene(sceneId);
+          const brandSlug = stored?.brand;
+          if (brandSlug) {
+            try {
+              const dsmdPath = join(getWorkspaceRoot(), '.reframe', 'brands', brandSlug, 'DESIGN.md');
+              if (existsSync(dsmdPath)) {
+                const md = readFileSync(dsmdPath, 'utf-8');
+                const { parseDesignMd } = await import('../../../core/src/design-system/parser.js');
+                designSystem = parseDesignMd(md);
+              }
+            } catch (err: any) {
+              console.warn(`[export bundle tweakable] failed to load DESIGN.md for brand "${brandSlug}":`, err?.message ?? err);
+            }
+          }
+        }
+
         const result = await exportSceneGraphToBundle(graph, rootId, {
           projectDir: getWorkspaceRoot(),
+          tweakable: input.tweakable === true,
+          designSystem,
         });
         content = result.html;
         // Surface warnings via the inline summary line emitted later.
