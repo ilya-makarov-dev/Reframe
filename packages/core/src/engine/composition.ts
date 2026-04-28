@@ -128,7 +128,11 @@ export interface FlowState {
 // pixel at t=0. Without seeded init, particle scatter / grain noise
 // drifts between runs, breaks visual diff testing.
 
-export type OverlayLayerType = 'noise-grain' | 'gradient-pulse' | 'particle-dust';
+export type OverlayLayerType =
+  // Phase 0 (#5): ambient atmospherics
+  | 'noise-grain' | 'gradient-pulse' | 'particle-dust'
+  // T2 (#10): physics-driven effects
+  | 'fire' | 'smoke' | 'wind' | 'snow' | 'electric' | 'gold';
 export type OverlayBlendMode = 'source-over' | 'lighter' | 'screen' | 'multiply';
 
 export interface OverlayLayer {

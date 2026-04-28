@@ -135,7 +135,10 @@ async function testUnknownLayerType(): Promise<void> {
   const err = extractError(result);
   assert(err?.code === 'compile.overlay.unknown_layer_type', `unknown_type: code = ${err?.code}`);
   assert(err?.details?.type === 'bogus-layer', 'unknown_type: details.type echoes input');
-  assert(Array.isArray(err?.details?.knownTypes) && err!.details.knownTypes.length === 3, 'unknown_type: details.knownTypes lists 3 known');
+  assert(
+    Array.isArray(err?.details?.knownTypes) && err!.details.knownTypes.includes('noise-grain'),
+    'unknown_type: details.knownTypes lists at least the Phase 0 set',
+  );
 }
 
 // ─── TEST 4: invalid_layer_config — intensity out of range ──

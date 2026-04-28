@@ -1723,7 +1723,7 @@ async function handleOverlayCompile(input: {
   // Layer-type + per-config validation via the registry. Errors carry the
   // failing param name in the envelope so the caller can correct the
   // exact field instead of guessing.
-  const { LAYER_REGISTRY, isKnownLayerType } = await import(
+  const { LAYER_REGISTRY, isKnownLayerType, resolveBlendMode } = await import(
     '../../../core/src/engine/overlay-layers/index.js'
   );
 
@@ -1786,12 +1786,16 @@ async function handleOverlayCompile(input: {
         );
       }
     }
+    // Resolve blendMode: explicit override > layer's DEFAULT_BLEND_MODE >
+    // 'source-over'. Resolved value persists to overlay.json so the
+    // renderer + HTML export consume a complete spec without re-deriving.
+    const effectiveBlendMode = resolveBlendMode(layer.type as any, layer.blendMode);
     resolvedLayers.push({
       id: resolvedIds[i],
       type: layer.type,
       config: validation.resolved as Record<string, unknown>,
       zIndex: layer.zIndex,
-      blendMode: layer.blendMode,
+      blendMode: effectiveBlendMode,
     });
   }
 

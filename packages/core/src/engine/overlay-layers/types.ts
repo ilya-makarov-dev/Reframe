@@ -25,7 +25,7 @@
  * changes to compile.ts or html.ts needed — those iterate the registry.
  */
 
-import type { JsonValue, OverlayLayerType } from '../composition.js';
+import type { JsonValue, OverlayBlendMode, OverlayLayerType } from '../composition.js';
 
 export type LayerValidationResult =
   | { ok: true; resolved: Record<string, JsonValue> }
@@ -51,6 +51,16 @@ export interface LayerImpl {
    * and client run byte-identical layer code.
    */
   readonly BROWSER_SOURCE: string;
+  /**
+   * Default CSS mix-blend-mode for this layer when the OverlayLayer
+   * spec doesn't override blendMode. Luminous effects (fire / electric
+   * / gold) use 'lighter' (additive) — overlapping flames brighten.
+   * Diffuse effects (smoke / snow / wind) use 'source-over'. The first
+   * 3 layers (#5: noise-grain / gradient-pulse / particle-dust) didn't
+   * carry this — they default to 'source-over' to preserve the Phase 0
+   * behavior for already-on-disk overlay specs.
+   */
+  readonly DEFAULT_BLEND_MODE?: OverlayBlendMode;
 }
 
 /** Runtime shape returned by factory_<type>. Lives in browser, never imported server-side. */
