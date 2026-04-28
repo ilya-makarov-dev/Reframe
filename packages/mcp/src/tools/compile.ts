@@ -1457,9 +1457,9 @@ async function handleSamplerCompile(input: {
     );
   }
 
-  if (!Array.isArray(cells) || cells.length < 4) {
+  if (!Array.isArray(cells) || cells.length < 2) {
     return makeToolJsonErrorResult(
-      'sampler-compile requires at least 4 cells (below this a grid is unnecessary)',
+      'sampler-compile requires at least 2 cells',
       'compile.sampler.too_few_cells',
       { count: cells?.length ?? 0 },
     );

@@ -69,6 +69,7 @@ import {
   type FontInlineResult,
 } from './inline-fonts.js';
 import { inlineImages } from './inline-images.js';
+import { ANNOTATION_FONT } from '../engine/annotation.js';
 
 // ─── Public API ──────────────────────────────────────────────
 
@@ -194,10 +195,16 @@ export function collectUsedVariants(graph: SceneGraph, rootId: string): UsedVari
   }
   walk(rootId);
 
-  // Caveat 500 only when scene has annotations.
+  // Annotation font (Caveat 500 today) — only when scene has annotations.
+  // Family/weight/style from the canonical engine binding so changes there
+  // propagate without hand-syncing this file.
   if (graph.annotations && graph.annotations.length > 0) {
-    const caveat: UsedVariant = { family: 'Caveat', weight: 500, style: 'normal' };
-    set.set(key(caveat), caveat);
+    const annoFont: UsedVariant = {
+      family: ANNOTATION_FONT.family,
+      weight: ANNOTATION_FONT.weight,
+      style: ANNOTATION_FONT.style,
+    };
+    set.set(key(annoFont), annoFont);
   }
 
   return [...set.values()];

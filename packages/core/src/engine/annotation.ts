@@ -27,6 +27,27 @@ export type AnnotationAnchor = 'nw' | 'ne' | 'sw' | 'se' | 'top' | 'bottom';
 export type AnnotationStyle = 'caveat' | 'mono';
 export type AnnotationSeverity = 'info' | 'suggestion' | 'warn';
 
+/**
+ * Canonical annotation typography binding (Week 5 cleanup).
+ *
+ * Single source of truth for the handwritten font used by annotation
+ * spans across exporters (html / react / svg / bundle / react-spa).
+ * Bundle + react-spa font subset look here to know which Google Font
+ * variant to inline; html.ts emits the Google Fonts URL using these
+ * values; react.ts CSS rule references the family.
+ *
+ * Change here propagates to all renderers + the bundle inliner without
+ * hand-syncing. Future: per-severity style overrides land as a Record
+ * over AnnotationSeverity → ANNOTATION_FONT.
+ */
+export const ANNOTATION_FONT = {
+  family: 'Caveat',
+  weight: 500,
+  style: 'normal' as const,
+  /** CSS fallback chain when the inlined face isn't available. */
+  fallback: 'cursive, sans-serif',
+} as const;
+
 export interface AnnotationNode {
   /** Stable id, generated at create time (format: `a:<base36>`). */
   id: string;

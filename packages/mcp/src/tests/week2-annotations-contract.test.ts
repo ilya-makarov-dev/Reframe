@@ -118,7 +118,7 @@ async function testAnnotateBadTarget(): Promise<void> {
   } as any);
   const err = extractError(result);
   assert(err !== null, 'bad target: result should be isError');
-  assert(err?.code === 'edit.annotate.target_not_found', `bad target: code was ${err?.code}`);
+  assert(err?.code === 'edit.annotation.target_not_found', `bad target: code was ${err?.code}`);
 }
 
 // ─── TEST 3: updateAnnotation patches fields, preserves rest ─

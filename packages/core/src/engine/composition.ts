@@ -136,8 +136,8 @@ export function samplerComposition(
   grid: SamplerGrid,
   name?: string,
 ): SceneComposition {
-  if (cells.length < 4) {
-    throw new Error('samplerComposition requires at least 4 cells (below this a grid is unnecessary)');
+  if (cells.length < 2) {
+    throw new Error('samplerComposition requires at least 2 cells');
   }
   if (grid.columns < 1) {
     throw new Error('samplerComposition grid.columns must be >= 1');

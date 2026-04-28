@@ -7,6 +7,33 @@
  *
  * This is the INode-native path. HTML import (produce/from_html) remains
  * for importing existing websites, but draw is the primary creation tool.
+ *
+ * ─── Error-envelope conventions ─────────────────────────────
+ *
+ * Two distinct shapes by op class — intentional, not accidental:
+ *
+ *   - Single-target ops (annotate, update, updateAnnotation, removeAnnotation,
+ *     delete, clone, resize, move, defineTokens, setMode, declareTweaks) —
+ *     return EARLY via `makeToolJsonErrorResult` on first failure.
+ *     `result.isError = true`. Tool stops processing remaining batch ops.
+ *     The caller knows their command failed and which op failed.
+ *
+ *   - Macro ops (breakGrid, scaleSpacing, scaleRadius, scaleShadows,
+ *     rotateColors, typographyPreset, iterate, adapt, vary, multiColumn) —
+ *     push partial results to the `results[]` accumulator and continue.
+ *     `result.isError = false` even when N targets failed (unless ALL
+ *     targets failed). Per-target outcomes appear in the result body as
+ *     `OP_NAME ERROR: <reason>` lines. Macros are batch transformations;
+ *     a partial failure shouldn't abort the whole pass.
+ *
+ * Single = atomic command. Macro = best-effort sweep. Test contracts
+ * enforce both shapes — see week2-annotations-contract for single-target
+ * envelope (extractError helper) and break-grid.test for macro string
+ * matching.
+ *
+ * Error code namespacing: `edit.<object>.<reason>` where object names
+ * the domain noun (annotation, not annotate; node, not update). Reasons
+ * are snake_case nouns (target_not_found, scene_not_found, no_scene).
  */
 
 import { z } from 'zod';
@@ -2105,21 +2132,21 @@ export async function handleEdit(input: {
         if (!sceneId) {
           return makeToolJsonErrorResult(
             'annotate: no sceneId and no prior op established one',
-            'edit.annotate.no_scene',
+            'edit.annotation.no_scene',
           );
         }
         const stored = getScene(sceneId);
         if (!stored) {
           return makeToolJsonErrorResult(
             `annotate: scene "${sceneId}" not found`,
-            'edit.annotate.scene_not_found',
+            'edit.annotation.scene_not_found',
             { sceneId },
           );
         }
         if (!stored.graph.getNode(op.targetNodeId)) {
           return makeToolJsonErrorResult(
             `annotate: targetNodeId "${op.targetNodeId}" does not exist in scene "${sceneId}"`,
-            'edit.annotate.target_not_found',
+            'edit.annotation.target_not_found',
             { sceneId, targetNodeId: op.targetNodeId },
           );
         }

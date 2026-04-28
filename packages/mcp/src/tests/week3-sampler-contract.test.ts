@@ -3,7 +3,7 @@
  *
  * 10 tests:
  *   1. happy path — 6-cell sampler, response envelope, sampler.json on disk
- *   2. too_few_cells throws (< 4)
+ *   2. too_few_cells throws (< 2); 2-cell succeeds
  *   3. brand_mismatch throws
  *   4. duplicate_name throws on resolved namespaced names
  *   5. custom_designmd_unsupported throws
@@ -106,19 +106,32 @@ async function testHappyPath(): Promise<void> {
 // ─── TEST 2: too_few_cells ──
 async function testTooFewCells(): Promise<void> {
   setupProject();
+  // Threshold is now ≥2 (was ≥4) — symmetric with variants. Single-cell is
+  // a degenerate sampler (== a single scene) so we still throw on 1.
   const result = await handleCompile({
     sampler: {
       samplerId: 'too-few',
       cells: [
         { html: cellHtml('A'), audit: false, exports: [] },
-        { html: cellHtml('B'), audit: false, exports: [] },
-        { html: cellHtml('C'), audit: false, exports: [] },
       ],
-      grid: { columns: 3 },
+      grid: { columns: 1 },
     },
   } as any);
   const err = extractError(result);
   assert(err?.code === 'compile.sampler.too_few_cells', `too_few: code = ${err?.code}`);
+
+  // 2-cell sampler now succeeds (symmetric with variants).
+  const ok = await handleCompile({
+    sampler: {
+      samplerId: 'two-cell-ok',
+      cells: [
+        { html: cellHtml('A'), audit: false, exports: [] },
+        { html: cellHtml('B'), audit: false, exports: [] },
+      ],
+      grid: { columns: 2 },
+    },
+  } as any);
+  assert(!(ok as any).isError, 'two-cell sampler succeeds (≥2 threshold)');
 }
 
 // ─── TEST 3: brand_mismatch ──
@@ -328,7 +341,7 @@ async function main(): Promise<void> {
 
   const tests: Array<[string, () => Promise<void>]> = [
     ['happy path — 6-cell sampler + sampler.json on disk', testHappyPath],
-    ['too_few_cells throws (< 4)', testTooFewCells],
+    ['too_few_cells throws (< 2); 2-cell succeeds', testTooFewCells],
     ['brand_mismatch throws', testBrandMismatch],
     ['duplicate_name throws on resolved namespaced names', testDuplicateName],
     ['custom_designmd_unsupported throws', testCustomDesignMd],
