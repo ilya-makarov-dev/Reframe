@@ -503,6 +503,26 @@ export interface NodeMeta {
    */
   tokenBindings?: TokenBindings;
 
+  // ── Mouse-reactive interactive (T2 #27) ───────────────────
+  /**
+   * Per-element interactive runtime behavior — mouse-tilt / mouse-glow /
+   * combined. Stored under `meta` (not as a top-level SceneNode field)
+   * because:
+   *   (a) the existing meta serializer round-trips arbitrary keys via
+   *       JSON.parse(JSON.stringify(meta)) — zero plumbing
+   *   (b) interactive is "source-attached behavior", same shape as
+   *       `sourceData` / `sourceTag` / `tokenBindings` already living
+   *       here
+   *   (c) keeps SceneNode.* focused on layout + visual data; runtime
+   *       behavior aggregates under one roof
+   *
+   * Importer populates from `data-reframe-interactive` attribute (with
+   * companion `data-reframe-{tilt,glow}-*` config attrs). Exporter
+   * round-trips back to data-* attrs and emits the runtime IIFE once
+   * per scene.
+   */
+  interactive?: INodeInteractive;
+
   // ── Project-as-INode metadata ──────────────────────────────
   // Used when the project manifest itself is stored as a SceneGraph.
   // Scene-ref nodes in the project graph carry these fields.
@@ -537,6 +557,54 @@ export interface NodeMeta {
    * still fall back to the bbox.
    */
   svgMarkup?: string;
+}
+
+/**
+ * Mouse-reactive interactive behavior (T2 #27).
+ *
+ * Designer authors via HTML data-* attrs:
+ *   <div data-reframe-interactive="mouse-tilt-glow"
+ *        data-reframe-tilt-strength="12"
+ *        data-reframe-glow-color="rgba(99,91,255,0.15)">...</div>
+ *
+ * Importer parses → INodeInteractive. Exporter emits attrs back +
+ * inline runtime IIFE (once per scene if any interactive nodes exist).
+ *
+ * Three behavior types cover the canonical Linear-style effects.
+ * Adding a new type = extend union, add runtime branch in
+ * MOUSE_REACTIVE_RUNTIME_SOURCE, document config shape here.
+ */
+export type InteractiveType = 'mouse-tilt' | 'mouse-glow' | 'mouse-tilt-glow';
+
+export interface INodeInteractive {
+  type: InteractiveType;
+  config: InteractiveConfig;
+}
+
+export interface InteractiveConfig {
+  /** Max tilt degrees on each axis. Default 8. Read by mouse-tilt + mouse-tilt-glow. */
+  tiltStrength?: number;
+  /**
+   * RAF interpolation factor (0..1) — fraction of remaining distance to
+   * close per frame. Higher = snappier follow, lower = lazier follow.
+   * Default 0.15 (smooth, ~10-frame settle). Read by mouse-tilt +
+   * mouse-tilt-glow.
+   */
+  tiltDamping?: number;
+  /**
+   * CSS perspective px applied to the parent — controls how dramatic the
+   * 3D effect reads. Default 800. Lower = more pronounced; higher =
+   * subtler. Read by mouse-tilt + mouse-tilt-glow.
+   */
+  perspective?: number;
+  /**
+   * Glow CSS color (hex / rgba / named). Default 'rgba(255,255,255,0.1)'.
+   * Read by mouse-glow + mouse-tilt-glow. Drawn via CSS pseudo-element
+   * radial-gradient anchored at cursor position.
+   */
+  glowColor?: string;
+  /** Glow radius px. Default 200. Read by mouse-glow + mouse-tilt-glow. */
+  glowRadius?: number;
 }
 
 export interface TokenBindings {

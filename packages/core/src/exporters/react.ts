@@ -11,6 +11,24 @@ import type { StateOverride, ResponsiveRule, TokenBindings } from '../engine/typ
 import type { DesignSystem } from '../design-system/types';
 import type { ITimeline } from '../animation/types';
 import { timelineToCss } from '../animation/to-css';
+import {
+  MOUSE_REACTIVE_RUNTIME_SOURCE,
+  MOUSE_REACTIVE_CSS,
+} from '../engine/interactive/mouse-reactive-runtime';
+
+/**
+ * Walk an INode subtree, return true if any node has `meta.interactive`
+ * set. Drives the scene-level decision to inject the runtime IIFE +
+ * glow CSS — both are zero-bytes when no interactive nodes exist.
+ */
+function treeHasInteractive(node: INode): boolean {
+  if ((node as any).meta?.interactive) return true;
+  for (const c of node.children ?? []) {
+    if (c.removed || c.visible === false) continue;
+    if (treeHasInteractive(c)) return true;
+  }
+  return false;
+}
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -345,6 +363,16 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     imports.push(`import styles from './${name}.module.css';`);
   }
 
+  // T2 #27 — interactive runtime injection. Walk the tree to detect any
+  // node carrying meta.interactive. When found, append CSS rule set +
+  // <script dangerouslySetInnerHTML> with the runtime IIFE. Single
+  // injection per component (one document-level mousemove handler).
+  const sceneHasInteractive = treeHasInteractive(node);
+  const interactiveCss = sceneHasInteractive ? MOUSE_REACTIVE_CSS : '';
+  const interactiveScriptJsx = sceneHasInteractive
+    ? `\n      <script dangerouslySetInnerHTML={{ __html: ${JSON.stringify(MOUSE_REACTIVE_RUNTIME_SOURCE)} }} />`
+    : '';
+
   // Build style tag for :root tokens + states + responsive + animations, if any.
   const rootBlock = phase3.rootVars.size > 0
     ? `:root { ${[...phase3.rootVars].map(([k, v]) => `${k}: ${v}`).join('; ')} }`
@@ -352,7 +380,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   const animationBlocks: string[] = [];
   if (timelineCss.keyframes) animationBlocks.push(timelineCss.keyframes);
   for (const rule of timelineCss.classRules.values()) animationBlocks.push(rule);
-  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss].filter(Boolean);
+  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss, interactiveCss].filter(Boolean);
   const styleJsx = combinedStyles.length > 0
     ? `\n      <style>{\`\n        ${combinedStyles.join('\n        ')}\n      \`}</style>`
     : '';
@@ -366,6 +394,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     jsx,
     annotationJsx ? annotationJsx : '',
     styleJsx ? styleJsx : '',
+    interactiveScriptJsx ? interactiveScriptJsx : '',
     `    </>`,
     `  );`,
     `};`,
@@ -822,14 +851,27 @@ function tagForNode(node: INode): { tag: string; attrs: string } {
   const sourceTag = ((node as any).meta?.sourceTag as string | undefined) ?? '';
   const href = (node as any).href as string | undefined;
   const sourceData = ((node as any).meta?.sourceData as Record<string, string> | undefined) ?? {};
+  // T2 #27 — mouse-reactive metadata. Re-emit data-* attrs from the typed
+  // INodeInteractive (mirrors html.ts exporter). Appended via a finalize
+  // step at every return so all 7 return paths pick it up. The runtime
+  // source IIFE is injected once at the root component (see
+  // exportToReactModule) — one document-level handler covers all
+  // interactive elements.
+  const interactive = ((node as any).meta?.interactive as
+    | { type: string; config: Record<string, unknown> }
+    | undefined);
+  const interactiveAttrs = interactive
+    ? ` data-reframe-interactive="${interactive.type}" data-reframe-interactive-config='${JSON.stringify(interactive.config).replace(/'/g, '&apos;')}'`
+    : '';
+  const fin = (r: { tag: string; attrs: string }) => ({ tag: r.tag, attrs: r.attrs + interactiveAttrs });
 
   // Interactive / semantic leaf tags first — they carry attributes too.
   if (role === 'link' || sourceTag === 'a') {
     const hrefAttr = href ? ` href="${href.replace(/"/g, '&quot;')}"` : '';
-    return { tag: 'a', attrs: hrefAttr };
+    return fin({ tag: 'a', attrs: hrefAttr });
   }
   if (role === 'button' || sourceTag === 'button') {
-    return { tag: 'button', attrs: ' type="button"' };
+    return fin({ tag: 'button', attrs: ' type="button"' });
   }
 
   // Form inputs — preserve as real React inputs. When the node carries
@@ -842,32 +884,32 @@ function tagForNode(node: INode): { tag: string; attrs: string } {
     const typeAttr = ` type="${(sourceData['type'] || 'text').replace(/"/g, '&quot;')}"`;
     if (flowField) {
       const safe = flowField.replace(/"/g, '\\"');
-      return {
+      return fin({
         tag: 'input',
         attrs: `${typeAttr} value={(props.state && props.state["${safe}"]) || ""} onChange={e => props.setState({...(props.state || {}), "${safe}": e.target.value})}`,
-      };
+      });
     }
-    return { tag: 'input', attrs: typeAttr };
+    return fin({ tag: 'input', attrs: typeAttr });
   }
   if (sourceTag === 'textarea') {
     if (flowField) {
       const safe = flowField.replace(/"/g, '\\"');
-      return {
+      return fin({
         tag: 'textarea',
         attrs: ` value={(props.state && props.state["${safe}"]) || ""} onChange={e => props.setState({...(props.state || {}), "${safe}": e.target.value})}`,
-      };
+      });
     }
-    return { tag: 'textarea', attrs: '' };
+    return fin({ tag: 'textarea', attrs: '' });
   }
   if (sourceTag === 'select') {
     if (flowField) {
       const safe = flowField.replace(/"/g, '\\"');
-      return {
+      return fin({
         tag: 'select',
         attrs: ` value={(props.state && props.state["${safe}"]) || ""} onChange={e => props.setState({...(props.state || {}), "${safe}": e.target.value})}`,
-      };
+      });
     }
-    return { tag: 'select', attrs: '' };
+    return fin({ tag: 'select', attrs: '' });
   }
 
   // Sectioning / landmark tags from raw source.
@@ -877,9 +919,9 @@ function tagForNode(node: INode): { tag: string; attrs: string } {
     'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
     'p', 'label', 'pre', 'code',
   ]);
-  if (passthrough.has(sourceTag)) return { tag: sourceTag, attrs: '' };
+  if (passthrough.has(sourceTag)) return fin({ tag: sourceTag, attrs: '' });
 
-  return { tag: '', attrs: '' };
+  return fin({ tag: '', attrs: '' });
 }
 
 function renderNode(
@@ -975,7 +1017,12 @@ function renderNode(
     const textTag = semantic.tag && /^(h[1-6]|p|label|a|button|code|li|blockquote)$/.test(semantic.tag)
       ? semantic.tag
       : 'span';
-    const attrs = textTag === semantic.tag ? semantic.attrs : '';
+    // T2 #27: even when textTag falls back to 'span' (no semantic tag),
+    // preserve interactive data-* attrs so the runtime can attach. The
+    // pass-through happens via meta.interactive — exporter still emits
+    // the data-reframe-interactive-config blob it'd otherwise drop.
+    const hasInteractive = !!(node as any).meta?.interactive;
+    const attrs = (textTag === semantic.tag || hasInteractive) ? semantic.attrs : '';
     if (text.includes('\n')) {
       const lines = text.split('\n');
       const content = lines.map((l, i) => i < lines.length - 1 ? `${l}<br />` : l).join(`\n${pad}  `);
@@ -1011,8 +1058,13 @@ function renderNode(
   }
 
   // Container / shape — pick a semantic tag when the importer recorded one.
+  // T2 #27: even when there's no semantic tag, propagate attrs that
+  // tagForNode appended for `meta.interactive` (data-reframe-interactive*).
+  // Without this, generic <div> interactive nodes lose their data-* attrs
+  // and the runtime can't see them.
   const containerTag = semantic.tag || 'div';
-  const containerAttrs = semantic.tag ? semantic.attrs : '';
+  const hasInteractive = !!(node as any).meta?.interactive;
+  const containerAttrs = (semantic.tag || hasInteractive) ? semantic.attrs : '';
   const children = (node.children ?? []).filter(c => !c.removed && c.visible !== false);
 
   if (children.length === 0) {

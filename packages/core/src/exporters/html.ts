@@ -20,6 +20,10 @@ import { timelineToCss } from '../animation/to-css';
 import { collectCssTokens, tokenToCssVar } from '../design-system/tokens';
 import { semanticTag, ariaRole, headingLevel } from '../semantic';
 import {
+  MOUSE_REACTIVE_RUNTIME_SOURCE,
+  MOUSE_REACTIVE_CSS,
+} from '../engine/interactive/mouse-reactive-runtime';
+import {
   shouldRenderAsSvg,
   shouldRenderTextAsSvg,
   isIconLikeFrame,
@@ -291,6 +295,11 @@ export function exportToHtml(
 
   const classes: Map<string, string> = new Map();
   let classCounter = 0;
+  // T2 #27 — flips when any node carries meta.interactive. Drives whether
+  // the runtime IIFE + glow CSS get injected at scene level. Single
+  // injection per scene regardless of how many interactive nodes exist
+  // (one document-level mousemove handler covers all of them).
+  let sceneHasInteractive = false;
 
   function getClassName(): string {
     return `${prefix}${classCounter++}`;
@@ -528,6 +537,21 @@ export function exportToHtml(
       attrs.push(`data-reframe-inode="${node.id}"`);
     }
 
+    // T2 #27 — mouse-reactive interactive metadata. Re-emit data-* attrs
+    // from the typed structure (importer extracted them, exporter puts
+    // them back). Companion runtime IIFE is injected once per scene
+    // when sceneHasInteractive flag flips during the walk.
+    if (node.meta?.interactive) {
+      sceneHasInteractive = true;
+      const interactive = node.meta.interactive;
+      attrs.push(`data-reframe-interactive="${escapeHtml(interactive.type)}"`);
+      // Inline JSON config — runtime parses on attach. Smaller than N
+      // separate data-reframe-* attrs, easier for the runtime, and
+      // round-trips cleanly via JSON.parse.
+      const cfgStr = JSON.stringify(interactive.config);
+      attrs.push(`data-reframe-interactive-config='${cfgStr.replace(/'/g, '&apos;')}'`);
+    }
+
     const attrStr = attrs.join(' ');
 
     // Text node
@@ -699,12 +723,21 @@ export function exportToHtml(
     ? ANNOTATION_BASE_CSS
     : '';
 
+  // T2 #27 — interactive runtime + CSS injected when scene contains
+  // any node with meta.interactive. Single IIFE + single CSS rule set
+  // covers all interactive elements in the scene (one document-level
+  // mousemove handler iterates a per-element state list).
+  const interactiveCss = sceneHasInteractive ? MOUSE_REACTIVE_CSS : '';
+  const interactiveScript = sceneHasInteractive
+    ? `<script>${MOUSE_REACTIVE_RUNTIME_SOURCE}</script>`
+    : '';
+
   if (!fullDoc) {
-    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles) {
+    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles || interactiveCss) {
       const classBlock = useCssClasses ? generateCssBlock(classes) : '';
-      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}</style>\n${html}${annotationHtml}`;
+      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}${interactiveCss}</style>\n${html}${annotationHtml}${interactiveScript}`;
     }
-    return `${html}${annotationHtml}`;
+    return `${html}${annotationHtml}${interactiveScript}`;
   }
 
   // Full document with production-quality base styles
@@ -734,13 +767,14 @@ export function exportToHtml(
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility;${rootBgForBody(root, graph)} }
     body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root, graph)} }
     a { color: inherit; text-decoration: none; }
-    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}
+    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}${interactiveCss}
   </style>${css}
   ${graph.annotations.length > 0 ? ANNOTATION_FONT_LINK : ''}
 </head>
 <body>
 ${indent(html, 2)}
 ${indent(annotationHtml, 2)}
+${interactiveScript ? indent(interactiveScript, 2) : ''}
 </body>
 </html>`;
 }
@@ -1111,11 +1145,19 @@ function computeStyles(node: SceneNode, isRoot: boolean, parentLayout?: string, 
     if (cssBlend) s.push(`mix-blend-mode: ${cssBlend}`);
   }
 
-  // Transform (rotation + flip)
+  // Transform (rotation + flip).
+  // T2 #27: when the node is mouse-reactive (tilt or tilt-glow), append a
+  // CSS variable hook so the runtime can stack rotateX/rotateY *on top of*
+  // any existing rotation/flip without stomping it. Empty fallback in
+  // var(--reframe-mouse-tilt, ) means "no-op when var is unset" — keeps
+  // SSR'd page identical to pre-runtime baseline before mousemove fires.
   const transforms: string[] = [];
   if (node.rotation !== 0) transforms.push(`rotate(${round(node.rotation)}deg)`);
   if (node.flipX) transforms.push('scaleX(-1)');
   if (node.flipY) transforms.push('scaleY(-1)');
+  const interactive = node.meta?.interactive;
+  const wantsTilt = interactive && (interactive.type === 'mouse-tilt' || interactive.type === 'mouse-tilt-glow');
+  if (wantsTilt) transforms.push('var(--reframe-mouse-tilt, )');
   if (transforms.length > 0) s.push(`transform: ${transforms.join(' ')}`);
 
   // Background (fills) — skip for TEXT nodes (fills = text color, handled below)

@@ -1816,15 +1816,74 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
 
   // Preserve raw data-* attrs (sans reframe internals) so exports can
   // round-trip e.g. analytics hooks, test-ids, or custom author metadata.
+  // Interactive attrs (data-reframe-interactive + data-reframe-{tilt,glow}-*)
+  // are EXTRACTED into meta.interactive separately — exporter re-emits
+  // them from the typed structure, not raw sourceData. This prevents
+  // double-emission and lets editors mutate config typed-ly.
   const data: Record<string, string> = {};
+  const interactiveAttrs: Record<string, string> = {};
   for (const [k, v] of Object.entries(el.attrs)) {
     if (!k.startsWith('data-')) continue;
     if (k === 'data-reframe-idx' || k === 'data-reframe-import-wrap') continue;
+    if (k === 'data-reframe-interactive' || k.startsWith('data-reframe-tilt-') || k.startsWith('data-reframe-glow-')) {
+      interactiveAttrs[k] = v;
+      continue;
+    }
     data[k] = v;
   }
   if (Object.keys(data).length > 0) meta.sourceData = data;
 
+  // Build the typed interactive metadata if data-reframe-interactive is set.
+  if (interactiveAttrs['data-reframe-interactive']) {
+    const interactive = parseInteractiveAttrs(interactiveAttrs);
+    if (interactive) meta.interactive = interactive;
+  }
+
   return meta;
+}
+
+/**
+ * Parse data-reframe-interactive attributes into typed INodeInteractive.
+ * Returns undefined when type is unknown (caller skips populating).
+ *
+ * Tolerant on per-config parse errors: a bad tilt-strength value falls
+ * back to default + console warns, rather than blocking the import.
+ * Designers iterate fast; one bad attr shouldn't bork the whole scene.
+ */
+function parseInteractiveAttrs(
+  attrs: Record<string, string>,
+): { type: 'mouse-tilt' | 'mouse-glow' | 'mouse-tilt-glow'; config: Record<string, number | string> } | undefined {
+  const rawType = attrs['data-reframe-interactive'];
+  const KNOWN = new Set(['mouse-tilt', 'mouse-glow', 'mouse-tilt-glow']);
+  if (!KNOWN.has(rawType)) {
+    console.warn(`[html-import] data-reframe-interactive="${rawType}" — unknown type, ignoring (known: mouse-tilt, mouse-glow, mouse-tilt-glow)`);
+    return undefined;
+  }
+  const type = rawType as 'mouse-tilt' | 'mouse-glow' | 'mouse-tilt-glow';
+  const config: Record<string, number | string> = {};
+
+  function asNumber(key: string): number | undefined {
+    if (attrs[key] === undefined) return undefined;
+    const n = Number(attrs[key]);
+    if (!Number.isFinite(n)) {
+      console.warn(`[html-import] ${key}="${attrs[key]}" — not a finite number, using default`);
+      return undefined;
+    }
+    return n;
+  }
+
+  const tiltStrength = asNumber('data-reframe-tilt-strength');
+  if (tiltStrength !== undefined) config.tiltStrength = tiltStrength;
+  const tiltDamping = asNumber('data-reframe-tilt-damping');
+  if (tiltDamping !== undefined) config.tiltDamping = tiltDamping;
+  const perspective = asNumber('data-reframe-tilt-perspective');
+  if (perspective !== undefined) config.perspective = perspective;
+  const glowRadius = asNumber('data-reframe-glow-radius');
+  if (glowRadius !== undefined) config.glowRadius = glowRadius;
+  const glowColor = attrs['data-reframe-glow-color'];
+  if (glowColor !== undefined) config.glowColor = glowColor;
+
+  return { type, config };
 }
 
 /**
