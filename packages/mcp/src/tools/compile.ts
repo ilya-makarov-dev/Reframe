@@ -1410,6 +1410,32 @@ async function handleFlowCompile(input: {
     );
   }
 
+  // ── T2 #22: cross-step audit ─────────────────────────────
+  // Runs after spec is on disk. Pulls the step SceneGraphs from store
+  // (they were compiled in the loop above). Result is advisory —
+  // does not fail compile, surfaces in response envelope.
+  const { runFlowAudit } = await import('../../../core/src/audit-flow/index.js');
+  const { getSessionId } = await import('../store.js');
+  const stepScenes: any[] = [];
+  for (const stepName of requestedNames) {
+    const sid = getSessionId(stepName);
+    if (sid) {
+      const stored = getScene(sid);
+      if (stored?.graph) stepScenes.push(stored.graph);
+      else stepScenes.push(null);
+    } else {
+      stepScenes.push(null);
+    }
+  }
+  const flowAudit = runFlowAudit(
+    {
+      flowId,
+      steps: requestedNames.map((n, i) => ({ name: n, index: i })),
+      transitions,
+    },
+    stepScenes,
+  );
+
   return {
     content: [
       {
@@ -1423,6 +1449,7 @@ async function handleFlowCompile(input: {
             stepSceneIds: requestedNames,
             transitions,
             steps: stepResults,
+            flowAudit,
           },
           null,
           2,

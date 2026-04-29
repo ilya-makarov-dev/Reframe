@@ -29,6 +29,9 @@ import { renderPreview } from './_preview.js';
 
 export const inspectInputSchema = {
   sceneId: z.string().optional().describe('Scene ID to inspect. Omit for session overview.'),
+  flowId: z.string().optional().describe(
+    'Flow ID to inspect — runs T2 #22 flow-specific audit (unreachable steps, dead-ends, label inconsistency). Mutually exclusive with sceneId; if both passed, sceneId wins.',
+  ),
 
   // What to include in the report
   tree: z.boolean().optional().default(true).describe('Include node tree'),
@@ -112,6 +115,7 @@ export const inspectInputSchema = {
 
 export async function handleInspect(input: {
   sceneId?: string;
+  flowId?: string;
   tree?: boolean;
   audit?: boolean | { minFontSize?: number; minContrast?: number };
   assert?: Array<{ type: string; value?: any }>;
@@ -128,6 +132,16 @@ export async function handleInspect(input: {
 }) {
   const session = getSession();
   session.recordToolCall('inspect');
+
+  // ── T2 #22: Flow audit dispatch ──────────────────────────────
+  // When inspect is called with flowId (and no sceneId), load flow.json
+  // + step scenes from disk and run the cross-step audit. Returns a
+  // formatted text report — same output style as the existing scene
+  // inspect, with a dedicated `Flow Audit` section.
+  if (input.flowId && !input.sceneId) {
+    const out = await runFlowInspect(input.flowId);
+    return out;
+  }
 
   // ── Session overview (no sceneId) ────────────────────────────
 
@@ -620,4 +634,76 @@ export async function handleInspect(input: {
 
   return { content };
   });
+}
+
+// ─── T2 #22: Flow inspect helper ─────────────────────────────
+//
+// Loads flow.json + each step's serialized scene from disk, runs the
+// flow audit, formats issues into a text report mirroring the scene
+// inspect output style. Returns the standard {content: [...]} shape.
+async function runFlowInspect(
+  flowId: string,
+): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
+  const { readFlowSpec } = await import('../../../core/src/project/flow-store.js');
+  const { runFlowAudit } = await import('../../../core/src/audit-flow/index.js');
+  const { deserializeScene } = await import('../../../core/src/serialize.js');
+  const { getWorkspaceRoot } = await import('../store.js');
+  const fs = await import('fs');
+  const path = await import('path');
+
+  const projectDir = getWorkspaceRoot();
+  const spec = readFlowSpec(projectDir, flowId);
+  if (!spec) {
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `flow "${flowId}" not found at .reframe/flows/${flowId}/flow.json`,
+      }],
+    };
+  }
+
+  // Load each step scene's SceneGraph from disk. Missing scene → null
+  // entry; rules tolerate nulls (they walk what's available).
+  const stepScenes: any[] = [];
+  for (const slug of spec.stepSceneIds) {
+    const scenePath = path.join(projectDir, '.reframe', 'scenes', `${slug}.scene.json`);
+    if (!fs.existsSync(scenePath)) { stepScenes.push(null); continue; }
+    try {
+      const envelope = JSON.parse(fs.readFileSync(scenePath, 'utf-8'));
+      const { graph } = deserializeScene(envelope);
+      stepScenes.push(graph);
+    } catch (err) {
+      stepScenes.push(null);
+    }
+  }
+
+  const audit = runFlowAudit(
+    {
+      flowId,
+      steps: spec.stepSceneIds.map((n: string, i: number) => ({ name: n, index: i })),
+      transitions: spec.transitions,
+    },
+    stepScenes,
+  );
+
+  // Render text report.
+  const lines: string[] = [];
+  lines.push(`Flow: ${flowId}${spec.name ? ` — "${spec.name}"` : ''}`);
+  lines.push(`Steps: ${spec.stepSceneIds.length}`);
+  lines.push(`Transitions: ${spec.transitions.length}`);
+  lines.push('');
+  lines.push(`── Flow Audit (${audit.summary.errors} errors, ${audit.summary.warnings} warnings, ${audit.summary.info} info) ──`);
+  if (audit.issues.length === 0) {
+    lines.push('  No issues found.');
+  } else {
+    for (const issue of audit.issues) {
+      const tag = issue.severity === 'error' ? '[error]' : issue.severity === 'warn' ? '[warn] ' : '[info] ';
+      const where = issue.stepIndex !== undefined ? ` at step ${issue.stepIndex}` : '';
+      lines.push(`  ${tag} ${issue.ruleId}${where}: ${issue.message}`);
+    }
+  }
+
+  return {
+    content: [{ type: 'text' as const, text: lines.join('\n') }],
+  };
 }
