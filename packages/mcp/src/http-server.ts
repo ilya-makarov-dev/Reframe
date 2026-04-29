@@ -859,7 +859,36 @@ export function startHttpSidecar(port = 4100): void {
         res.end(html);
         return;
       }
-      // Default: HTML render (same as old /preview/<id> behavior).
+      // T3 #13 — Wireframe view mode. `?mode=wireframe` returns the
+      // skeleton SVG render (#11 exporter, mode: 'skeleton'); explicit
+      // `?mode=full` is identical to the default HTML render. Unknown
+      // mode → 400 with hint listing supported values. Default
+      // (no query) preserves pre-#13 byte-identical HTML output.
+      //
+      // Cache headers: wireframe responses ship `Cache-Control: no-store`
+      // so toolbar mode-toggling always re-fetches a fresh SVG. The
+      // skeleton render is cheap (<5ms) so cache miss is fine; what we
+      // can't tolerate is a stale skeleton when the underlying scene
+      // changed between toggles.
+      const mode = url.searchParams.get('mode');
+      if (mode !== null && mode !== 'full' && mode !== 'wireframe') {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end(`Unknown preview mode "${mode}". Supported: full, wireframe.`);
+        return;
+      }
+      if (mode === 'wireframe') {
+        const { exportSceneGraphToSvg } = await import('../../core/src/exporters/svg.js');
+        const svg = exportSceneGraphToSvg(stored.graph, stored.rootId, { mode: 'skeleton' });
+        res.writeHead(200, {
+          'Content-Type': 'image/svg+xml',
+          'Cache-Control': 'no-store',
+        });
+        res.end(svg);
+        return;
+      }
+
+      // Default (or explicit `?mode=full`): HTML render — same as the
+      // pre-#13 /preview/<id> behavior.
       // Phase 8: enable `inodeAnchors` so every element carries
       // `data-reframe-inode="<id>"` for the annotation subsystem, and
       // splice the preview inject script before </body> so hover/click

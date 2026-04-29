@@ -358,6 +358,13 @@ export function renderCanvasTools(): string {
     <button class="tool-action edit-tool" data-edit-toggle title="Toggle edit mode (E)" aria-label="Toggle edit mode">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 1.5L14.5 4L5.5 13L2 14L3 10.5L12 1.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/></svg>
     </button>
+    <!-- T3 #13 — Wireframe view toggle. Off by default; click swaps the
+         FOCUSED canvas iframe between full HTML render and skeleton SVG.
+         Per-canvas state (multi-canvas surfaces only switch the focused
+         one), per-session (resets to off on page reload). -->
+    <button class="tool-action wireframe-toggle" data-wireframe-toggle title="Toggle wireframe view" aria-label="Toggle wireframe view" aria-pressed="false">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="1" stroke="currentColor" stroke-width="1.3"/><line x1="2" y1="6" x2="14" y2="6" stroke="currentColor" stroke-width="1.3"/><line x1="6" y1="6" x2="6" y2="14" stroke="currentColor" stroke-width="1.3"/></svg>
+    </button>
   </div>`;
 }
 

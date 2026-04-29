@@ -272,6 +272,7 @@
       bindViewportSwitcher();
       bindCanvas();
       bindEditToggle();
+      bindWireframeToggle();
       bindTimelineScrubber();
     }
     bindStreamActions();

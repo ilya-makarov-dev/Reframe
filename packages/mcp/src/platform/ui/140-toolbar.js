@@ -445,6 +445,70 @@
     });
   }
 
+  // ── T3 #13 — Wireframe view toggle ────────────────────
+  //
+  // Click swaps the FOCUSED canvas iframe between full HTML render and
+  // skeleton SVG render (?mode=wireframe). State is per-canvas + per-
+  // session: page reload resets to full mode; in multi-canvas surfaces
+  // (variants/sampler) the toggle only switches the focused canvas.
+  //
+  // Why iframe.src reassignment, not in-place DOM swap: each canvas
+  // already carries an iframe loading /preview/<sceneId>; appending
+  // ?mode=wireframe is the smallest change that reuses the existing
+  // mount + scroll-position + zoom-pan-overlay machinery. SVG renders
+  // inside that same iframe and the surrounding chrome stays put.
+  function bindWireframeToggle() {
+    const btn = $('[data-wireframe-toggle]');
+    if (!btn) return;
+
+    // Per-canvas mode tracking. WeakMap keyed on iframe element so
+    // detached canvases get GC'd cleanly. Default = 'full' (matches
+    // server default — fresh mounts arrive without ?mode=).
+    const canvasMode = new WeakMap();
+
+    function focusedIframe() {
+      // Multi-mount registry helper exposed by canvas-dom — returns the
+      // currently-focused canvas's iframe. Falls back to the legacy
+      // single-canvas selector when the registry isn't installed (older
+      // editor pages that haven't migrated yet).
+      try {
+        var canvas = window.__reframeRegistry && window.__reframeRegistry.getFocusedCanvas
+          ? window.__reframeRegistry.getFocusedCanvas()
+          : null;
+        if (canvas && canvas.iframe) return canvas.iframe;
+      } catch (_) { /* fall through */ }
+      return document.querySelector('iframe[data-preview-iframe], iframe.scene-preview');
+    }
+
+    function applyMode(iframe, mode) {
+      if (!iframe) return;
+      var src = iframe.getAttribute('src') || '';
+      // Strip any existing ?mode=... before appending the new value, so
+      // repeated toggles don't accumulate query params.
+      src = src.replace(/[?&]mode=(?:full|wireframe)\b/g, '').replace(/[?&]$/, '');
+      var sep = src.indexOf('?') >= 0 ? '&' : '?';
+      var nextSrc = mode === 'wireframe' ? src + sep + 'mode=wireframe' : src;
+      // Force a fresh fetch when the URL is otherwise identical (toggling
+      // off → src may match exact pre-toggle value; iframe may not reload).
+      if (iframe.getAttribute('src') === nextSrc) {
+        iframe.contentWindow && iframe.contentWindow.location && iframe.contentWindow.location.reload();
+      } else {
+        iframe.setAttribute('src', nextSrc);
+      }
+      canvasMode.set(iframe, mode);
+    }
+
+    btn.addEventListener('click', function() {
+      var iframe = focusedIframe();
+      if (!iframe) return;
+      var current = canvasMode.get(iframe) || 'full';
+      var next = current === 'full' ? 'wireframe' : 'full';
+      applyMode(iframe, next);
+      btn.classList.toggle('active', next === 'wireframe');
+      btn.setAttribute('aria-pressed', next === 'wireframe' ? 'true' : 'false');
+    });
+  }
+
   // ── Project overview health bar ──────────────────────
   async function refreshOverviewHealth() {
     var healthBar = $('[data-health-bar]');
