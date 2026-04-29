@@ -361,6 +361,12 @@ export default async function(o){
       const { handleBrandMarkApi } = await import('./api/brand-mark.js');
       return handleBrandMarkApi(req, res, ctx);
     }
+    // Brand tokens for color picker rail (Phase 1 UI-5b Pin #1):
+    //   GET /platform/api/brand/tokens?slug=<brand>  → palette list
+    if (pathname === '/platform/api/brand/tokens') {
+      const { handleBrandTokensApi } = await import('./api/brand-tokens.js');
+      return handleBrandTokensApi(req, res, ctx);
+    }
     // Resize / viewport adapt endpoint — spawns a tablet/phone variant
     // via core's adaptFromGraph without routing through the chat agent.
     if (pathname.startsWith('/platform/api/resize/')) {

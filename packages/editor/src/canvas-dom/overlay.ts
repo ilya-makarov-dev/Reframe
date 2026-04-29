@@ -28,8 +28,22 @@ export interface OverlayOptions {
   onBodyDrag?: (dx: number, dy: number, phase: 'start' | 'move' | 'end') => void;
 }
 
+/**
+ * Multi-select decoration — UI-2 Phase 1. When selection is multi-node,
+ * the overlay renders a thin per-node outline for each selected node
+ * IN ADDITION to the heavy union bbox + handles. setSelection still
+ * controls the union; setMultiSelectOutlines drives the thin per-node
+ * overlay independently so the host can update selection union
+ * (via setSelection) and thin outlines (via setMultiSelectOutlines)
+ * in any order.
+ */
+
 export function createSelectionOverlay(opts: OverlayOptions): {
   setSelection: (rect: SelectionRect | null) => void;
+  /** Hover preview — single-node thin outline, cleared when null. */
+  setHover: (rect: SelectionRect | null) => void;
+  /** Per-node thin outlines for multi-select state. */
+  setMultiSelectOutlines: (rects: ReadonlyArray<SelectionRect>) => void;
   syncTransform: (zoom: number, panX: number, panY: number) => void;
   destroy: () => void;
 } {
@@ -52,6 +66,34 @@ export function createSelectionOverlay(opts: OverlayOptions): {
     display: 'none',
   });
   wrapper.appendChild(bbox);
+
+  // Hover preview — thin outline at low opacity. Painted only when
+  // selection-state's hoveredId points at a node that is NOT also in
+  // selectedIds (the union bbox already decorates selected nodes).
+  const hoverBox = document.createElement('div');
+  hoverBox.className = 'rfd-overlay-hover';
+  Object.assign(hoverBox.style, {
+    position: 'absolute',
+    border: '1px solid rgba(43,116,255,0.5)',
+    boxSizing: 'border-box',
+    pointerEvents: 'none',
+    display: 'none',
+  });
+  wrapper.appendChild(hoverBox);
+
+  // Container for per-node thin outlines drawn during multi-select.
+  // Each child is a <div> styled like hoverBox; we recycle the DOM
+  // nodes when the outline list changes to avoid layout thrash on
+  // selection changes through 50+ siblings (rare but cheap to handle).
+  const multiOutlineRoot = document.createElement('div');
+  multiOutlineRoot.className = 'rfd-overlay-multi';
+  Object.assign(multiOutlineRoot.style, {
+    position: 'absolute',
+    inset: '0',
+    pointerEvents: 'none',
+    display: 'block',
+  });
+  wrapper.appendChild(multiOutlineRoot);
 
   const handles: Record<HandlePosition, HTMLElement> = {} as any;
   const HANDLE_POSITIONS: HandlePosition[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -109,6 +151,8 @@ export function createSelectionOverlay(opts: OverlayOptions): {
   // because it's synced). Handles live at scene-space offsets.
   let zoom = 1, panX = 0, panY = 0;
   let currentRect: SelectionRect | null = null;
+  let hoverRect: SelectionRect | null = null;
+  let multiRects: ReadonlyArray<SelectionRect> = [];
   const HANDLE_SIZE = 8;
 
   const redraw = () => {
@@ -151,12 +195,64 @@ export function createSelectionOverlay(opts: OverlayOptions): {
     bbox.style.borderWidth = `${1.5 / zoom}px`;
   };
 
+  const redrawHover = () => {
+    if (!hoverRect) {
+      hoverBox.style.display = 'none';
+      return;
+    }
+    hoverBox.style.display = 'block';
+    Object.assign(hoverBox.style, {
+      left: `${hoverRect.x}px`,
+      top: `${hoverRect.y}px`,
+      width: `${hoverRect.width}px`,
+      height: `${hoverRect.height}px`,
+      borderWidth: `${1 / zoom}px`,
+    });
+  };
+
+  const redrawMulti = () => {
+    // Recycle existing children where possible — just resize them.
+    // When the new list is shorter, hide the surplus; when longer,
+    // append fresh divs.
+    const existing = multiOutlineRoot.children;
+    while (existing.length < multiRects.length) {
+      const div = document.createElement('div');
+      Object.assign(div.style, {
+        position: 'absolute',
+        border: '1px solid rgba(43,116,255,0.85)',
+        boxSizing: 'border-box',
+        pointerEvents: 'none',
+      });
+      multiOutlineRoot.appendChild(div);
+    }
+    for (let i = 0; i < existing.length; i++) {
+      const div = existing[i] as HTMLElement;
+      if (i >= multiRects.length) {
+        div.style.display = 'none';
+        continue;
+      }
+      const r = multiRects[i];
+      Object.assign(div.style, {
+        display: 'block',
+        left: `${r.x}px`,
+        top: `${r.y}px`,
+        width: `${r.width}px`,
+        height: `${r.height}px`,
+        borderWidth: `${1 / zoom}px`,
+      });
+    }
+  };
+
+  const redrawAll = () => { redraw(); redrawHover(); redrawMulti(); };
+
   return {
     setSelection: (rect) => { currentRect = rect; redraw(); },
+    setHover: (rect) => { hoverRect = rect; redrawHover(); },
+    setMultiSelectOutlines: (rects) => { multiRects = rects; redrawMulti(); },
     syncTransform: (z, px, py) => {
       zoom = z; panX = px; panY = py;
       wrapper.style.transform = `translate(${px}px, ${py}px) scale(${z})`;
-      redraw();
+      redrawAll();
     },
     destroy: () => {
       wrapper.removeEventListener('mousedown', onDown);

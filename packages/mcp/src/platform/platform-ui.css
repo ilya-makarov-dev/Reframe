@@ -868,13 +868,21 @@ input, textarea, select {
  * (120–520px for sidebar, 240–640px for right).
  */
 .body {
-  --sidebar-w: 220px;
-  --right-w: 340px;
+  /* Phase 1 UI-1 defaults — left panel 320px, right panel 360px.
+     User-edited values land in localStorage under
+     'reframe-platform-ui-layout-v1' and override these via inline
+     style on the .body element on mount. */
+  --sidebar-w: 320px;
+  --right-w: 360px;
+  /* Collapsed left rail width. Wide enough for one icon column +
+     padding so the collapse toggle stays clickable. */
+  --sidebar-collapsed-w: 48px;
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
   min-height: 0;
   overflow: hidden;
   position: relative;
+  transition: grid-template-columns 180ms var(--ease, cubic-bezier(0.2, 0.6, 0.2, 1));
 }
 .body.with-right {
   grid-template-columns: var(--sidebar-w) 1fr var(--right-w);
@@ -885,37 +893,75 @@ input, textarea, select {
 .body.solo {
   grid-template-columns: 1fr;
 }
+/* Collapsed left panel — sidebar shrinks to icon-rail width, the
+   resize handle hides (can't drag while collapsed; uncollapse first),
+   and the canvas takes the recovered space. */
+.body[data-left-collapsed="true"] {
+  grid-template-columns: var(--sidebar-collapsed-w) 1fr;
+}
+.body.with-right[data-left-collapsed="true"] {
+  grid-template-columns: var(--sidebar-collapsed-w) 1fr var(--right-w);
+}
+.body[data-left-collapsed="true"] .panel-resize-sidebar {
+  display: none;
+}
+/* Hide sidebar inner content when collapsed — only the collapse
+   toggle stays visible in the rail. Keeps the rail visually clean
+   without unmounting the DOM (state survives toggle without re-render). */
+.body[data-left-collapsed="true"] .sidebar > :not(.sidebar-collapse-toggle) {
+  display: none;
+}
+.body[data-left-collapsed="true"] .sidebar {
+  padding: 12px 0;
+}
 
-/* Mobile / narrow: sidebar (220) + right (340) leaves the canvas
-   pane with near-zero width at 390 px — CanvasKit silently refuses
-   to render a zero-width surface. At 768 px the canvas is still
-   only 228 px (<30% of viewport), below the 60%-of-viewport floor
-   designer-qa treats as "collapse required". Below 1024 px we drop
-   BOTH asides and hand the canvas the full width. (Right rail on
-   scenes already stacks via its own grid when present.) */
-@media (max-width: 1024px) {
-  .body,
-  .body.with-right,
-  .body.no-sidebar {
-    grid-template-columns: 1fr !important;
-  }
-  .body .sidebar,
-  .body > aside,
-  .body .right,
-  .body .right-panel,
-  .body .panel-resize-sidebar,
-  .body .panel-resize-right,
-  .app > aside,
-  .app > .sidebar,
-  .app .right-panel {
-    display: none !important;
-  }
-  /* Editor shell uses a grid too; the layers + properties asides
-     eat the canvas. Stack the main surface full-width. */
-  .app {
-    grid-template-columns: 1fr !important;
-    grid-template-areas: "main" !important;
-  }
+/* Phase 1 UI-1 — narrow viewport (<1024px) handling. Phase 1 is
+   explicitly desktop-only; we surface the limitation as a clear
+   notice (see .reframe-narrow-viewport-toast below) rather than
+   render a degraded layout. The .reframe-viewport-narrow class is
+   toggled on <body> by JS when window.innerWidth crosses 1024px. */
+body.reframe-viewport-narrow .app {
+  /* Suppress interaction with the underlying app while the toast
+     is the actionable element. visibility:hidden keeps layout
+     dimensions stable for when viewport widens back. */
+  pointer-events: none;
+  opacity: 0.35;
+}
+.reframe-narrow-viewport-toast {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: auto;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+body.reframe-viewport-narrow .reframe-narrow-viewport-toast {
+  display: flex;
+}
+.reframe-narrow-viewport-toast-card {
+  background: var(--surface-elevated, #fff);
+  color: var(--text-primary, #111);
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 12px;
+  padding: 24px 28px;
+  max-width: 420px;
+  text-align: center;
+  font-size: 14px;
+  line-height: 1.5;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.reframe-narrow-viewport-toast-card strong {
+  font-size: 15px;
+  font-weight: 500;
+}
+.reframe-narrow-viewport-toast-card span {
+  color: var(--text-muted, #666);
+  font-size: 13px;
 }
 
 /* Drag handles — invisible 6px-wide strips along the inner edges of
@@ -961,7 +1007,52 @@ input, textarea, select {
 
 /* ── Sidebar ────────────────────────────────────────────── */
 
+/* Phase 1 UI-1 — collapse toggle. Sits in the top-right of the
+   sidebar; click toggles the .body[data-left-collapsed] state.
+   Two icons (chevron-left for collapse, chevron-right for expand)
+   are mounted inline; CSS shows the right one based on the parent
+   .body[data-left-collapsed] attribute. */
+.sidebar-collapse-toggle {
+  position: absolute;
+  top: 8px;
+  /* When expanded: sit at the inner edge of the rail. When collapsed:
+     center within the 48px rail. The first form takes precedence;
+     the collapsed override is below. */
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted, #666);
+  cursor: pointer;
+  z-index: 5;
+  transition: background 120ms var(--ease, ease), color 120ms var(--ease, ease);
+}
+.sidebar-collapse-toggle:hover {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.04));
+  color: var(--text-primary, #111);
+}
+.sidebar-collapse-toggle .sc-icon-collapse { display: block; }
+.sidebar-collapse-toggle .sc-icon-expand { display: none; }
+.body[data-left-collapsed="true"] .sidebar-collapse-toggle {
+  /* Center the toggle in the collapsed rail and re-show it (the
+     "hide sidebar children" rule above carves an exception). */
+  display: flex !important;
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+}
+.body[data-left-collapsed="true"] .sidebar-collapse-toggle .sc-icon-collapse { display: none; }
+.body[data-left-collapsed="true"] .sidebar-collapse-toggle .sc-icon-expand { display: block; }
+
 .sidebar {
+  position: relative;
   border-right: 1px solid var(--border-subtle);
   overflow-y: auto;
   padding: 24px 12px;
@@ -1199,6 +1290,81 @@ input, textarea, select {
   text-transform: lowercase;
 }
 .layer-children.collapsed { display: none; }
+
+/* ── Phase 1 UI-4 — visibility / lock / drag-reorder states ─── */
+
+/* Hidden node — text dims, kept selectable so designer can un-hide. */
+.layer-item.layer-hidden {
+  opacity: 0.45;
+}
+.layer-item.layer-hidden .layer-name {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-muted, #666);
+}
+
+/* Locked node — subtle background tint + non-italic to distinguish
+   from hidden state. Padlock icon is its own affordance, not the
+   only visual cue. */
+.layer-item.layer-locked {
+  background: linear-gradient(to right, transparent 0%, rgba(255,180,0,0.04) 100%);
+}
+
+/* Visibility + lock icons: small, right-aligned, hover-highlighted. */
+.layer-item .layer-vis,
+.layer-item .layer-lock {
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+  transition: opacity 80ms ease, transform 80ms ease;
+}
+.layer-item .layer-vis:hover,
+.layer-item .layer-lock:hover {
+  opacity: 1 !important;
+  transform: scale(1.1);
+}
+
+/* Drag-reorder visual states. The dragged row goes translucent so
+   the user sees their own cursor + a "ghost" of the original
+   position. Drop indicators paint thin blue lines above/below for
+   sibling drops, full outline + indent for inside drops. */
+.layer-item.layer-dragging {
+  opacity: 0.4;
+}
+.layer-item.layer-drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent, #2b74ff);
+}
+.layer-item.layer-drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent, #2b74ff);
+}
+.layer-item.layer-drop-inside {
+  outline: 2px solid var(--accent, #2b74ff);
+  outline-offset: -2px;
+  background: rgba(43, 116, 255, 0.08);
+}
+
+/* Reject animation — runs once when drop is rejected by server
+   (cycle, locked target, etc.). Quick horizontal shake. */
+@keyframes rfd-layer-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-3px); }
+  40%, 80% { transform: translateX(3px); }
+}
+.layer-item.layer-shake {
+  animation: rfd-layer-shake 280ms ease;
+}
+
+/* Multi-select primary highlight — slightly stronger than .selected
+   to distinguish the row that drives the inspector + keyboard cursor. */
+.layer-item.primary {
+  box-shadow: inset 2px 0 0 0 var(--accent, #2b74ff);
+}
+
+/* Tree focus ring when keyboard nav is active. */
+.layers-tree:focus-visible {
+  outline: 2px solid var(--accent, #2b74ff);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
 
 .sidebar-empty {
   padding: 8px 12px;
@@ -5920,20 +6086,51 @@ input, textarea, select {
   padding: 10px 10px 6px;
   margin: 8px 0 14px;
   font-family: var(--sans);
+  /* Phase 1 UI-6a Pin #4 — accent left-border ties the panel to the
+   * focus-ring identity used elsewhere (UI-5a edit ring, UI-5b color
+   * picker rail). Reads as "this is a primary surface", not chrome. */
+  border-left: 2px solid rgb(43, 116, 255);
 }
 .tweaks-panel[hidden] { display: none; }
+.tweaks-panel.collapsed .tweaks-list,
+.tweaks-panel.collapsed [data-tweaks-empty] { display: none; }
 .tweaks-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 10px;
+  /* Click-to-collapse affordance. */
+  cursor: pointer;
+  user-select: none;
 }
 .tweaks-title {
+  /* Phase 1 UI-6a Pin #4 — bumped from 11px/uppercase to 13px/normal
+   * for prominence. Tweaks are scene-wide knobs (not chrome) and
+   * deserve a header that reads at first glance. */
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text-primary);
+}
+.tweaks-empty {
+  padding: 8px 4px 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.tweaks-empty-copy {
+  font-style: italic;
+  margin-bottom: 6px;
+}
+.tweaks-empty-example {
+  font-family: var(--mono, ui-monospace, "SF Mono", monospace);
   font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  background: var(--surface);
+  border: 1px dashed var(--border-subtle);
+  border-radius: 4px;
+  padding: 4px 8px;
   color: var(--text-secondary);
 }
 .tweaks-count {
@@ -7039,4 +7236,102 @@ body.reframe-editor-mode {
   background-image:
     radial-gradient(circle at 20% 20%, rgba(0, 0, 0, 0.015), transparent 50%),
     radial-gradient(circle at 80% 80%, rgba(0, 0, 0, 0.015), transparent 50%);
+}
+
+/* ─── Phase 1 UI-5b — Color picker rail ─────────────────────────
+ *
+ * Anchored popover under color-typed inspector fields. Three rows:
+ * brand palette (token-bound) / scene-used / custom hex + native
+ * picker. Visual polish parity with UI-5a edit ring (1 px solid
+ * blue + 3 px soft glow + drop shadow).
+ *
+ * The rail uses a light surface (#fff) regardless of dashboard
+ * theme — color swatches read most truthfully against neutral
+ * background. Switching to dark surface darkens swatches via
+ * compositing and makes brand colors look wrong.
+ */
+
+#rfd-color-picker-rail {
+  /* Inline-styles in 116-color-picker-rail.js own size + position;
+   * this sheet contributes the row-grid + swatch behavior only. */
+}
+
+#rfd-color-picker-rail .rfd-cp-row {
+  margin-bottom: 10px;
+}
+#rfd-color-picker-rail .rfd-cp-row:last-child {
+  margin-bottom: 0;
+}
+
+#rfd-color-picker-rail .rfd-cp-row-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  margin-bottom: 6px;
+}
+
+#rfd-color-picker-rail .rfd-cp-row-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 24px);
+  gap: 6px;
+  align-items: start;
+}
+
+#rfd-color-picker-rail .rfd-cp-empty {
+  font-size: 11px;
+  color: #9ca3af;
+  font-style: italic;
+  padding: 4px 0;
+  grid-column: 1 / -1;
+}
+
+#rfd-color-picker-rail .rfd-cp-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  cursor: pointer;
+  padding: 0;
+  background-clip: padding-box;
+  transition: transform 80ms ease;
+  outline: none;
+}
+#rfd-color-picker-rail .rfd-cp-swatch:hover,
+#rfd-color-picker-rail .rfd-cp-swatch:focus-visible {
+  transform: scale(1.1);
+  border-color: rgba(0, 0, 0, 0.15);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+}
+
+#rfd-color-picker-rail .rfd-cp-custom-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+#rfd-color-picker-rail .rfd-cp-hex {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  background: #f9fafb;
+  color: #1a1d24;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+  outline: none;
+}
+#rfd-color-picker-rail .rfd-cp-hex:focus {
+  border-color: #2b74ff;
+  box-shadow: 0 0 0 2px rgba(43, 116, 255, 0.15);
+}
+#rfd-color-picker-rail .rfd-cp-native {
+  width: 32px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
 }

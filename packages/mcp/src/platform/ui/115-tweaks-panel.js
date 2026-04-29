@@ -55,10 +55,24 @@
     }
 
     function render(tweaks) {
+      // Phase 1 UI-6a Pin #4 — empty-state CTA. Don't hide the panel
+      // when no tweaks are declared; render a muted CTA explaining
+      // what tweaks are + how to ask the agent to add them. Designer
+      // discovers the surface from first scene load instead of waiting
+      // for the agent to declare them organically.
       if (!tweaks || tweaks.length === 0) {
-        panel.setAttribute('hidden', '');
-        list.innerHTML = '';
-        if (countEl) countEl.textContent = '';
+        panel.removeAttribute('hidden');
+        if (countEl) countEl.textContent = '0 declared';
+        list.innerHTML =
+          '<div class="tweaks-empty" data-tweaks-empty>'
+          + '<div class="tweaks-empty-copy">'
+          +   'Scene-wide knobs the agent declares as live controls — '
+          +   'colors, spacing, density. Ask the agent to add some:'
+          + '</div>'
+          + '<div class="tweaks-empty-example">'
+          +   '"add tweaks for accent color and spacing"'
+          + '</div>'
+          + '</div>';
         return;
       }
       panel.removeAttribute('hidden');
@@ -66,6 +80,18 @@
       list.innerHTML = '';
       for (var i = 0; i < tweaks.length; i++) {
         list.appendChild(buildRow(tweaks[i]));
+      }
+      // Auto-expand on first scene load if tweaks > 0. localStorage
+      // key is per-scene so a designer who collapsed it for scene A
+      // doesn't have to re-collapse it for scene B. User collapse
+      // persists; subsequent reopens honor the user's choice.
+      var sid = currentSceneId();
+      if (sid) {
+        var storageKey = 'reframe-tweaks-collapsed-' + sid;
+        var userCollapsed = false;
+        try { userCollapsed = localStorage.getItem(storageKey) === '1'; } catch (_) {}
+        if (userCollapsed) panel.classList.add('collapsed');
+        else panel.classList.remove('collapsed');
       }
     }
 
@@ -270,6 +296,24 @@
       } catch (e) {
         flash('Tweak network error', 'error');
       }
+    }
+
+    // Phase 1 UI-6a Pin #4 — header click toggles collapse, persisted
+    // per-scene in localStorage. Persistence key matches the auto-
+    // expand reader above so initial-load + manual-collapse round-trip
+    // correctly across reloads.
+    var head = panel.querySelector('.tweaks-head');
+    if (head) {
+      head.addEventListener('click', function() {
+        panel.classList.toggle('collapsed');
+        var sid = currentSceneId();
+        if (!sid) return;
+        var key = 'reframe-tweaks-collapsed-' + sid;
+        try {
+          if (panel.classList.contains('collapsed')) localStorage.setItem(key, '1');
+          else localStorage.removeItem(key);
+        } catch (_) {}
+      });
     }
 
     // Refresh triggers: on init, on scene-changed SSE, and on scene-select

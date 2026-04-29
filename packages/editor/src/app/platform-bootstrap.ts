@@ -104,8 +104,13 @@ export async function initPlatformViewport(): Promise<void> {
   // right instance.
   const dispatchCanvasSelect = (ids: string[]) => {
     const primary = ids.length > 0 ? ids[0] : null;
+    // Phase 1 UI-3 — `nodeIds` carries the full multi-select array so
+    // the platform UI inspector can fetch shared-props via the new
+    // /platform/api/node/get-many endpoint without re-listening to a
+    // second `reframe:ui-state-changed` event (race-prone — events
+    // can land in either order on rapid reselects).
     window.dispatchEvent(new CustomEvent('reframe:canvas-select', {
-      detail: { nodeId: primary, multi: ids.length > 1 },
+      detail: { nodeId: primary, nodeIds: ids, multi: ids.length > 1 },
     }));
     if (primary) {
       window.dispatchEvent(new CustomEvent('reframe:ui-state-changed', {

@@ -27,6 +27,21 @@ import { createSelectionOverlay, type SelectionRect, type HandlePosition } from 
 import { hitTest } from './pointer.js';
 import { createPresentMode, type PresentModeController } from './present.js';
 import { registerCanvas, setFocused, isFocused, type DOMCanvasHandle, type CompositionKind } from './registry.js';
+import {
+  createSelectionState,
+  setSelection as stateSetSelection,
+  toggleInSelection,
+  addToSelection,
+  clearSelection as stateClearSelection,
+  setHovered,
+  applyMarqueeResult,
+  selectionAsArray,
+  type NodeId,
+} from './selection-state.js';
+import { createMarqueeSelector } from './marquee-select.js';
+import { attachKeyboardNav } from './keyboard-nav.js';
+import { createInlineTextEditor, isLeafTextElement } from './inline-text-edit.js';
+import { createMiniToolbar } from './mini-toolbar.js';
 
 export interface DOMCanvasOptions {
   container: HTMLElement;
@@ -103,10 +118,28 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   viewport.appendChild(wrapper);
 
   // ── Selection state ────────────────────────────────────────
-  // Multi-select: an array of INode ids. Shift+click adds/removes;
-  // plain click replaces. Overlay shows the UNION bbox; drag moves
-  // every selected node simultaneously.
-  let selection: string[] = [];
+  // Phase 1 UI-2: state is now a SelectionState container
+  // (Set<NodeId> + primaryId + hoveredId). The legacy `selection`
+  // array shape is recomputed via selectionAsArray for callers
+  // (drag/resize loops, overlay union, postEdit fan-out) that still
+  // expect array semantics.
+  const selState = createSelectionState();
+
+  // ── Server writeback (hoisted) ─────────────────────────────
+  // Declared before consumer (inline editor) so the controller can
+  // capture a stable reference at construction time. Pure closure;
+  // no internal state besides opts.sceneId.
+  const postEdit = async (nodeId: string, props: Record<string, unknown>) => {
+    try {
+      await fetch('/platform/api/node/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sceneId: opts.sceneId, nodeId, props }),
+      });
+    } catch (err) {
+      console.warn('[canvas-dom] postEdit failed', err);
+    }
+  };
   let currentZoom: ZoomPanState = { zoom: 1, panX: 0, panY: 0 };
 
   // Track scene-root dims for zoom-to-fit + transform math.
@@ -158,6 +191,37 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
     },
   });
 
+  // Phase 1 UI-2 — marquee selection. Mounted on the parent viewport
+  // (not inside the iframe) so the dashed rectangle paints over the
+  // canvas chrome cleanly. The empty-space gate forwards to hitTest
+  // inside the iframe; cursor-on-INode → no marquee, single click runs.
+  const marquee = createMarqueeSelector({
+    viewport,
+    getIframe: () => renderer.iframe,
+    isEmptyAt: (clientX, clientY) => {
+      const doc = renderer.iframe.contentDocument;
+      if (!doc) return false;
+      // Gate also bails out when present mode is active — marquee
+      // doesn't make sense over a camera-animated scene.
+      if (presentMode.isActive()) return false;
+      const result = hitTest(doc, clientX, clientY);
+      // Treat the scene root as "empty" so marquees that start over
+      // the root frame (very common — body fills the canvas) still
+      // work as expected.
+      if (!result) return true;
+      const rootEl = doc.body.firstElementChild as HTMLElement | null;
+      const rootId = rootEl?.getAttribute('data-reframe-inode') ?? null;
+      return result.nodeId === rootId;
+    },
+    onComplete: (ids, mod) => {
+      applyMarqueeResult(selState, ids, mod);
+      const next = selectionAsArray(selState);
+      refreshSelectionOverlay();
+      opts.onSelect?.(next);
+    },
+  });
+  void marquee;
+
   const presentMode = createPresentMode({
     iframe: renderer.iframe,
     viewport,
@@ -186,34 +250,63 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
     // in insertion order: focus → select.
     doc.addEventListener('click', () => setFocused(hostId), { capture: true });
 
-    // Click → select. Shift+click → toggle. Empty space → clear.
+    // Phase 1 UI-2 — click semantics:
+    //   plain click           → replace with single
+    //   Shift+click           → add to selection (idempotent)
+    //   Cmd/Ctrl+click        → toggle membership
+    //   click empty space     → clear (when no modifier held)
+    //
+    // Marquee selection runs in PARENT viewport space (separate
+    // listener, see createMarqueeSelector wiring below) — its empty-
+    // space gate prevents double-firing with this iframe click handler
+    // because the marquee bails out when an INode is at the cursor.
     doc.addEventListener('click', (e) => {
       const shift = (e as any).shiftKey === true;
+      const meta = (e as any).metaKey === true || (e as any).ctrlKey === true;
       const result = hitTest(doc, e.clientX, e.clientY);
       if (!result) {
-        if (!shift) setSelection([]);
+        if (!shift && !meta) commitSelection([]);
         return;
       }
-      if (shift) toggleSelection(result.nodeId);
-      else setSelection([result.nodeId]);
+      if (meta) {
+        toggleInSelection(selState, result.nodeId);
+        commitSelection(selectionAsArray(selState));
+      } else if (shift) {
+        addToSelection(selState, result.nodeId);
+        commitSelection(selectionAsArray(selState));
+      } else {
+        commitSelection([result.nodeId]);
+      }
     }, { capture: true });
 
-    // Double-click text → inline edit (contenteditable in iframe).
-    doc.addEventListener('dblclick', (e) => {
-      const target = e.target as HTMLElement;
+    // Phase 1 UI-2 — hover preview. Mousemove on the iframe paints a
+    // thin outline on the hovered INode (skipped when it's already
+    // selected — the heavier selected outline wins). Mouseleave clears.
+    doc.addEventListener('mousemove', (e) => {
+      const target = e.target as HTMLElement | null;
       const host = findInodeAnchor(target);
-      if (!host) return;
-      const isTextNode = host.tagName === 'P' || host.tagName === 'H1' || host.tagName === 'H2'
-        || host.tagName === 'H3' || host.tagName === 'H4' || host.tagName === 'H5'
-        || host.tagName === 'H6' || host.tagName === 'SPAN' || host.tagName === 'BUTTON';
-      if (!isTextNode) return;
-      e.preventDefault();
-      startInlineTextEdit(host);
+      const id = host?.getAttribute('data-reframe-inode') ?? null;
+      if (id === selState.hoveredId) return;
+      setHovered(selState, id);
+      refreshHoverOverlay();
+    });
+    doc.addEventListener('mouseleave', () => {
+      if (selState.hoveredId !== null) {
+        setHovered(selState, null);
+        refreshHoverOverlay();
+      }
     });
 
-    // Escape inside iframe clears selection.
+    // Double-click text → inline edit. Tag gate + dblclick handler live
+    // inside `inline-text-edit.ts`; bind it to the live document. The
+    // module rebinds itself on each iframe load via this call.
+    inlineEditor.attachToDocument(doc);
+
+    // Escape inside iframe clears selection. (Window-level keyboard-nav
+    // intercepts Escape FIRST when there's a parent to navigate to;
+    // this fallback handles the topmost level where parent walk halts.)
     doc.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') setSelection([]);
+      if (e.key === 'Escape') commitSelection([]);
     });
 
     // Drag body of a selected element → move via /api/node/edit.
@@ -232,7 +325,7 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
       const host = findInodeAnchor(target);
       if (!host) return;
       const nodeId = host.getAttribute('data-reframe-inode');
-      if (!nodeId || !selection.includes(nodeId)) return;
+      if (!nodeId || !selState.selectedIds.has(nodeId)) return;
       if ((target as any).isContentEditable) return;
       // Scene root guard — first body child is the root frame.
       if (host === doc.body.firstElementChild) return;
@@ -247,43 +340,80 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   };
 
   // ── Selection API ──────────────────────────────────────────
+  //
+  // commitSelection is the single mutation point — it pushes new ids
+  // into the SelectionState container, refreshes the overlay (union
+  // bbox + per-node thin outlines), and notifies subscribers via
+  // opts.onSelect. Internal call sites (click, marquee, keyboard nav,
+  // public select() API) all funnel through here so the SelectionState
+  // never gets desynced from the rendered overlay.
 
-  const setSelection = (ids: string[]) => {
-    selection = ids;
+  const commitSelection = (ids: NodeId[]) => {
+    stateSetSelection(selState, ids);
     refreshSelectionOverlay();
-    opts.onSelect?.(selection);
+    opts.onSelect?.(selectionAsArray(selState));
   };
 
-  const toggleSelection = (id: string) => {
-    if (selection.includes(id)) setSelection(selection.filter(x => x !== id));
-    else setSelection([...selection, id]);
+  const computeRectForNode = (id: NodeId, doc: Document, iframeOrigin: DOMRect): SelectionRect | null => {
+    const el = doc.querySelector(`[data-reframe-inode="${id.replace(/(["\\<>])/g, '\\$1')}"]`) as HTMLElement | null;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      x: r.left - iframeOrigin.left,
+      y: r.top - iframeOrigin.top,
+      width: r.width,
+      height: r.height,
+    };
   };
 
   const refreshSelectionOverlay = () => {
-    if (selection.length === 0 || presentMode.isActive()) {
+    const ids = selectionAsArray(selState);
+    if (ids.length === 0 || presentMode.isActive()) {
       overlay.setSelection(null);
+      overlay.setMultiSelectOutlines([]);
+      refreshHoverOverlay();
       return;
     }
     const iframe = renderer.iframe;
     const doc = iframe.contentDocument;
     if (!doc) return;
-    // Union bbox for multi-select.
+    // Per-node rects + union bbox.
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     const iframeOrigin = doc.body.getBoundingClientRect();
-    for (const id of selection) {
-      const el = doc.querySelector(`[data-reframe-inode="${id}"]`) as HTMLElement | null;
-      if (!el) continue;
-      const r = el.getBoundingClientRect();
-      const x = r.left - iframeOrigin.left;
-      const y = r.top - iframeOrigin.top;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x + r.width > maxX) maxX = x + r.width;
-      if (y + r.height > maxY) maxY = y + r.height;
+    const perNode: SelectionRect[] = [];
+    for (const id of ids) {
+      const r = computeRectForNode(id, doc, iframeOrigin);
+      if (!r) continue;
+      perNode.push(r);
+      if (r.x < minX) minX = r.x;
+      if (r.y < minY) minY = r.y;
+      if (r.x + r.width > maxX) maxX = r.x + r.width;
+      if (r.y + r.height > maxY) maxY = r.y + r.height;
     }
-    if (minX === Infinity) { overlay.setSelection(null); return; }
-    const rect: SelectionRect = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-    overlay.setSelection(rect);
+    if (minX === Infinity) {
+      overlay.setSelection(null);
+      overlay.setMultiSelectOutlines([]);
+      refreshHoverOverlay();
+      return;
+    }
+    overlay.setSelection({ x: minX, y: minY, width: maxX - minX, height: maxY - minY });
+    // Per-node thin outlines only when multi-select; single-node case
+    // already gets the heavy outline + handles via setSelection.
+    overlay.setMultiSelectOutlines(ids.length > 1 ? perNode : []);
+    refreshHoverOverlay();
+  };
+
+  const refreshHoverOverlay = () => {
+    const id = selState.hoveredId;
+    if (!id || selState.selectedIds.has(id) || presentMode.isActive()) {
+      overlay.setHover(null);
+      return;
+    }
+    const doc = renderer.iframe.contentDocument;
+    if (!doc) return;
+    const iframeOrigin = doc.body.getBoundingClientRect();
+    const r = computeRectForNode(id, doc, iframeOrigin);
+    overlay.setHover(r);
   };
 
   // ── Drag to move ───────────────────────────────────────────
@@ -295,7 +425,7 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
     const starts: Array<{ id: string; x: number; y: number; w: number; h: number; el: HTMLElement }> = [];
     const iframeOrigin = doc.body.getBoundingClientRect();
     const rootEl = doc.body.firstElementChild;
-    for (const id of selection) {
+    for (const id of selectionAsArray(selState)) {
       const el = doc.querySelector(`[data-reframe-inode="${id}"]`) as HTMLElement | null;
       if (!el) continue;
       // Skip scene root — moving it shifts the whole frame, which is
@@ -367,7 +497,7 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
       const iframeOrigin = doc.body.getBoundingClientRect();
       const rootEl = doc.body.firstElementChild;
       const starts: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
-      for (const id of selection) {
+      for (const id of selectionAsArray(selState)) {
         const el = doc.querySelector(`[data-reframe-inode="${id}"]`) as HTMLElement | null;
         if (!el) continue;
         // Scene root skipped — resize writeback would set explicit
@@ -435,61 +565,59 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   };
 
   // ── Inline text edit ───────────────────────────────────────
-
-  let editingEl: HTMLElement | null = null;
-  let editingNodeId: string | null = null;
-
-  const startInlineTextEdit = (host: HTMLElement) => {
-    if (editingEl) finishInlineTextEdit(true);
-    const nodeId = host.getAttribute('data-reframe-inode');
-    if (!nodeId) return;
-    editingEl = host;
-    editingNodeId = nodeId;
-    host.setAttribute('contenteditable', 'true');
-    host.style.outline = '2px solid #2b74ff';
-    host.focus();
-    // Select all text on enter.
-    const doc = host.ownerDocument;
-    const range = doc.createRange();
-    range.selectNodeContents(host);
-    const sel = doc.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    const onBlur = () => finishInlineTextEdit(true);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); finishInlineTextEdit(true); }
-      if (e.key === 'Escape') { e.preventDefault(); finishInlineTextEdit(false); }
-    };
-    host.addEventListener('blur', onBlur, { once: true });
-    host.addEventListener('keydown', onKey, { once: false });
+  //
+  // Phase 1 UI-5a: extracted to `inline-text-edit.ts` (controller +
+  // expanded EDITABLE_TAGS + isLeafTextElement heuristic) and paired
+  // with `mini-toolbar.ts` for floating Bold/Italic/Link.
+  //
+  // Lifecycle: controller is module-scope (one per canvas instance).
+  // Doc-level dblclick is rebound per iframe load via attachToDocument.
+  // Window-level Enter/F2 multi-modal entry is routed through
+  // tryEnterFromKey() in onGlobalKey below — single key listener,
+  // gated by isFocused(hostId).
+  const miniToolbar = createMiniToolbar({
+    parentDoc: document,
+    iframe: renderer.iframe,
+  });
+  const inlineEditor = createInlineTextEditor({
+    sceneId: opts.sceneId,
+    postEdit,
+    onEditStart: (host) => {
+      // Phase 1 UI-6a Pin #2 — inline-edit promotes selection.
+      // Multi-selected {A,B,C} + dblclick on B → selection becomes [B]
+      // (Figma behavior: entering edit mode collapses to single-target).
+      // Already-single-selected B → no-op (commitSelection idempotent).
+      // Inspector + LAYERS rail follow the new selection via the usual
+      // event path — no extra wiring needed.
+      const id = host.getAttribute('data-reframe-inode');
+      if (id) {
+        const current = selectionAsArray(selState);
+        if (!(current.length === 1 && current[0] === id)) {
+          commitSelection([id]);
+        }
+      }
+      // Cmd+B/I/K hotkey listener installed on iframe doc only while
+      // editing — execCommand needs focus inside the contenteditable.
+      const doc = host.ownerDocument;
+      doc.addEventListener('keydown', miniToolbarKeyHandler, { capture: true });
+    },
+    onEditEnd: () => {
+      miniToolbar.hide();
+      const doc = renderer.iframe.contentDocument;
+      doc?.removeEventListener('keydown', miniToolbarKeyHandler, { capture: true } as EventListenerOptions);
+    },
+    onSelectionChange: (host, range) => {
+      miniToolbar.onSelectionChanged(host, range);
+    },
+  });
+  const miniToolbarKeyHandler = (e: KeyboardEvent) => {
+    if (!inlineEditor.isEditing()) return;
+    miniToolbar.handleHotkey(e);
   };
 
-  const finishInlineTextEdit = async (commit: boolean) => {
-    const el = editingEl; const nodeId = editingNodeId;
-    editingEl = null; editingNodeId = null;
-    if (!el) return;
-    el.removeAttribute('contenteditable');
-    el.style.outline = '';
-    if (!commit || !nodeId) return;
-    const newText = el.textContent ?? '';
-    await postEdit(nodeId, { 'text-content': newText });
-  };
-
-  // ── Server writeback ───────────────────────────────────────
-
-  const postEdit = async (nodeId: string, props: Record<string, unknown>) => {
-    try {
-      await fetch('/platform/api/node/edit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sceneId: opts.sceneId, nodeId, props }),
-      });
-      // Server SSE broadcasts scene:session-changed → renderer.reload
-      // auto-refreshes the iframe. No explicit reload needed here.
-    } catch (err) {
-      console.warn('[canvas-dom] postEdit failed', err);
-    }
-  };
+  // Reposition mini-toolbar on zoom/pan changes (it's anchored to a
+  // viewport-coord position computed from the host's bbox).
+  zoomSubscribers.add(() => miniToolbar.reposition());
 
   // ── Present mode keybind (window-global + focus-gated) ─────
   //
@@ -499,25 +627,90 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
   // only the focused instance toggles present mode. Without the gate,
   // pressing P with N canvases mounted would toggle all N simultaneously.
   const onGlobalKey = (e: KeyboardEvent) => {
+    if (!isFocused(hostId)) return;
     if (e.key === 'p' && (e.ctrlKey || e.metaKey) === false && !e.shiftKey && !e.altKey) {
-      if (!isFocused(hostId)) return;
-      if (editingEl) return; // don't hijack while typing in inline edit
+      if (inlineEditor.isEditing()) return; // don't hijack while typing in inline edit
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       e.preventDefault();
       presentMode.toggle();
+      return;
     }
+    // Phase 1 UI-5a Pin #2 — multi-modal edit entry. Enter (no mods)
+    // or F2 with a single text-node selection enters edit mode. Skipped
+    // when focus is in a real form input (don't steal Enter from the
+    // inspector text fields).
+    inlineEditor.tryEnterFromKey(e, () => {
+      const id = selState.primaryId;
+      if (!id) return null;
+      const doc = renderer.iframe.contentDocument;
+      if (!doc) return null;
+      const host = doc.querySelector(`[data-reframe-inode="${id}"]`) as HTMLElement | null;
+      if (!host) return null;
+      return isLeafTextElement(host) ? host : null;
+    });
   };
   window.addEventListener('keydown', onGlobalKey);
+
+  // Phase 1 UI-2 — keyboard navigation (Tab/Enter/Esc/Cmd+A/Cmd+G/
+  // Cmd+Shift+G). Window-global listener gated by isFocused so a
+  // multi-mount page (variants/flow/sampler) routes keys to one
+  // canvas. runEdit posts to the same /platform/api/edit surface
+  // existing ops use; group + ungroup land as `op` strings the
+  // mcp edit handler interprets via switch.
+  const kbNav = attachKeyboardNav({
+    isFocused: () => isFocused(hostId),
+    getDocument: () => renderer.iframe.contentDocument,
+    getPrimaryId: () => selState.primaryId,
+    getSelectedIds: () => selectionAsArray(selState),
+    setSelection: (ids) => commitSelection(ids),
+    getSceneId: () => opts.sceneId,
+    isEditingText: () => inlineEditor.isEditing(),
+    runEdit: async (op) => {
+      try {
+        const path = op.type === 'group'
+          ? '/platform/api/scene/group'
+          : '/platform/api/scene/ungroup';
+        const body = op.type === 'group'
+          ? { sceneId: op.sceneId, nodeIds: op.nodeIds }
+          : { sceneId: op.sceneId, nodeId: op.nodeId };
+        const res = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          console.warn(`[dom-canvas] ${op.type} failed`, await res.text());
+          return;
+        }
+        // Group returns the new frame id — promote it to selection so
+        // the user sees the result of their gesture immediately, before
+        // SSE round-trips back. SSE will then patch the iframe in.
+        if (op.type === 'group') {
+          try {
+            const json = await res.json();
+            if (json?.frameId) commitSelection([json.frameId]);
+          } catch { /* best-effort */ }
+        } else {
+          try {
+            const json = await res.json();
+            if (Array.isArray(json?.promoted)) commitSelection(json.promoted);
+          } catch { /* best-effort */ }
+        }
+      } catch (err) {
+        console.warn('[dom-canvas] runEdit threw', err);
+      }
+    },
+  });
 
   // ── Public API ─────────────────────────────────────────────
 
   const handle: DOMCanvasHandle = {
     reload: () => renderer.reload(),
     select: (ids) => {
-      if (ids == null) setSelection([]);
-      else if (typeof ids === 'string') setSelection([ids]);
-      else setSelection(ids);
+      if (ids == null) commitSelection([]);
+      else if (typeof ids === 'string') commitSelection([ids]);
+      else commitSelection(ids);
     },
     present: presentMode,
     zoom: {
@@ -554,6 +747,8 @@ export function createDOMCanvas(opts: DOMCanvasOptions): {
     destroy: () => {
       unregister();
       window.removeEventListener('keydown', onGlobalKey);
+      kbNav.destroy();
+      marquee.destroy();
       zoomSubscribers.clear();
       presentMode.destroy();
       overlay.destroy();

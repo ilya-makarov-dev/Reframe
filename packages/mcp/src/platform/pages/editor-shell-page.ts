@@ -117,34 +117,103 @@ export function renderEditorShell(options: {
       font-size: 13px;
     }
 
-    /* ── Grid ── */
+    /* ── Grid ──
+       Phase 1 UI-1 — column widths driven by CSS vars set on .body
+       (matches dashboard renderShell convention). Defaults match
+       platform-ui.css .body declaration (320 / 360); fallback values
+       below kick in only when the v1 storage prefs aren't applied yet
+       (very first paint). */
     #app {
       display: grid;
       grid-template-rows: 48px 1fr;
-      grid-template-columns: 220px 1fr 320px;
+      grid-template-columns: var(--sidebar-w, 320px) 1fr var(--right-w, 360px);
       grid-template-areas: "header header header" "sidebar canvas panel";
       height: 100vh;
+      transition: grid-template-columns 180ms var(--ease, cubic-bezier(0.2, 0.6, 0.2, 1));
+    }
+    /* Phase 1 UI-1 — collapsed-sidebar variant for editor. Mirrors
+       .body.with-right[data-left-collapsed="true"] from platform-ui.css
+       but selectors keyed on #app so the editor shell's id beats the
+       generic .body declarations. */
+    #app[data-left-collapsed="true"] {
+      grid-template-columns: var(--sidebar-collapsed-w, 48px) 1fr var(--right-w, 360px);
+    }
+    #app[data-left-collapsed="true"] [data-panel-resize="sidebar"] { display: none; }
+    #app[data-left-collapsed="true"] #sidebar > :not(.sidebar-collapse-toggle) { display: none; }
+    #app[data-left-collapsed="true"] #sidebar { padding: 12px 0; }
+    #app[data-left-collapsed="true"] .sidebar-collapse-toggle {
+      position: absolute; top: 8px; left: 50%; right: auto; transform: translateX(-50%);
     }
 
-    /* Narrow: 220 + 1fr + 320 on anything below 1024 px starves the
-       canvas pane (0 px at 390, 228 px at 768 -- both unusable). At
-       these widths hide both asides and hand the canvas the full
-       width. Base #app uses the grid-template shorthand so the
-       override MUST use the full shorthand too; a longhand
-       grid-template-columns 1fr alone loses to the shorthand's
-       column list at equal specificity. !important defends against
-       a later re-declaration of the shorthand anywhere downstream. */
-    @media (max-width: 1024px) {
-      #app {
-        grid-template: "header" 48px "canvas" 1fr / 1fr !important;
-      }
-      #sidebar, #panel { display: none !important; }
-      #header { overflow-x: auto; }
-      /* Absolute-centered macro pill collides with the right-anchored
-         Export button once the header loses its side rails. Hide it at
-         tablet+ breakpoints — Generate/Modify/Preview/More all stay
-         reachable via the bottom chat palette and agent prompts. */
-      .macro-dropdowns { display: none !important; }
+    /* Phase 1 UI-1 — narrow-viewport handling. The previous strategy
+       was to collapse asides + hide macro pill at ≤1024px; replaced
+       2026-04-29 by the .reframe-narrow-viewport-toast surface
+       declared in platform-ui.css. Editor route does NOT silently
+       degrade — toast surfaces the limitation and dims the app. */
+    body.reframe-viewport-narrow #app {
+      pointer-events: none;
+      opacity: 0.35;
+    }
+
+    /* Resize handle styling — mirrors platform-ui.css .panel-resize
+       so dashboard + editor share visuals. Position absolute relative
+       to #app (position: relative is set via inline style on #app). */
+    .panel-resize {
+      position: absolute;
+      top: 48px; /* below the header row */
+      bottom: 0;
+      width: 8px;
+      cursor: col-resize;
+      z-index: 20;
+      user-select: none;
+      background: transparent;
+    }
+    .panel-resize::before {
+      content: '';
+      position: absolute;
+      top: 0; bottom: 0; left: 50%;
+      width: 1px;
+      background: transparent;
+      transition: background 140ms var(--ease, cubic-bezier(0.2, 0.6, 0.2, 1)), width 140ms var(--ease);
+      transform: translateX(-50%);
+    }
+    .panel-resize:hover::before, .panel-resize.dragging::before {
+      background: var(--accent, #2b74ff);
+      width: 2px;
+    }
+    .panel-resize-sidebar { left: calc(var(--sidebar-w, 320px) - 4px); }
+    .panel-resize-right { right: calc(var(--right-w, 360px) - 4px); }
+
+    /* Sidebar collapse toggle — chevron button, top-right of sidebar. */
+    .sidebar-collapse-toggle {
+      position: absolute;
+      top: 8px; right: 6px;
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: var(--text-muted, #666);
+      cursor: pointer;
+      z-index: 5;
+      transition: background 120ms var(--ease, ease), color 120ms var(--ease, ease);
+    }
+    .sidebar-collapse-toggle:hover { background: var(--surface-hover, rgba(0,0,0,0.04)); color: var(--text-primary, #111); }
+    .sidebar-collapse-toggle .sc-icon-collapse { display: block; }
+    .sidebar-collapse-toggle .sc-icon-expand { display: none; }
+    #app[data-left-collapsed="true"] .sidebar-collapse-toggle .sc-icon-collapse { display: none; }
+    #app[data-left-collapsed="true"] .sidebar-collapse-toggle .sc-icon-expand { display: block; }
+
+    /* Layers filter — small input pinned above the tree. */
+    .layers-filter { padding: 6px 10px 0; }
+    .layers-filter input {
+      width: 100%;
+      padding: 4px 8px;
+      background: var(--surface, #0e0e0e);
+      border: 1px solid var(--border, #333);
+      border-radius: 4px;
+      color: var(--text-primary, #e5e5e5);
+      font-size: 11px;
     }
 
     /* ── Header ── */
@@ -328,7 +397,13 @@ export function renderEditorShell(options: {
   </script>
 </head>
 <body>
-  <div id="app"${appSceneAttr}>
+  <!-- Phase 1 UI-1 — body class lets the JS layout binders
+       (bindResizablePanels / bindSidebarCollapse from 070-viewport.js)
+       find this root via the same .body selector they use on
+       dashboard / brand pages. with-right tags this as a 3-column
+       layout (sidebar + canvas + right inspector). The id-based
+       grid CSS above wins on column widths via specificity. -->
+  <div id="app" class="body with-right" style="position:relative"${appSceneAttr}>
     <header id="header">
       <a class="wordmark" href="/platform">reframe</a>
       <div class="header-sep"></div>
@@ -344,10 +419,26 @@ export function renderEditorShell(options: {
       </button>
     </header>
 
-    <aside id="sidebar">
+    <aside id="sidebar" style="position:relative">
+      <!-- Phase 1 UI-1 — sidebar collapse toggle. Top-right chevron;
+           click flips data-left-collapsed on #app. State persists via
+           localStorage v1 (handled by bindSidebarCollapse). -->
+      <button class="sidebar-collapse-toggle" data-sidebar-collapse-toggle title="Collapse panel" aria-label="Collapse panel" aria-expanded="true">
+        <svg class="sc-icon-collapse" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M9 3 L5 7 L9 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg class="sc-icon-expand" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M5 3 L9 7 L5 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
       <div class="sidebar-head">Layers</div>
-      <div id="layer-tree" data-layers-tree></div>
+      <div class="layers-filter">
+        <input type="text" data-layers-filter placeholder="Filter layers..." autocomplete="off">
+      </div>
+      <div id="layer-tree" data-layers-tree tabindex="0"></div>
     </aside>
+
+    <!-- Phase 1 UI-1 — resize handles. Positioned absolute via the
+         .panel-resize CSS rules above; sit at the inner edge of each
+         aside. bindResizablePanels (070-viewport.js) wires drag. -->
+    <div class="panel-resize panel-resize-sidebar" data-panel-resize="sidebar"></div>
+    <div class="panel-resize panel-resize-right" data-panel-resize="right"></div>
 
     <main id="canvas-area">
       <div id="loading"><div class="spinner"></div></div>
@@ -441,31 +532,43 @@ export function renderEditorShell(options: {
       </div>
     </main>
 
-    <aside id="panel">
+    <aside id="panel" style="display:flex;flex-direction:column;min-height:0;">
       <!-- Single always-visible Properties pane. Right-panel tabs are gone:
            Agent moved to a floating prompt (right-click on canvas / Cmd+K),
            block insertion moved to the floating block palette (Cmd+P). The
            panel content is updated by scripts.ts on canvas-select events
            (showPropsForNode). data-panel="design" + class .properties is
-           kept so existing scripts.ts selectors still resolve. -->
+           kept so existing scripts.ts selectors still resolve.
+
+           Phase 1 UI-6a Pin #4 — Tweaks panel hoisted OUT of the
+           data-panel="design" container. Inspector's showPropsForNode
+           overwrites that container's innerHTML on every node selection,
+           which wiped the tweaks panel after first click. As a sibling
+           above, it survives inspector re-renders and stays visible
+           regardless of selection state. -->
+      <section class="tweaks-panel" data-tweaks-panel hidden>
+        <header class="tweaks-head">
+          <span class="tweaks-title">Tweaks</span>
+          <span class="tweaks-count" data-tweaks-count></span>
+        </header>
+        <div class="tweaks-list" data-tweaks-list></div>
+      </section>
       <div data-panel="design" class="properties" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:0 12px;min-width:0;">
-        <!-- Tweaks section — populated by bindTweaksPanel from
-             /platform/api/tweaks/get. Collapses itself if the scene
-             has no tweaks declared (stays silently hidden). Sits above
-             the per-node properties so scene-wide knobs read first. -->
-        <section class="tweaks-panel" data-tweaks-panel hidden>
-          <header class="tweaks-head">
-            <span class="tweaks-title">Tweaks</span>
-            <span class="tweaks-count" data-tweaks-count></span>
-          </header>
-          <div class="tweaks-list" data-tweaks-list></div>
-        </section>
         <div class="props-empty" style="color:var(--text-muted);font-size:12px;text-align:center;padding:40px 10px;">
           Select a node to inspect
         </div>
       </div>
     </aside>
     ${renderBottomChat()}
+    <!-- Phase 1 UI-1 — narrow-viewport toast. CSS in platform-ui.css
+         drives display via body.reframe-viewport-narrow class set by
+         bindNarrowViewportGuard (070-viewport.js). -->
+    <div class="reframe-narrow-viewport-toast" data-narrow-viewport-toast role="status" aria-live="polite">
+      <div class="reframe-narrow-viewport-toast-card">
+        <strong>reframe Platform UI requires 1024px+ viewport.</strong>
+        <span>Mobile support coming.</span>
+      </div>
+    </div>
   </div>
   <link rel="stylesheet" href="/platform/style.css?v=${Date.now()}">
   <script src="/platform/theme-init.js?v=${Date.now()}"></script>

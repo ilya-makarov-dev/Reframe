@@ -213,6 +213,144 @@
     });
   }
 
+  // Phase 1 UI-3 — multi-select inspector. When the user has 2+ nodes
+  // selected, the JS UI calls /platform/api/node/get-many; the server
+  // returns a `shared` map (props every node agrees on) plus a
+  // sentinel string ('__reframe_mixed__') in slots where values
+  // diverge. This function renders a compact shared-props view; the
+  // full per-node panel is reserved for the single-select path.
+  async function showPropsForNodes(nodeIds, sessionId) {
+    if (!Array.isArray(nodeIds) || nodeIds.length === 0 || !sessionId) {
+      clearPropsPanel();
+      return;
+    }
+    if (nodeIds.length === 1) {
+      // Delegate to the single-node path so we don't double-implement.
+      showPropsForNode(nodeIds[0], sessionId);
+      return;
+    }
+    // Track the multi-select set so subsequent edits know to fan out.
+    currentPropsNodeId = nodeIds.slice();
+    try {
+      var resp = await fetch('/platform/api/node/get-many', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sceneId: sessionId, nodeIds: nodeIds }),
+      });
+      if (!resp.ok) { clearPropsPanel(); return; }
+      var data = await resp.json();
+      if (!data.ok) { clearPropsPanel(); return; }
+      renderMultiSelectPanel(data.shared, data.mixedSentinel, sessionId, nodeIds);
+    } catch (_) { /* best-effort */ }
+  }
+
+  function renderMultiSelectPanel(shared, mixedSentinel, sessionId, nodeIds) {
+    var panel = $('[data-panel="design"]');
+    if (!panel) return;
+    var html = '';
+    html += '<div class="props-identity">' +
+      '<div class="node-name">' + escape(String(nodeIds.length)) + ' nodes selected' +
+        ' <span class="node-type">multi</span>' +
+      '</div>' +
+      '<div class="node-parent">Edits apply to all selected. Mixed values show "Mixed".</div>' +
+    '</div>';
+    // Reuse the same data-prop / data-scene / data-node attribute
+    // shape the single-select panel uses, but encode the JSON-array
+    // of node ids in data-node so bindPropInputs' edit handler can
+    // fan-out via splitting on the leading '['.
+    var encodedIds = JSON.stringify(nodeIds).replace(/"/g, '&quot;');
+    var rows = '';
+    var keys = Object.keys(shared);
+    keys.sort();
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var v = shared[k];
+      var isMixed = v === mixedSentinel;
+      var displayValue = isMixed
+        ? '<span class="prop-mixed" style="font-style:italic;color:var(--text-muted,#888)">Mixed</span>'
+        : escape(String(v));
+      rows +=
+        '<div class="prop-pair" style="display:flex;align-items:center;gap:8px;margin:4px 0">' +
+          '<span class="prop-label" style="flex:1;font-size:11px;color:var(--text-muted,#888)">' + escape(k) + '</span>' +
+          '<span class="prop-value" data-multi-prop="' + escape(k) + '" data-scene="' + escape(sessionId) +
+            '" data-nodes="' + encodedIds + '" style="font-size:11px">' +
+          displayValue + '</span>' +
+          '<button class="prop-reset" data-multi-reset="' + escape(k) + '" data-scene="' + escape(sessionId) +
+            '" data-nodes="' + encodedIds + '" title="Reset to default" ' +
+            'style="background:transparent;border:none;cursor:pointer;color:var(--text-muted,#888);padding:2px 4px;font-size:11px">↺</button>' +
+        '</div>';
+    }
+    html += '<div class="props-section">' +
+      '<div class="props-section-header">Shared properties (' + keys.length + ')</div>' +
+      '<div class="props-section-body">' + (rows || '<div style="color:var(--text-muted);font-size:11px">No shared properties</div>') + '</div>' +
+    '</div>';
+    panel.innerHTML = html;
+    bindMultiSelectInputs();
+  }
+
+  // Phase 1 UI-3 — fan-out edit handler. Click "Mixed" → text input
+  // appears; submit → POST /node/edit per nodeId. Click ↺ → fan-out
+  // /node/reset-prop with nodeIds[].
+  function bindMultiSelectInputs() {
+    $$('[data-multi-prop]').forEach(function(el) {
+      el.addEventListener('click', function() {
+        var prop = el.getAttribute('data-multi-prop');
+        var sceneId = el.getAttribute('data-scene');
+        var ids;
+        try { ids = JSON.parse((el.getAttribute('data-nodes') || '[]').replace(/&quot;/g, '"')); } catch (_) { ids = []; }
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.style.cssText = 'width:120px;font-size:11px;padding:2px 4px';
+        input.placeholder = 'New value';
+        el.innerHTML = '';
+        el.appendChild(input);
+        input.focus();
+        var commit = async function() {
+          var val = input.value;
+          if (val === '') { showPropsForNodes(ids, sceneId); return; }
+          // Fan-out — one POST per node so each scene state observes
+          // the full edit history (rather than a synthetic batch).
+          for (var i = 0; i < ids.length; i++) {
+            try {
+              await fetch('/platform/api/node/edit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sceneId: sceneId, nodeId: ids[i], props: (function() { var o = {}; o[prop] = val; return o; })() }),
+              });
+            } catch (_) { /* keep going */ }
+          }
+          showPropsForNodes(ids, sceneId);
+        };
+        input.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter') { e.preventDefault(); commit(); }
+          if (e.key === 'Escape') { showPropsForNodes(ids, sceneId); }
+        });
+        input.addEventListener('blur', commit);
+      });
+    });
+    $$('[data-multi-reset]').forEach(function(btn) {
+      btn.addEventListener('click', async function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var prop = btn.getAttribute('data-multi-reset');
+        var sceneId = btn.getAttribute('data-scene');
+        var ids;
+        try { ids = JSON.parse((btn.getAttribute('data-nodes') || '[]').replace(/&quot;/g, '"')); } catch (_) { ids = []; }
+        try {
+          await fetch('/platform/api/node/reset-prop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sceneId: sceneId, nodeIds: ids, prop: prop }),
+          });
+        } catch (_) {}
+        showPropsForNodes(ids, sceneId);
+      });
+    });
+  }
+
+  // Expose for 010-core / 160-init bridges.
+  window.showPropsForNodes = showPropsForNodes;
+
   function renderPropsPanel(props, sessionId, nodeId) {
     var panel = $('[data-panel="design"]');
     if (!panel) return;
@@ -235,6 +373,17 @@
     // scoped to the currently selected node — no need to re-state context.
     // Manual props remain below as before — AI augments, doesn't replace.
     html += renderAiBar(sessionId, nodeId);
+
+    // Phase 1 UI-3 — property name filter. Lives at the top of the
+    // inspector (under the AI bar). Pure DOM filter — keystrokes hide
+    // section bodies / rows whose data-prop key doesn't match. No
+    // server round-trip; clearing the input restores everything.
+    html +=
+      '<div class="props-filter" style="margin:4px 0 8px;padding:0 2px">' +
+        '<input data-props-filter type="text" placeholder="Filter properties..." ' +
+          'style="width:100%;padding:6px 8px;background:var(--surface,#0e0e0e);' +
+          'border:1px solid var(--border,#333);border-radius:4px;color:var(--text-primary,#e5e5e5);font-size:11px">' +
+      '</div>';
 
     // ── Smart Suggestions container — populated async from audit ──
     // Empty placeholder rendered eagerly so the layout is stable; the
@@ -274,6 +423,17 @@
       '</div>' +
     '</div>';
 
+    // ── Phase 1 UI-6a Pin #3 — text-shaped nodes hide Background ──
+    // Engine paints text via `fills` which exporter emits as CSS
+    // `color`, not `background-color`. Showing a Fill (background)
+    // swatch on a text node was confusing — both swatches wrote the
+    // same engine field. Mirror of `getColorFieldsForNode` from
+    // inspector-color-fields.ts.
+    var TEXT_SHAPED_TYPES_JS = ['TEXT','SPAN','P','H1','H2','H3','H4','H5','H6','A','LI','LABEL','BUTTON'];
+    var isTextShaped = props && props.type
+      ? TEXT_SHAPED_TYPES_JS.indexOf(String(props.type).toUpperCase()) >= 0
+      : false;
+
     // ── Fill (big swatch + hex + opacity + token badge) ──
     // When fill is bound to a brand token the row collapses the hex
     // input into a chip showing token name + resolved color preview +
@@ -302,12 +462,14 @@
           '<span class="fill-opacity">' + bgOpacity + '%</span>' +
         '</div>';
     }
-    html += '<div class="props-section">' +
-      '<div class="props-section-header" data-collapse-toggle>Fill<span class="chevron">▼</span></div>' +
-      '<div class="props-section-body">' +
-        fillRowHtml +
-      '</div>' +
-    '</div>';
+    if (!isTextShaped) {
+      html += '<div class="props-section">' +
+        '<div class="props-section-header" data-collapse-toggle>Fill<span class="chevron">▼</span></div>' +
+        '<div class="props-section-body">' +
+          fillRowHtml +
+        '</div>' +
+      '</div>';
+    }
 
     // ── Typography (font dropdown + compact row of 4 values) ──
     if (props['font-size'] != null || props.type === 'TEXT') {
@@ -476,13 +638,157 @@
       '</div>';
     }
 
+    // Phase 1 UI-3 — Metadata section. Surfaces engine-extension
+    // fields (annotations / interactive / entrance / hero / narrative)
+    // that have no inline editor in the shipping inspector — designer
+    // can at least see they exist on the node. Full inline config
+    // editors are reserved for Phase 2 picker palette work; for now
+    // the rows are read-only summaries. Skipped entirely when none
+    // of the metadata fields are populated.
+    var metaRows = renderMetaRows(props, sessionId, nodeId);
+    if (metaRows) {
+      html += '<div class="props-section">' +
+        '<div class="props-section-header" data-collapse-toggle>Metadata<span class="chevron">▼</span></div>' +
+        '<div class="props-section-body">' + metaRows + '</div>' +
+      '</div>';
+    }
+
     panel.innerHTML = html;
     bindPropInputs();
+    bindResetButtons(sessionId, nodeId);
+    bindPropsFilter();
+    bindCollapsePersistence();
     bindStatesAndAnimation(sessionId, nodeId);
     bindAiBar(sessionId, nodeId);
     // Async: fetch audit + brand fidelity → populate banners. Doesn't
     // block the rest of the panel; if it fails we just show nothing.
     fetchAndRenderSuggestions(sessionId, nodeId);
+  }
+
+  // Phase 1 UI-3 — metadata row builder. Mirrors the server-side
+  // `summarizeMeta` from inspector-helpers.ts; runs client-side so we
+  // don't pay an extra round-trip to render a one-line label. When
+  // neither parsing nor summary is meaningful, returns null and the
+  // section is skipped.
+  function renderMetaRows(props, sessionId, nodeId) {
+    var rows = '';
+    function row(label, payload) {
+      if (payload == null) return '';
+      return '<div class="prop-pair" style="font-size:11px;color:var(--text-muted,#888);padding:4px 0">' +
+        '<span style="flex:1">' + escape(label) + '</span>' +
+        '<span style="font-family:var(--mono,monospace);font-size:10px">' + escape(String(payload)) + '</span>' +
+      '</div>';
+    }
+    if (Array.isArray(props.annotations) && props.annotations.length > 0) {
+      rows += row('Annotations', props.annotations.length + ' note' + (props.annotations.length === 1 ? '' : 's'));
+    }
+    if (props.interactive && props.interactive.type) {
+      rows += row('Interactive', props.interactive.type);
+    }
+    if (props.entrance && props.entrance.type) {
+      rows += row('Entrance', props.entrance.type);
+    }
+    if (props.hero && props.hero.mode) {
+      rows += row('Hero', props.hero.mode);
+    }
+    if (props.narrative && props.narrative.kind) {
+      var frames = typeof props.narrative.frameCount === 'number' ? ' (' + props.narrative.frameCount + ' frames)' : '';
+      rows += row('Narrative', props.narrative.kind + frames);
+    }
+    void sessionId; void nodeId;
+    return rows;
+  }
+
+  // Phase 1 UI-3 — reset-to-default button click handlers. Wires every
+  // [data-reset-prop] button to POST /platform/api/node/reset-prop with
+  // the node's id and the prop key. Server responds, SSE fires
+  // scene:session-changed, the inspector re-fetches (the parent
+  // showPropsForNode call) so the row's value flips back.
+  function bindResetButtons(sessionId, nodeId) {
+    $$('[data-reset-prop]').forEach(function(btn) {
+      btn.addEventListener('click', async function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var prop = btn.getAttribute('data-reset-prop');
+        try {
+          await fetch('/platform/api/node/reset-prop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sceneId: sessionId, nodeId: nodeId, prop: prop }),
+          });
+        } catch (_) { /* best-effort */ }
+        // Re-fetch the node so the inspector reflects the cleared prop.
+        showPropsForNode(nodeId, sessionId);
+      });
+    });
+  }
+
+  // Phase 1 UI-3 — top-of-inspector property filter. Live filtering on
+  // the data-prop attribute of every visible control row. A row matches
+  // when its data-prop key (or its containing section's header) starts
+  // with the query (case-insensitive). When the filter is non-empty
+  // sections with zero matching rows hide entirely.
+  function bindPropsFilter() {
+    var input = $('[data-props-filter]');
+    if (!input) return;
+    input.addEventListener('input', function() {
+      var q = String(input.value || '').trim().toLowerCase();
+      var sections = $$('.props-section');
+      sections.forEach(function(section) {
+        if (q === '') {
+          // Restore — let collapse state and CSS handle visibility.
+          section.style.removeProperty('display');
+          section.querySelectorAll('.prop-pair, .prop-row, .effect-row, .fill-row, .state-item').forEach(function(row) {
+            row.style.removeProperty('display');
+          });
+          return;
+        }
+        var headerText = (section.querySelector('.props-section-header') || {}).textContent || '';
+        var sectionMatches = headerText.toLowerCase().indexOf(q) >= 0;
+        var anyRowMatch = false;
+        section.querySelectorAll('[data-prop]').forEach(function(el) {
+          var prop = (el.getAttribute('data-prop') || '').toLowerCase();
+          var row = el.closest('.prop-pair, .prop-row, .effect-row, .fill-row, .state-item') || el;
+          if (sectionMatches || prop.indexOf(q) >= 0) {
+            row.style.removeProperty('display');
+            anyRowMatch = true;
+          } else {
+            row.style.display = 'none';
+          }
+        });
+        section.style.display = (sectionMatches || anyRowMatch) ? '' : 'none';
+      });
+    });
+  }
+
+  // Phase 1 UI-3 — collapse state persistence per section. Section
+  // identity is the header text content (stable across renders). The
+  // map of {header → collapsed} survives reload via localStorage.
+  // Reapplied on every renderPropsPanel — keeps state across selection
+  // changes within the same session.
+  function bindCollapsePersistence() {
+    var KEY = 'reframe-inspector-collapsed-sections';
+    function loadMap() {
+      try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (_) { return {}; }
+    }
+    function saveMap(m) {
+      try { localStorage.setItem(KEY, JSON.stringify(m)); } catch (_) {}
+    }
+    var stored = loadMap();
+    $$('[data-collapse-toggle]').forEach(function(header) {
+      var label = (header.textContent || '').replace(/[▼▶▾▸]/g, '').trim();
+      if (stored[label]) header.parentElement.classList.add('collapsed');
+      header.addEventListener('click', function() {
+        // Defer until after the existing toggle handler runs (the
+        // handler in 120-widgets.js binds first; the classList state
+        // we read here is the post-toggle state).
+        setTimeout(function() {
+          var current = loadMap();
+          current[label] = header.parentElement.classList.contains('collapsed');
+          saveMap(current);
+        }, 0);
+      });
+    });
   }
 
   // ── AI bar inside Properties (sticky top, scoped to selected node) ─────

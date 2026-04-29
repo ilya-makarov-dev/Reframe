@@ -222,6 +222,7 @@ function nodeToCssProps(node: any): Record<string, any> {
   }
 
   out['visible'] = node.visible !== false;
+  out['locked'] = !!node.locked;
   out['clips-content'] = !!node.clipsContent;
 
   // Token bindings (Phase 3b)
@@ -347,6 +348,11 @@ export function cssPropsToNodePartial(
       case 'visible':       partial.visible = !!value; break;
       case 'clips-content': partial.clipsContent = !!value; break;
       case 'role':          partial.semanticRole = String(value); break;
+      // Phase 1 UI-4 — layers panel surfaces these as inline controls.
+      // `locked` is editor-only (UI lock for accidental-drag protection);
+      // `name` is freely editable via inline rename.
+      case 'locked':        partial.locked = !!value; break;
+      case 'name':          partial.name = String(value); break;
       case 'background':
       case 'color': {
         const parsed = parseHexFill(String(value));
@@ -540,6 +546,36 @@ export async function handleNodeEditApi(
 
     // Apply changes.
     scene.graph.updateNode(nodeId, partial);
+
+    // Phase 1 UI-5b Pin #4 — tokenBindings sibling key.
+    // Wire shape: { background:'#hex', tokenBindings: { fill:'primary' } }
+    // mirrors `node.meta.tokenBindings` storage so there's no per-property
+    // translation table on the server. `null` value on a key = explicit
+    // unbind (designer picked a custom hex, dropping the previous token).
+    const tokenBindingsEdit = (edits as any).tokenBindings;
+    if (tokenBindingsEdit && typeof tokenBindingsEdit === 'object') {
+      const meta = (node as any).meta || {};
+      const existingBindings = meta.tokenBindings ? { ...meta.tokenBindings } : {};
+      let touched = false;
+      for (const [key, val] of Object.entries(tokenBindingsEdit)) {
+        if (val === null || val === undefined || val === '') {
+          if (key in existingBindings) { delete (existingBindings as any)[key]; touched = true; }
+        } else if (typeof val === 'string') {
+          (existingBindings as any)[key] = val;
+          touched = true;
+        }
+      }
+      if (touched) {
+        if (Object.keys(existingBindings).length === 0) {
+          // Drop the bindings object entirely when empty — exporter checks
+          // existence; an empty object would still emit a CSS var section.
+          const { tokenBindings: _drop, ...rest } = meta;
+          (node as any).meta = rest;
+        } else {
+          (node as any).meta = { ...meta, tokenBindings: existingBindings };
+        }
+      }
+    }
 
     // Server owns layout truth: re-run Yoga when the edit could affect box
     // dimensions. Without this, HUG parents stay stale and the client-side
@@ -785,6 +821,331 @@ export async function handleNodeEditApi(
     } catch (e: any) {
       sendError(res, 500, e?.message ?? 'auto-fix failed');
     }
+    return true;
+  }
+
+  // ── POST /platform/api/node/get-many ──
+  // Phase 1 UI-3 — multi-node fetch. Returns each node's CSS-named
+  // props plus a `shared` map computed via inspectorHelpers
+  // .intersectSharedProps. Inspector binds to `shared` when the user
+  // multi-selects; click-to-edit fans out across `nodeIds` via the
+  // existing /node/edit endpoint per node.
+  if (pathname === '/platform/api/node/get-many' && req.method === 'POST') {
+    const body = await readJson(req);
+    const sceneId = body.sceneId as string;
+    const nodeIds = body.nodeIds as string[];
+    if (!sceneId || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+      sendError(res, 400, 'sceneId + nodeIds[] required');
+      return true;
+    }
+    const store = await getStore();
+    const scene = store.getScene(sceneId);
+    if (!scene) { sendError(res, 404, `scene ${sceneId} not found`); return true; }
+    const perNode: Record<string, Record<string, any>> = {};
+    const propMaps: Record<string, any>[] = [];
+    for (const nodeId of nodeIds) {
+      const id = nodeId === 'root' ? scene.rootId : nodeId;
+      const node = scene.graph.getNode(id);
+      if (!node) continue;
+      const props = nodeToCssProps(node);
+      perNode[id] = props;
+      propMaps.push(props);
+    }
+    if (propMaps.length === 0) {
+      sendError(res, 404, 'no requested nodes found in scene');
+      return true;
+    }
+    const { intersectSharedProps, MIXED_VALUE } = await import('../inspector-helpers.js');
+    const shared = intersectSharedProps(propMaps);
+    sendJson(res, 200, { ok: true, sceneId, perNode, shared, mixedSentinel: MIXED_VALUE });
+    return true;
+  }
+
+  // ── POST /platform/api/node/reset-prop ──
+  // Phase 1 UI-3 — remove a single prop from a node so the engine
+  // falls back to its inherited / default value. The body shape is
+  // { sceneId, nodeId, prop } where prop is the CSS-named key the
+  // Inspector showed (e.g. 'border-radius', 'padding-top').
+  //
+  // Accepts a `nodeIds` array form for multi-select reset — the
+  // body shape is { sceneId, nodeIds: [...], prop }; the handler
+  // applies the same removal to each node.
+  if (pathname === '/platform/api/node/reset-prop' && req.method === 'POST') {
+    const body = await readJson(req);
+    const sceneId = body.sceneId as string;
+    const propKey = body.prop as string;
+    let targetIds: string[] = [];
+    if (Array.isArray(body.nodeIds)) targetIds = body.nodeIds.filter((s: any) => typeof s === 'string');
+    else if (typeof body.nodeId === 'string') targetIds = [body.nodeId];
+    if (!sceneId || !propKey || targetIds.length === 0) {
+      sendError(res, 400, 'sceneId + prop + nodeId|nodeIds required');
+      return true;
+    }
+    const store = await getStore();
+    const scene = store.getScene(sceneId);
+    if (!scene) { sendError(res, 404, `scene ${sceneId} not found`); return true; }
+    // Map CSS-named keys back to INode field names — mirror of
+    // cssPropsToNodePartial. We only need the keys the Inspector
+    // surfaces; unknown keys are no-ops with a returned warning.
+    const RESET_MAP: Record<string, (n: any) => void> = {
+      'border-radius': (n) => { n.cornerRadius = 0; },
+      'opacity': (n) => { n.opacity = 1; },
+      'background-opacity': (n) => { if (n.fills?.[0]) n.fills[0].opacity = 1; },
+      'gap': (n) => { n.itemSpacing = 0; },
+      'padding-top': (n) => { n.paddingTop = 0; },
+      'padding-right': (n) => { n.paddingRight = 0; },
+      'padding-bottom': (n) => { n.paddingBottom = 0; },
+      'padding-left': (n) => { n.paddingLeft = 0; },
+      'border-width': (n) => { if (n.strokes?.[0]) n.strokes[0].weight = 1; },
+      'stroke-weight': (n) => { if (n.strokes?.[0]) n.strokes[0].weight = 1; },
+      'effects': (n) => { n.effects = []; },
+      'visible': (n) => { n.visible = true; },
+      'clips-content': (n) => { n.clipsContent = false; },
+      'letter-spacing': (n) => { n.letterSpacing = undefined; },
+      'line-height': (n) => { n.lineHeight = undefined; },
+    };
+    const reset = RESET_MAP[propKey];
+    if (!reset) {
+      sendJson(res, 200, { ok: true, warning: `prop "${propKey}" has no documented default; ignoring`, applied: 0 });
+      return true;
+    }
+    let applied = 0;
+    for (const rawId of targetIds) {
+      const id = rawId === 'root' ? scene.rootId : rawId;
+      const node = scene.graph.getNode(id);
+      if (!node) continue;
+      reset(node);
+      applied++;
+    }
+    if (applied === 0) {
+      sendError(res, 404, 'no requested nodes found');
+      return true;
+    }
+    try {
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(scene.graph, scene.rootId);
+    } catch { /* best-effort */ }
+    store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
+    try { const { emitEvent } = await import('../../http-server.js'); emitEvent({ type: 'scene:session-changed' } as any); } catch {}
+    sendJson(res, 200, { ok: true, applied });
+    return true;
+  }
+
+  // ── POST /platform/api/node/reorder ──
+  // Phase 1 UI-4 — layers panel drag-reorder + reparent. Three modes
+  // distinguished by `position`:
+  //   'before' / 'after' — sibling reorder relative to `targetId`
+  //   'inside'           — reparent into `targetId` as last child
+  //                        (target must be a container — FRAME/GROUP/etc)
+  //
+  // Always validates against the cycle-self-descendant trap before
+  // mutating; rejects with edit.reorder.invalid if the move would
+  // create a cycle. SceneGraph.reparentNode preserves visual position
+  // by re-anchoring node-local coords against the new parent's
+  // absolute origin, so no manual offset math here either (same trap
+  // we caught in UI-2 group/ungroup).
+  if (pathname === '/platform/api/node/reorder' && req.method === 'POST') {
+    const body = await readJson(req);
+    const sceneId = body.sceneId as string;
+    const nodeId = body.nodeId as string;
+    const targetId = body.targetId as string;
+    const position = body.position as 'before' | 'after' | 'inside';
+    if (!sceneId || !nodeId || !targetId || !position) {
+      sendError(res, 400, 'sceneId + nodeId + targetId + position required');
+      return true;
+    }
+    if (position !== 'before' && position !== 'after' && position !== 'inside') {
+      sendError(res, 400, `edit.reorder.invalid_position: position must be before|after|inside (got "${position}")`);
+      return true;
+    }
+    const store = await getStore();
+    const scene = store.getScene(sceneId);
+    if (!scene) { sendError(res, 404, `scene ${sceneId} not found`); return true; }
+    const node = scene.graph.getNode(nodeId);
+    const target = scene.graph.getNode(targetId);
+    if (!node) { sendError(res, 404, `edit.reorder.node_not_found: ${nodeId}`); return true; }
+    if (!target) { sendError(res, 404, `edit.reorder.target_not_found: ${targetId}`); return true; }
+    if (nodeId === targetId) {
+      sendError(res, 400, 'edit.reorder.invalid: cannot reorder relative to self');
+      return true;
+    }
+    if (nodeId === scene.rootId) {
+      sendError(res, 400, 'edit.reorder.is_root: cannot move the scene root');
+      return true;
+    }
+    // Cycle detection — refuse if target is a descendant of node.
+    const isTargetDescendantOfNode = (() => {
+      let cur: any = target;
+      while (cur) {
+        if (cur.id === nodeId) return true;
+        cur = cur.parentId ? scene.graph.getNode(cur.parentId) : undefined;
+      }
+      return false;
+    })();
+    if (isTargetDescendantOfNode) {
+      sendError(res, 400, 'edit.reorder.invalid: would create cycle (target is a descendant of node)');
+      return true;
+    }
+    // Refuse drops onto locked targets — soft guard surfaced as a
+    // structured error so the JS UI can shake-animate the row.
+    if (target.locked) {
+      sendError(res, 400, 'edit.reorder.target_locked: target node is locked');
+      return true;
+    }
+
+    if (position === 'inside') {
+      // Reparent into target as last child.
+      scene.graph.reparentNode(nodeId, targetId);
+    } else {
+      // Sibling reorder. Reparent to target's parent, then place
+      // at target's index +/- adjustment. SceneGraph exposes
+      // reorderChild(nodeId, parentId, index).
+      const newParentId = target.parentId;
+      if (!newParentId) {
+        sendError(res, 400, 'edit.reorder.target_is_root: cannot place sibling beside root');
+        return true;
+      }
+      if (node.parentId !== newParentId) {
+        scene.graph.reparentNode(nodeId, newParentId);
+      }
+      // Recompute target index AFTER any reparent above (insertion
+      // can have shifted indices on the new parent).
+      const siblings = scene.graph.getChildren(newParentId).map((c: any) => c.id);
+      const targetIdx = siblings.indexOf(targetId);
+      if (targetIdx < 0) {
+        sendError(res, 500, 'edit.reorder.internal: target lost from sibling list after reparent');
+        return true;
+      }
+      const insertIdx = position === 'before' ? targetIdx : targetIdx + 1;
+      scene.graph.reorderChild(nodeId, newParentId, insertIdx);
+    }
+    try {
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(scene.graph, scene.rootId);
+    } catch { /* best-effort */ }
+    store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
+    try { const { emitEvent } = await import('../../http-server.js'); emitEvent({ type: 'scene:session-changed' } as any); } catch {}
+    sendJson(res, 200, { ok: true, nodeId, targetId, position });
+    return true;
+  }
+
+  // ── POST /platform/api/scene/group ──
+  // Phase 1 UI-2 — restructure selected siblings into a new frame.
+  // All target nodes must share the same parent. The new frame is
+  // sized to the union bbox, inserted at the union origin; children
+  // are reparented and their coords re-anchored relative to the
+  // frame. Returns the new frame's id so the caller can select it.
+  if (pathname === '/platform/api/scene/group' && req.method === 'POST') {
+    const body = await readJson(req);
+    const { sceneId, nodeIds, frameType } = body;
+    if (!sceneId) { sendError(res, 400, 'sceneId required'); return true; }
+    if (!Array.isArray(nodeIds)) { sendError(res, 400, 'nodeIds[] required'); return true; }
+    const ids: string[] = (nodeIds as string[]).filter((s, i, arr) => typeof s === 'string' && arr.indexOf(s) === i);
+    if (ids.length < 2) {
+      sendError(res, 400, 'edit.group.empty_selection: need >= 2 nodes');
+      return true;
+    }
+    const store = await getStore();
+    const scene = store.getScene(sceneId);
+    if (!scene) { sendError(res, 404, `scene ${sceneId} not found`); return true; }
+    if (ids.includes(scene.rootId)) {
+      sendError(res, 400, 'edit.group.is_root: selection includes the scene root');
+      return true;
+    }
+    const nodes = ids.map((id) => scene.graph.getNode(id));
+    if (nodes.some((n) => !n)) {
+      sendError(res, 404, 'edit.group.node_not_found: one or more node ids are not in the scene');
+      return true;
+    }
+    const parents = new Set(nodes.map((n) => n!.parentId));
+    if (parents.size !== 1) {
+      sendError(res, 400, 'edit.group.different_parents: all selected nodes must share a parent');
+      return true;
+    }
+    const parentId = nodes[0]!.parentId;
+    if (!parentId) {
+      sendError(res, 400, 'edit.group.is_root: cannot group the scene root');
+      return true;
+    }
+    const minX = Math.min(...nodes.map((n) => n!.x));
+    const minY = Math.min(...nodes.map((n) => n!.y));
+    const maxX = Math.max(...nodes.map((n) => n!.x + n!.width));
+    const maxY = Math.max(...nodes.map((n) => n!.y + n!.height));
+    const newFrame = scene.graph.createNode('FRAME' as any, parentId, {
+      name: frameType === 'container' ? 'Container' : 'Group',
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+      fills: [],
+      strokes: [],
+      layoutMode: 'NONE',
+    } as any);
+    // SceneGraph.reparentNode preserves visual position by
+    // re-computing node-local coords against the new parent's
+    // absolute origin, so manual offsetting would double-subtract.
+    for (const n of nodes) {
+      scene.graph.reparentNode(n!.id, newFrame.id);
+    }
+    try {
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(scene.graph, scene.rootId);
+    } catch { /* best-effort */ }
+    store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
+    try { const { emitEvent } = await import('../../http-server.js'); emitEvent({ type: 'scene:session-changed' } as any); } catch {}
+    sendJson(res, 200, { ok: true, frameId: newFrame.id, grouped: ids.length });
+    return true;
+  }
+
+  // ── POST /platform/api/scene/ungroup ──
+  // Inverse of group — extract the target node's children into its
+  // parent, re-anchoring positions, and remove the target.
+  if (pathname === '/platform/api/scene/ungroup' && req.method === 'POST') {
+    const body = await readJson(req);
+    const { sceneId, nodeId } = body;
+    if (!sceneId) { sendError(res, 400, 'sceneId required'); return true; }
+    if (typeof nodeId !== 'string' || !nodeId) {
+      sendError(res, 400, 'nodeId required');
+      return true;
+    }
+    const store = await getStore();
+    const scene = store.getScene(sceneId);
+    if (!scene) { sendError(res, 404, `scene ${sceneId} not found`); return true; }
+    const target = scene.graph.getNode(nodeId);
+    if (!target) {
+      sendError(res, 404, `edit.ungroup.node_not_found: ${nodeId}`);
+      return true;
+    }
+    if (target.id === scene.rootId) {
+      sendError(res, 400, 'edit.ungroup.is_root: cannot ungroup the scene root');
+      return true;
+    }
+    const parentId = target.parentId;
+    if (!parentId) {
+      sendError(res, 400, 'edit.ungroup.no_parent: node has no parent');
+      return true;
+    }
+    const childIds = scene.graph.getChildren(target.id).map((c) => c.id);
+    if (childIds.length === 0) {
+      sendError(res, 400, 'edit.ungroup.no_children: target has no children');
+      return true;
+    }
+    // reparentNode preserves visual position — children land at
+    // their absolute coords minus the grandparent's absolute origin,
+    // which is exactly the inverse of what the group op did.
+    for (const cid of childIds) {
+      const c = scene.graph.getNode(cid);
+      if (!c) continue;
+      scene.graph.reparentNode(cid, parentId);
+    }
+    scene.graph.deleteNode(target.id);
+    try {
+      const { ensureSceneLayout } = await import('../../../../core/src/engine/layout.js');
+      ensureSceneLayout(scene.graph, scene.rootId);
+    } catch { /* best-effort */ }
+    store.replaceSessionSceneGraph(sceneId, scene.graph, scene.rootId, scene.timeline ?? null);
+    try { const { emitEvent } = await import('../../http-server.js'); emitEvent({ type: 'scene:session-changed' } as any); } catch {}
+    sendJson(res, 200, { ok: true, promoted: childIds });
     return true;
   }
 
@@ -1152,6 +1513,14 @@ export async function handleNodeEditApi(
       name: string;
       type: string;
       text?: string;
+      // Phase 1 UI-4 — visibility + lock state surfaced on the tree
+      // payload so 150-sidebar.js renderLayerNode can wire the row's
+      // 👁 / 🔒 icons to actual engine state. Without these, the
+      // tree always rendered visible:1 / locked:0 because the
+      // renderer reads `node.visible !== false` and `undefined !==
+      // false === true`.
+      visible?: boolean;
+      locked?: boolean;
       childCount: number;
       children: TreeNode[];
     }
@@ -1170,6 +1539,8 @@ export async function handleNodeEditApi(
         name: node.name ?? '',
         type: node.type ?? '',
         text: node.text ? node.text.slice(0, 40) : undefined,
+        visible: node.visible !== false,
+        locked: !!node.locked,
         childCount: children.length,
         children,
       };

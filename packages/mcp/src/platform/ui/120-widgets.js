@@ -249,11 +249,21 @@
     // name + autocomplete=off silences the "form field should have an
     // id or name" accessibility warning — we had 800+ of those per
     // scene because every propCompact rendered a nameless input.
-    return '<div class="prop-compact">' +
+    //
+    // Phase 1 UI-3 — reset-to-default affordance. Tiny ↺ button only
+    // visible on hover (kept off the default chrome to avoid visual
+    // noise across 30+ rows). Click → POST /platform/api/node/reset-prop.
+    return '<div class="prop-compact" style="position:relative">' +
       '<span class="prop-compact-label">' + escape(label) + '</span>' +
       '<input class="prop-compact-input" type="' + inputType + '" value="' + escape(stringVal) + '" ' +
         'name="' + escape(name) + '" autocomplete="off" ' +
         'data-prop="' + escape(name) + '" data-scene="' + escape(sessionId) + '" data-node="' + escape(nodeId) + '"' + stepAttr + '>' +
+      '<button class="prop-reset-btn" data-reset-prop="' + escape(name) + '" ' +
+        'title="Reset to default" ' +
+        'style="position:absolute;right:2px;top:50%;transform:translateY(-50%);' +
+        'background:transparent;border:none;cursor:pointer;color:var(--text-muted,#888);' +
+        'padding:0 4px;font-size:11px;opacity:0;transition:opacity 80ms" ' +
+        'onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0">↺</button>' +
     '</div>';
   }
 
@@ -279,6 +289,79 @@
     ed.state.pageColor = { r: r, g: g, b: b, a: 1 };
     ed.state.sceneVersion = (ed.state.sceneVersion || 0) + 1;
     if (typeof ed.requestRender === 'function') { try { ed.requestRender(); } catch (_) {} }
+  }
+
+  // Phase 1 UI-5a Pin #9 — Cmd/Shift arrow numeric modifiers (Figma
+  // muscle memory). Mirror of `applyArrowModifier` from
+  // inspector-numeric-helpers.ts; runs client-side so we don't need a
+  // round-trip just to compute "current + 10".
+  //
+  //   plain Arrow         ±step
+  //   Shift+Arrow         ±step/10  (or step/10 for sub-1 step)
+  //   Cmd+Arrow           ±step*10
+  //   Shift+Cmd+Arrow     ±step*100
+  function applyArrowModifierJS(current, direction, modifiers, step) {
+    var s = step == null ? 1 : step;
+    var sign = direction === 'up' ? 1 : -1;
+    var shift = !!modifiers.shift;
+    var meta = !!modifiers.meta;
+    var mag;
+    if (shift && meta) mag = s * 100;
+    else if (meta) mag = s * 10;
+    else if (shift) mag = s / 10;
+    else mag = s;
+    var next = current + sign * mag;
+    return Math.round(next * 1e6) / 1e6;
+  }
+
+  // Per-prop natural step. Mirrors FIELD_STEP_MAP from
+  // inspector-numeric-helpers.ts. Sub-1 steps cover the fields where
+  // ±1 would be jumpy (opacity, line-height, letter-spacing, etc.).
+  var FIELD_STEP_MAP_JS = {
+    opacity: 0.05,
+    'corner-smoothing': 0.05,
+    'letter-spacing': 0.1,
+    'line-height': 0.1,
+  };
+  function naturalStepForPropJS(prop) {
+    var v = FIELD_STEP_MAP_JS[prop];
+    return v == null ? 1 : v;
+  }
+
+  // Phase 1 UI-5a Pin #8 — slider live-preview commit with 250 ms
+  // trailing-edge debounce. Per (scene, node, prop) key; mouseup flushes.
+  function makeDebouncedSliderCommitJS(commit, delayMs) {
+    var pending = Object.create(null);
+    var delay = delayMs == null ? 250 : delayMs;
+    function keyOf(s, n, p) { return s + '::' + n + '::' + p; }
+    return {
+      schedule: function(scene, node, prop, value) {
+        var k = keyOf(scene, node, prop);
+        if (pending[k]) clearTimeout(pending[k]);
+        pending[k] = setTimeout(function() {
+          delete pending[k];
+          commit(scene, node, prop, value);
+        }, delay);
+      },
+      flush: function(scene, node, prop, value) {
+        var k = keyOf(scene, node, prop);
+        if (pending[k]) clearTimeout(pending[k]);
+        delete pending[k];
+        commit(scene, node, prop, value);
+      },
+    };
+  }
+
+  // Module-scope debouncer; one shared across the whole inspector so
+  // pending-by-key state is unified.
+  var __sliderDebouncer = null;
+  function getSliderDebouncer() {
+    if (!__sliderDebouncer) {
+      __sliderDebouncer = makeDebouncedSliderCommitJS(function(s, n, p, v) {
+        editNodeProp(s, n, p, v);
+      }, 250);
+    }
+    return __sliderDebouncer;
   }
 
   function bindPropInputs() {
@@ -321,9 +404,28 @@
         var val = input.type === 'number' ? Number(input.value) : input.value;
         editNodeProp(scene, node, prop, val);
       });
-      // Enter = commit.
+      // Enter = commit. ArrowUp/ArrowDown with modifiers = Figma-style
+      // numeric step (Pin #9). Only applies to type="number" inputs.
       input.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') { input.blur(); }
+        if (e.key === 'Enter') { input.blur(); return; }
+        if (input.type !== 'number') return;
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+        // Browser default ArrowUp on number input fires ±1 (or ±0.1 with
+        // shift in some browsers). We override with our own modifier
+        // table so behavior matches Figma uniformly.
+        e.preventDefault();
+        var direction = e.key === 'ArrowUp' ? 'up' : 'down';
+        var prop = input.getAttribute('data-prop') || '';
+        var step = naturalStepForPropJS(prop);
+        var current = Number(input.value);
+        if (!isFinite(current)) current = 0;
+        var next = applyArrowModifierJS(current, direction, {
+          shift: e.shiftKey, meta: e.metaKey || e.ctrlKey,
+        }, step);
+        input.value = String(next);
+        // Fire change so the existing change handler commits (canvas-bg
+        // path included — covers all input subscribers).
+        input.dispatchEvent(new Event('change', { bubbles: true }));
       });
     });
     // Direction toggle buttons.
@@ -339,23 +441,29 @@
         editNodeProp(scene, node, prop, val);
       });
     });
-    // Effect sliders (radius, opacity).
+    // Effect sliders (radius, opacity) — Pin #8 live-preview pattern.
+    // `input` event fires every drag tick → schedule debounced POST
+    // (250 ms trailing). `change` fires on mouseup → flush immediately.
     $$('.effect-slider[data-prop]').forEach(function(slider) {
       slider.addEventListener('input', function() {
         var valueEl = slider.parentElement.querySelector('.effect-value');
         var prop = slider.getAttribute('data-prop');
+        var scene = slider.getAttribute('data-scene');
+        var node = slider.getAttribute('data-node');
+        var v = Number(slider.value);
         if (prop === 'opacity') {
-          if (valueEl) valueEl.textContent = Math.round(Number(slider.value) * 100) + '%';
+          if (valueEl) valueEl.textContent = Math.round(v * 100) + '%';
         } else {
-          if (valueEl) valueEl.textContent = String(Math.round(Number(slider.value)));
+          if (valueEl) valueEl.textContent = String(Math.round(v));
         }
+        if (prop && scene && node) getSliderDebouncer().schedule(scene, node, prop, v);
       });
       slider.addEventListener('change', function() {
         var prop = slider.getAttribute('data-prop');
         var scene = slider.getAttribute('data-scene');
         var node = slider.getAttribute('data-node');
         if (!prop || !scene || !node) return;
-        editNodeProp(scene, node, prop, Number(slider.value));
+        getSliderDebouncer().flush(scene, node, prop, Number(slider.value));
       });
     });
     // Fill swatch click → open native color picker.
@@ -633,13 +741,19 @@
     });
   }
 
-  // ── Phase 1.5: Color swatch → popover picker ─────────────────────
-  // Replaces the native <input type=color> dialog with an inline popover
-  // that has HSL slider + hex input + brand-token chips. Better UX than
-  // the OS-level color picker (which is laggy and brand-blind).
+  // ── Phase 1 UI-5b: Color swatch → brand-aware picker rail ────────
+  // Replaces the legacy native-color-dialog and the older (Phase 1.5)
+  // ad-hoc popover with the unified rail in 116-color-picker-rail.js.
+  // Three rows: brand palette (token-binding) / scene-used / custom.
+  // Wire shape mirrors engine storage: { <prop>: '#hex',
+  // tokenBindings: { <engineKey>: 'role' | null } }.
+  var COLOR_PROP_TO_ENGINE_KEY = {
+    'background': 'fill',
+    'color': 'fill',
+    'border-color': 'stroke',
+  };
   function enhanceColorPopover() {
-    // We REPLACE the existing native-picker swatch handlers — find each
-    // swatch, clone it (drops listeners), then attach our popover handler.
+    // Drop legacy listeners by clone-replace.
     $$('.fill-swatch[data-prop]').forEach(function(swatch) {
       var clone = swatch.cloneNode(true);
       swatch.parentNode.replaceChild(clone, swatch);
@@ -648,137 +762,53 @@
       swatch.style.cursor = 'pointer';
       swatch.addEventListener('click', function(e) {
         e.stopPropagation();
-        openColorPopover(swatch);
-      });
-    });
-  }
-
-  function openColorPopover(swatch) {
-    // Close any existing popover.
-    var existing = document.getElementById('reframe-color-popover');
-    if (existing) existing.remove();
-
-    var prop = swatch.getAttribute('data-prop');
-    var sceneId = swatch.getAttribute('data-scene');
-    var nodeId = swatch.getAttribute('data-node');
-    var hexInput = swatch.parentElement && swatch.parentElement.querySelector('.fill-hex');
-    var current = (hexInput && hexInput.value) || '#000000';
-
-    var rect = swatch.getBoundingClientRect();
-    var pop = document.createElement('div');
-    pop.id = 'reframe-color-popover';
-    pop.style.cssText =
-      'position:fixed;left:' + Math.max(8, rect.left - 4) + 'px;' +
-      'top:' + (rect.bottom + 6) + 'px;z-index:11000;' +
-      'background:var(--surface-elevated,#1a1a1a);' +
-      'border:1px solid var(--border,#333);border-radius:8px;' +
-      'box-shadow:0 12px 40px rgba(0,0,0,.5);padding:10px;width:240px;' +
-      'font-family:inherit;font-size:11px;color:var(--text-primary,#e5e5e5)';
-
-    pop.innerHTML =
-      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
-        '<div data-pop-swatch style="width:32px;height:32px;border-radius:6px;border:1px solid var(--border,#333);background:' + escape(current) + '"></div>' +
-        '<input data-pop-hex type="text" value="' + escape(current) + '" ' +
-          'style="flex:1;padding:4px 6px;font-size:11px;background:var(--surface,#0e0e0e);color:inherit;' +
-          'border:1px solid var(--border,#333);border-radius:4px;outline:none;font-family:var(--mono,monospace)">' +
-      '</div>' +
-      '<input data-pop-native type="color" value="' + escape(current) + '" ' +
-        'style="width:100%;height:32px;border:1px solid var(--border,#333);border-radius:4px;background:none;padding:2px;cursor:pointer">' +
-      '<div data-pop-tokens style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px"></div>';
-
-    document.body.appendChild(pop);
-
-    var popSwatch = pop.querySelector('[data-pop-swatch]');
-    var popHex = pop.querySelector('[data-pop-hex]');
-    var popNative = pop.querySelector('[data-pop-native]');
-    var popTokens = pop.querySelector('[data-pop-tokens]');
-
-    // Brand tokens — fetched from /platform/api/tokens/<sceneId>. Each
-    // token chip shows a small swatch with the resolved color plus the
-    // token name. Click to bind. Loading state shown while fetching.
-    popTokens.innerHTML = '<div style="width:100%;font-size:10px;color:var(--text-muted,#888)">Loading brand tokens…</div>';
-    fetchSceneTokens(sceneId).then(function(tokens) {
-      var colorTokens = tokens.filter(function(t) { return t.type === 'COLOR'; });
-      if (colorTokens.length === 0) {
-        popTokens.innerHTML =
-          '<div style="width:100%;font-size:10px;color:var(--text-muted,#888)">' +
-          'No brand tokens. Apply a brand via reframe_design first.' +
-          '</div>';
-        return;
-      }
-      popTokens.innerHTML =
-        '<div style="width:100%;font-size:10px;color:var(--text-muted,#888);margin-bottom:4px">Brand tokens</div>' +
-        colorTokens.slice(0, 16).map(function(t) {
-          return '<button data-pop-token="' + escape(t.name) + '" type="button" title="' + escape(t.name) + '" ' +
-            'style="padding:2px 6px 2px 4px;font-size:10px;background:var(--surface,#0e0e0e);' +
-            'color:var(--text-muted,#888);border:1px solid var(--border,#333);border-radius:4px;cursor:pointer;' +
-            'font-family:inherit;display:inline-flex;align-items:center;gap:4px">' +
-            '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + escape(String(t.value)) + ';flex:none"></span>' +
-            escape(t.name.replace(/^color./, '')) +
-            '</button>';
-        }).join('');
-
-      // Wire token-pick clicks here (rendered async after fetch).
-      popTokens.querySelectorAll('[data-pop-token]').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-          var token = btn.getAttribute('data-pop-token');
-          editNodeProp(sceneId, nodeId, prop + '__token', token);
-          pop.remove();
+        var prop = swatch.getAttribute('data-prop');
+        var sceneId = swatch.getAttribute('data-scene');
+        var nodeId = swatch.getAttribute('data-node');
+        var hexInput = swatch.parentElement && swatch.parentElement.querySelector('.fill-hex');
+        var current = (hexInput && hexInput.value) || '#000000';
+        var engineKey = COLOR_PROP_TO_ENGINE_KEY[prop] || null;
+        if (typeof window.reframeMountColorPickerRail !== 'function') return;
+        window.reframeMountColorPickerRail(swatch, {
+          sceneId: sceneId, nodeId: nodeId, prop: prop,
+          engineKey: engineKey, currentValue: current,
+          onChange: function(patch) {
+            if (!patch) return;
+            // Mirror visual state immediately.
+            var hex = patch[prop];
+            if (hex) {
+              swatch.style.background = hex;
+              if (hexInput) hexInput.value = hex;
+            }
+            // Canvas workspace bg — local CSS var path, no node edit.
+            if (prop === 'canvas-bg') {
+              if (hex) {
+                applyCanvasBg(hex);
+                var key = swatch.getAttribute('data-workspace-key');
+                if (key) { try { localStorage.setItem(key, hex); } catch (_) {} }
+              }
+              return;
+            }
+            if (!sceneId || !nodeId) return;
+            // POST the full patch — engine-direct shape, server splits
+            // literal hex into node.fills and tokenBindings into
+            // node.meta.tokenBindings.
+            var props = {};
+            if (hex !== undefined) props[prop] = hex;
+            if (patch.tokenBindings) props.tokenBindings = patch.tokenBindings;
+            try {
+              fetch('/platform/api/node/edit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sceneId: sceneId, nodeId: nodeId, props: props }),
+              });
+            } catch (_) {}
+          },
         });
       });
     });
-
-    function applyHex(hex) {
-      popSwatch.style.background = hex;
-      popNative.value = hex;
-      popHex.value = hex;
-      swatch.style.background = hex;
-      if (hexInput) hexInput.value = hex;
-    }
-
-    // Canvas workspace bg — swatch has no scene/node, routes via
-    // applyCanvasBg + localStorage. Without this branch the popover
-    // would call editNodeProp with empty sceneId/nodeId and the POST
-    // would silently fail, so the picker looked broken.
-    var isWorkspace = prop === 'canvas-bg';
-    var wsKey = swatch.getAttribute('data-workspace-key');
-    function commit(hex) {
-      if (isWorkspace) {
-        applyCanvasBg(hex);
-        if (wsKey) { try { localStorage.setItem(wsKey, hex); } catch (_) {} }
-      } else {
-        editNodeProp(sceneId, nodeId, prop, hex);
-      }
-    }
-    popHex.addEventListener('input', function() {
-      var v = popHex.value.trim();
-      if (/^#[0-9a-fA-F]{6}$/.test(v)) {
-        applyHex(v);
-        if (isWorkspace) applyCanvasBg(v); // live preview
-      }
-    });
-    popNative.addEventListener('input', function() {
-      applyHex(popNative.value);
-      if (isWorkspace) applyCanvasBg(popNative.value); // live preview
-    });
-    popNative.addEventListener('change', function() { commit(popNative.value); });
-    popHex.addEventListener('change', function() {
-      var v = popHex.value.trim();
-      if (/^#[0-9a-fA-F]{6}$/.test(v)) commit(v);
-    });
-    // (Token chips are wired async inside fetchSceneTokens.then above.)
-
-    // Dismiss on outside click
-    setTimeout(function() {
-      function dismiss(e) {
-        if (!pop.contains(e.target) && e.target !== swatch) {
-          pop.remove();
-          document.removeEventListener('mousedown', dismiss);
-        }
-      }
-      document.addEventListener('mousedown', dismiss);
-    }, 0);
   }
+
 
   // ── Phase 1.6: W/H aspect-lock chain ─────────────────────────────
   // Inserts a chain icon between width and height inputs. When locked,

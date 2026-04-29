@@ -91,8 +91,17 @@ export function renderShell(props: ShellProps): string {
   const agentEl = '';
   const brandEl = '';
 
+  // Phase 1 UI-1 — collapse affordance lives inside the sidebar (top-right).
+  // Brief constraint: left panel is the only collapsible rail in Phase 1
+  // (right is inspector/layers content the designer wants visible). Single
+  // chevron toggle, animates to 48px icon-rail width and back.
+  const sidebarCollapseToggle = `
+    <button class="sidebar-collapse-toggle" data-sidebar-collapse-toggle title="Collapse panel" aria-label="Collapse panel" aria-expanded="true">
+      <svg class="sc-icon-collapse" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M9 3 L5 7 L9 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg class="sc-icon-expand" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M5 3 L9 7 L5 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>`;
   const sidebarEl = props.sidebar
-    ? `<aside class="sidebar">${props.sidebar}</aside>`
+    ? `<aside class="sidebar">${sidebarCollapseToggle}${props.sidebar}</aside>`
     : '';
   const rightEl = props.rightPanel
     ? `<aside class="right">${props.rightPanel}</aside>`
@@ -221,6 +230,17 @@ export function renderShell(props: ShellProps): string {
       ${props.rightPanel ? '<div class="panel-resize panel-resize-right" data-panel-resize="right"></div>' : ''}
     </div>
     ${props.sceneSlug ? renderBottomChat() : ''}
+    <!-- Phase 1 UI-1 — narrow-viewport guard. Below 1024px the editor
+         layout collapses to a single column and the canvas / panels
+         compete for unworkable widths. Rather than render a degraded
+         layout we surface a clear notice. JS toggles the .visible
+         class on resize crossing the 1024px boundary. -->
+    <div class="reframe-narrow-viewport-toast" data-narrow-viewport-toast role="status" aria-live="polite">
+      <div class="reframe-narrow-viewport-toast-card">
+        <strong>reframe Platform UI requires 1024px+ viewport.</strong>
+        <span>Mobile support coming.</span>
+      </div>
+    </div>
   </div>
   <script type="importmap">{"imports":{"canvaskit-wasm":"/platform/vendor/canvaskit-shim.js","canvaskit-wasm/full":"/platform/vendor/canvaskit-shim.js"}}</script>
   <script src="/platform/app.js?v=${ASSET_VERSION}"></script>
@@ -311,7 +331,11 @@ export function renderSidebar(opts: SidebarOpts): string {
   if (active === 'scene') {
     parts.push(`<div class="sidebar-section layers-section">
       <div class="sidebar-title">Layers</div>
-      <div class="layers-tree" data-layers-tree>
+      <div class="layers-filter">
+        <input type="text" data-layers-filter placeholder="Filter layers..." autocomplete="off"
+               style="width:100%;padding:4px 8px;background:var(--surface,#0e0e0e);border:1px solid var(--border,#333);border-radius:4px;color:var(--text-primary,#e5e5e5);font-size:11px;margin-bottom:6px">
+      </div>
+      <div class="layers-tree" data-layers-tree tabindex="0">
         <div class="sidebar-empty">Loading\u2026</div>
       </div>
     </div>`);

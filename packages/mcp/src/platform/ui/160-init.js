@@ -59,6 +59,21 @@
       window.addEventListener('reframe:canvas-select', function(evt) {
         var detail = evt.detail || {};
         var nodeId = detail.nodeId;
+        // Phase 1 UI-3 — multi-select wires through showPropsForNodes
+        // when the canvas reports >1 selected. Single-select continues
+        // through the existing showPropsForNode path below.
+        if (detail.multi && Array.isArray(detail.nodeIds) && detail.nodeIds.length > 1) {
+          var frame2 = $('.viewport-frame') || document.getElementById('reframe-viewport');
+          var sessionId2 = frame2 ? (frame2.getAttribute('data-session') || frame2.dataset.session) : null;
+          if (!sessionId2) {
+            var appEl2 = $('.app');
+            sessionId2 = appEl2 ? appEl2.getAttribute('data-scene') : null;
+          }
+          if (sessionId2 && typeof window.showPropsForNodes === 'function') {
+            window.showPropsForNodes(detail.nodeIds, sessionId2);
+            return;
+          }
+        }
         // Deep-click promotion: when the hit node is a leaf that LAYERS
         // hides (text spans inside buttons, inner wrappers, OP layout
         // helpers), walk up parents until we reach the nearest ancestor
@@ -282,6 +297,8 @@
     bindOverviewProjectDelete();
     bindHistoryDropdown();
     bindResizablePanels();
+    bindSidebarCollapse();
+    bindNarrowViewportGuard();
     bindKeyboard();
     bindThemeToggle();
     bindRightTabs();

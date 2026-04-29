@@ -371,6 +371,26 @@ const operationSchema = z.discriminatedUnion('op', [
     index: z.number().optional().describe('Insert index in new parent'),
   }),
 
+  // Group siblings into a new frame container (Phase 1 UI-2).
+  // All target nodes must share the same parent. The new frame is
+  // inserted at the position of the leftmost-topmost selected child,
+  // sized to the union bbox; children are reparented and their
+  // coordinates re-anchored relative to the new frame.
+  z.object({
+    op: z.literal('group'),
+    sceneId: z.string().optional(),
+    nodeIds: z.array(z.string()).min(2).describe('Sibling node ids to group; must share a parent'),
+    frameType: z.enum(['frame', 'container']).optional().describe('Generated frame node type. Default: frame'),
+  }),
+
+  // Inverse of group — extract the selected frame's children into its
+  // parent, re-anchoring positions, and remove the frame.
+  z.object({
+    op: z.literal('ungroup'),
+    sceneId: z.string().optional(),
+    nodeId: z.string().describe('Frame/container id to dissolve into its parent'),
+  }),
+
   // Define tokens from DESIGN.md or inline
   z.object({
     op: z.literal('defineTokens'),
@@ -1861,6 +1881,116 @@ export async function handleEdit(input: {
         }
         touchedScenes.add(sceneId);
         results.push(`MOVE "${node.name}" → "${newParent.name}"`);
+        break;
+      }
+
+      // Phase 1 UI-2 — atomic restructure: create a new frame, reparent
+      // selected siblings into it, re-anchor coordinates relative to
+      // the frame's origin, and select the new frame.
+      //
+      // Atomicity: all graph mutations happen in-memory before
+      // resaveScene fires at the end of the request, so a mid-loop
+      // failure can be caught + the request rolled back without
+      // partial DB state. Errors emit a structured `edit.group.*` code
+      // so the platform UI can map them to user-readable messages.
+      case 'group': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('GROUP ERROR (edit.group.no_scene): no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`GROUP ERROR (edit.group.scene_not_found): scene "${sceneId}" not found`); break; }
+        const ids: string[] = op.nodeIds.filter((s: string, i: number, arr: string[]) => arr.indexOf(s) === i);
+        if (ids.length < 2) {
+          results.push('GROUP ERROR (edit.group.empty_selection): need >= 2 nodes');
+          break;
+        }
+        const nodes = ids.map((id: string) => stored.graph.getNode(id));
+        if (nodes.some((n: SceneNode | undefined) => !n)) {
+          results.push('GROUP ERROR (edit.group.node_not_found): one or more node ids are not in the scene');
+          break;
+        }
+        const parents = new Set(nodes.map((n: SceneNode | undefined) => n!.parentId));
+        if (parents.size !== 1) {
+          results.push('GROUP ERROR (edit.group.different_parents): all selected nodes must share a parent');
+          break;
+        }
+        const parentId = nodes[0]!.parentId;
+        if (!parentId) {
+          results.push('GROUP ERROR (edit.group.is_root): cannot group the scene root');
+          break;
+        }
+        // Refuse if the selection includes the scene root explicitly.
+        if (ids.includes(stored.rootId)) {
+          results.push('GROUP ERROR (edit.group.is_root): selection includes the scene root');
+          break;
+        }
+        // Compute union bbox (in parent-local coords).
+        const minX = Math.min(...nodes.map((n: SceneNode | undefined) => n!.x));
+        const minY = Math.min(...nodes.map((n: SceneNode | undefined) => n!.y));
+        const maxX = Math.max(...nodes.map((n: SceneNode | undefined) => n!.x + n!.width));
+        const maxY = Math.max(...nodes.map((n: SceneNode | undefined) => n!.y + n!.height));
+        const frameType = op.frameType ?? 'frame';
+        // Mint the new frame as a child of the shared parent. Position
+        // = union origin; size = union dimensions.
+        const newFrame = stored.graph.createNode('FRAME' as any, parentId, {
+          name: frameType === 'container' ? 'Container' : 'Group',
+          x: minX,
+          y: minY,
+          width: maxX - minX,
+          height: maxY - minY,
+          fills: [],
+          strokes: [],
+          layoutMode: 'NONE',
+        } as any);
+        // Reparent every selected sibling into the new frame.
+        // SceneGraph.reparentNode already re-anchors coordinates to
+        // preserve visual position (subtracts the new parent's
+        // absolute origin), so we don't apply a manual offset here —
+        // that would double-subtract minX / minY.
+        for (const n of nodes) {
+          stored.graph.reparentNode(n!.id, newFrame.id);
+        }
+        touchedScenes.add(sceneId);
+        results.push(`GROUP **${newFrame.id}** ${ids.length} nodes → "${newFrame.name}"`);
+        break;
+      }
+
+      case 'ungroup': {
+        const sceneId = op.sceneId ?? lastSceneId;
+        if (!sceneId) { results.push('UNGROUP ERROR (edit.ungroup.no_scene): no scene'); break; }
+        const stored = getScene(sceneId);
+        if (!stored) { results.push(`UNGROUP ERROR (edit.ungroup.scene_not_found): scene "${sceneId}" not found`); break; }
+        const target = stored.graph.getNode(op.nodeId);
+        if (!target) {
+          results.push(`UNGROUP ERROR (edit.ungroup.node_not_found): "${op.nodeId}" not in scene`);
+          break;
+        }
+        if (target.id === stored.rootId) {
+          results.push('UNGROUP ERROR (edit.ungroup.is_root): cannot ungroup the scene root');
+          break;
+        }
+        const parentId = target.parentId;
+        if (!parentId) {
+          results.push('UNGROUP ERROR (edit.ungroup.no_parent): node has no parent');
+          break;
+        }
+        const childIds = stored.graph.getChildren(target.id).map((c) => c.id);
+        if (childIds.length === 0) {
+          results.push('UNGROUP ERROR (edit.ungroup.no_children): target has no children');
+          break;
+        }
+        // Reparent each child to the grandparent. SceneGraph
+        // .reparentNode preserves visual position by re-computing
+        // node-local coords against the new parent's absolute
+        // origin — so we don't add target.x/y manually here.
+        // Then remove the empty frame.
+        for (const cid of childIds) {
+          const c = stored.graph.getNode(cid);
+          if (!c) continue;
+          stored.graph.reparentNode(cid, parentId);
+        }
+        stored.graph.deleteNode(target.id);
+        touchedScenes.add(sceneId);
+        results.push(`UNGROUP "${target.name ?? op.nodeId}" → ${childIds.length} children promoted to parent`);
         break;
       }
 

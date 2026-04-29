@@ -320,6 +320,14 @@
         if (debouncedRefreshStream) debouncedRefreshStream();
         if (debouncedRefreshAnnotations) debouncedRefreshAnnotations();
         if (debouncedRefreshAudit) debouncedRefreshAudit();
+        // Phase 1 UI-4 — refresh the LAYERS tree so visibility / lock /
+        // rename edits flip the row icons in real time. Without this
+        // the layers panel stayed pinned to import-time state because
+        // refreshLayersTree() was only called from explicit gesture
+        // paths (020-selection.js add-frame / add-text), never from
+        // the generic scene mutation channel. Function is internally
+        // debounced (~120ms) so multiple events coalesce.
+        if (typeof refreshLayersTree === 'function') refreshLayersTree();
         break;
       case 'intent:updated':
         if (debouncedRefreshStream) debouncedRefreshStream();
