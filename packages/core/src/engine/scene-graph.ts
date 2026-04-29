@@ -213,6 +213,20 @@ export class SceneGraph {
     industryTerms: Array<{ term: string; occurrences: number }>;
   } | null = null;
 
+  /**
+   * Canvas spec (T3 #31) — explicit width/height + optional preset name
+   * set when the compile request passed `canvas: 'icon' | '200x200' | …`.
+   * When undefined, the scene uses the historical 1440×auto default
+   * (root width set during compile from html.ts importer or compiler
+   * blueprint, height auto-grows via Yoga).
+   *
+   * Persisted in scene envelopes via the serializer side-channel
+   * (similar to annotations). Preset name retained for round-trip so
+   * inspect can surface "Canvas: 200×200 (preset: icon)" instead of
+   * "Canvas: 200×200 (custom)" for re-loaded scenes.
+   */
+  canvas: import('./canvas-presets').CanvasSpec | null = null;
+
   // Caches
   private absPosCache = new Map<string, Vector>();
   private instanceIndex = new Map<string, Set<string>>();

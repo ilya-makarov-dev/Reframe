@@ -94,6 +94,11 @@ export const compileInputSchema = {
     layout: z.enum(['centered', 'left-aligned', 'split', 'stacked', 'auto']).optional(),
   })).optional().describe('Multi-size: compile same content to N sizes.'),
 
+  // T3 #31 — Canvas preset / explicit-dimensions shorthand
+  canvas: z.string().optional().describe(
+    'Constrained canvas spec — preset name (icon / thumbnail / tile / card / social-square / social-story / social-banner / web / wide) or custom NxN format ("200x200"). Sets scene root width+height. Mutually preferred over width+height when present. Default: 1440px web (existing behavior preserved when option is absent).',
+  ),
+
   // Audit
   audit: z.union([z.boolean(), z.object({
     autoFix: z.boolean().optional().default(true),
@@ -189,6 +194,8 @@ interface CompileInput {
   name?: string;
   width?: number;
   height?: number;
+  /** T3 #31 — preset name or custom NxN spec; resolves to scene root width/height. */
+  canvas?: string;
   sizes?: Array<{ width: number; height: number; name?: string; layout?: string }>;
   audit?: boolean | {
     autoFix?: boolean;
@@ -474,6 +481,30 @@ export async function handleCompile(input: CompileInput) {
         input.height = prior.height;
       }
     } catch { /* best effort — fall through to importer defaults */ }
+  }
+
+  // ─── T3 #31: canvas preset / NxN resolution ────────────────
+  // Resolve `canvas` option into width+height — feeds the existing
+  // size-resolution block below as if the caller passed width/height
+  // directly. Persists the spec onto the stored SceneGraph below so
+  // re-export uses the same dimensions and inspect can surface the
+  // preset name. canvas wins over explicit width/height when both are
+  // passed (option is more declarative; w/h is the legacy escape hatch).
+  let resolvedCanvasSpec: import('../../../core/src/engine/canvas-presets.js').CanvasSpec | undefined;
+  if (input.canvas) {
+    try {
+      const { resolveCanvas } = await import('../../../core/src/engine/canvas-presets.js');
+      resolvedCanvasSpec = resolveCanvas(input.canvas);
+      input.width = resolvedCanvasSpec.width;
+      input.height = resolvedCanvasSpec.height;
+    } catch (err: any) {
+      const code = err?.code ?? 'compile.canvas.resolve_failed';
+      return makeToolJsonErrorResult(
+        err?.message ?? `canvas resolution failed for "${input.canvas}"`,
+        code,
+        { canvas: input.canvas },
+      );
+    }
   }
 
   // ─── Build size list ────────────────────────────────────────
@@ -915,6 +946,14 @@ export async function handleCompile(input: CompileInput) {
     // so subsequent loads can detect drift via detectBrandDrift().
     const resolvedBrand = input.brand || session.activeBrand || undefined;
     const resolvedBrandHash = input.designMd ? hashDesignMdContent(input.designMd) : undefined;
+
+    // T3 #31 — attach the canvas spec onto the SceneGraph BEFORE store.
+    // The graph is the persistence anchor; storeScene captures whatever
+    // is on it, and saveScene serializes the canvas field through the
+    // envelope side-channel (similar shape to graph.annotations).
+    if (resolvedCanvasSpec) {
+      graph.canvas = resolvedCanvasSpec;
+    }
 
     const sceneId = storeScene(graph, rootId, undefined, {
       name: sceneName,

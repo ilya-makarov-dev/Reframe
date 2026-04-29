@@ -299,6 +299,17 @@ export async function handleInspect(input: {
 
   // ── a. Tree ──────────────────────────────────────────────────
 
+  // T3 #31 — surface canvas dimensions when the scene was compiled
+  // with an explicit `canvas` option (preset OR custom NxN). Omitted
+  // for scenes using the historical 1440×auto default — keeps inspect
+  // output free of clutter for the common case.
+  const canvas = (graph as any).canvas as { width: number; height: number; preset?: string } | null | undefined;
+  if (canvas) {
+    sections.push('');
+    const tag = canvas.preset ? `(preset: ${canvas.preset})` : '(custom)';
+    sections.push(`Canvas: ${canvas.width}×${canvas.height} ${tag}`);
+  }
+
   if (input.tree !== false) {
     const depthCap = input.treeMaxDepth ?? MCP_LIMITS.inspectTreeDefaultMaxDepth;
     const linesCap = input.treeMaxLines ?? MCP_LIMITS.inspectTreeDefaultMaxLines;
