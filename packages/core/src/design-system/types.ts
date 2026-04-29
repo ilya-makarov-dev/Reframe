@@ -221,6 +221,19 @@ export interface DesignSystem {
      * brand documenting Display 72/64/48 isn't reduced to a single hero entry.
      */
     allSizes?: number[];
+    /**
+     * Semantic typography roles (T3 #9) — display / body / ui / annotation
+     * declared via `## Typography Roles` section in DESIGN.md.
+     *
+     * All roles are independently optional — brand may declare any subset.
+     * `annotation` role wires into the existing annotation rendering chain
+     * via `resolveAnnotationFont(ds)`; when declared, it overrides the
+     * hardcoded ANNOTATION_FONT (Caveat 500) for that brand. The other
+     * three roles surface in `reframe_inspect` for designer / agent
+     * reference when authoring HTML — auto-application via semantic-tag
+     * is reserved as a future signal.
+     */
+    roles?: TypographyRoles;
   };
   components: DesignSystemComponents;
   layout: DesignSystemLayout;
@@ -290,6 +303,46 @@ export interface DesignSystem {
  * palettes labeled 'neutral' rather than slightly-warm or slightly-cool.
  */
 export type UndertoneAxis = 'warm' | 'cool' | 'neutral';
+
+/**
+ * Single typography role declaration (T3 #9). Each role is a tuple of
+ * font family + weight + letter-spacing + size scale. Fields are
+ * independently optional; partial roles still register.
+ *
+ * `letterSpacing` is a CSS-compatible string (`-0.03em`, `0.5px`,
+ * `normal`) so the value can paste directly into emitted styles.
+ *
+ * `sizes` is the discrete scale the role lives on (e.g. display heads
+ * are 48/64/80/96; body is 14/16/18). Audit rules + designer guidance
+ * read this as the legal-size set for the role.
+ *
+ * Named TypographyRoleSpec to avoid collision with the legacy
+ * `TypographyRole` string union (which is the hierarchy role label —
+ * 'hero' / 'title' / 'body' / etc. — used in TypographyRule entries).
+ */
+export interface TypographyRoleSpec {
+  family?: string;
+  weight?: number;
+  letterSpacing?: string;
+  sizes?: number[];
+}
+
+/**
+ * Four canonical typography roles (T3 #9). Each independently optional.
+ *   display    — large headline / hero typography
+ *   body       — paragraph / longform text
+ *   ui         — buttons, labels, inline controls
+ *   annotation — designer notes / margin scribbles (overrides ANNOTATION_FONT)
+ *
+ * Future signals may add roles (e.g. `code`, `caption`, `quote`) — append
+ * to this interface, parser auto-picks them up via the section walker.
+ */
+export interface TypographyRoles {
+  display?: TypographyRoleSpec;
+  body?: TypographyRoleSpec;
+  ui?: TypographyRoleSpec;
+  annotation?: TypographyRoleSpec;
+}
 
 /**
  * Single tweakable token declared under `## Tweak Surface` in DESIGN.md.

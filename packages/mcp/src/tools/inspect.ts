@@ -267,16 +267,33 @@ export async function handleInspect(input: {
     ? session.getOrParseDesignMd(designMdText, parseDesignMd)
     : undefined;
 
-  // ── Design system summary (T3 #7 surfaces undertone here) ────
-  // Surface a one-line brand digest when a DESIGN.md is in scope.
-  // Today: brand name + undertone + source. Future: token counts,
-  // component coverage, or palette stats can extend the same line.
+  // ── Design system summary (T3 #7 / #9) ────────────────────────
+  // Surface a brand digest when a DESIGN.md is in scope:
+  //   - undertone (#7) — one line + source tag
+  //   - typography roles (#9) — block of declared roles, omitted if
+  //     section absent (zero clutter for brands not using feature)
   if (ds) {
     sections.push('');
     sections.push(`--- Design System: ${ds.brand || 'unknown'} ---`);
     if (ds.undertone) {
       const sourceTag = ds.undertoneSource === 'declared' ? 'declared' : 'computed from palette';
       sections.push(`Undertone: ${ds.undertone} (${sourceTag})`);
+    }
+    const roles = ds.typography?.roles;
+    if (roles && Object.keys(roles).length > 0) {
+      sections.push('Typography roles:');
+      const ROLE_ORDER: Array<'display' | 'body' | 'ui' | 'annotation'> = ['display', 'body', 'ui', 'annotation'];
+      for (const key of ROLE_ORDER) {
+        const r = (roles as any)[key];
+        if (!r) continue;
+        const parts: string[] = [];
+        if (r.family) parts.push(r.family);
+        if (r.weight !== undefined) parts.push(String(r.weight));
+        const summary = parts.join(' ');
+        const ls = r.letterSpacing ? `, ls ${r.letterSpacing}` : '';
+        const sizes = r.sizes && r.sizes.length > 0 ? `, sizes [${r.sizes.join(', ')}]` : '';
+        sections.push(`  ${key}: ${summary}${ls}${sizes}`);
+      }
     }
   }
 

@@ -39,6 +39,12 @@ export type AnnotationSeverity = 'info' | 'suggestion' | 'warn';
  * Change here propagates to all renderers + the bundle inliner without
  * hand-syncing. Future: per-severity style overrides land as a Record
  * over AnnotationSeverity → ANNOTATION_FONT.
+ *
+ * T3 #9 — DESIGN.md `## Typography Roles\n  annotation:\n    family: …`
+ * overrides this constant per-brand. Use `resolveAnnotationFont(ds)`
+ * (NOT this constant directly) anywhere a brand-aware lookup is wanted.
+ * The const remains the canonical fallback when ds is absent OR when
+ * the brand's annotation role is undeclared.
  */
 export const ANNOTATION_FONT = {
   family: 'Caveat',
@@ -47,6 +53,37 @@ export const ANNOTATION_FONT = {
   /** CSS fallback chain when the inlined face isn't available. */
   fallback: 'cursive, sans-serif',
 } as const;
+
+/**
+ * Resolve the effective annotation font for a given DesignSystem.
+ *
+ * Adapter contract — TypographyRoleSpec carries `family / weight /
+ * letterSpacing / sizes` while the annotation rendering chain wants
+ * `family / weight / style / fallback`. The two shapes don't unify
+ * cleanly (sizes is per-role context; style/fallback are render-time
+ * defaults). Resolver fills the gap:
+ *   - family / weight → from role spec when set; else ANNOTATION_FONT
+ *   - style / fallback → always ANNOTATION_FONT defaults (designer
+ *     hasn't been asked for these in DESIGN.md schema; future signal
+ *     adds per-role `style` + `fallback` fields if real authoring
+ *     surfaces the need)
+ *
+ * Phase 0 consumer site count: 1 — bundle.ts font-subset collector.
+ * The earlier "3 sites" estimate was stale; html.ts uses a separate
+ * `ANNOTATION_FONT_LINK` Google Fonts URL string and react-spa /
+ * inline-fonts read through bundle.ts indirectly.
+ */
+export function resolveAnnotationFont(
+  ds?: { typography?: { roles?: { annotation?: { family?: string; weight?: number } } } },
+): { family: string; weight: number; style: 'normal'; fallback: string } {
+  const declared = ds?.typography?.roles?.annotation;
+  return {
+    family: declared?.family ?? ANNOTATION_FONT.family,
+    weight: declared?.weight ?? ANNOTATION_FONT.weight,
+    style: ANNOTATION_FONT.style,
+    fallback: ANNOTATION_FONT.fallback,
+  };
+}
 
 export interface AnnotationNode {
   /** Stable id, generated at create time (format: `a:<base36>`). */

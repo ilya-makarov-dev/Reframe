@@ -69,7 +69,7 @@ import {
   type FontInlineResult,
 } from './inline-fonts.js';
 import { inlineImages } from './inline-images.js';
-import { ANNOTATION_FONT } from '../engine/annotation.js';
+import { ANNOTATION_FONT, resolveAnnotationFont } from '../engine/annotation.js';
 import type { DesignSystem, TweakDef } from '../design-system/types.js';
 import {
   generatePanelHtml,
@@ -160,7 +160,7 @@ export async function exportSceneGraphToBundle(
   // Step 2: collect used variants from SceneGraph as a safety subset
   // filter. html.ts already restricts via URL; this guards against
   // user-imported HTML whose Google Fonts <link> requests every weight.
-  const usedVariants = inlineFontsOpt ? collectUsedVariants(graph, rootId) : [];
+  const usedVariants = inlineFontsOpt ? collectUsedVariants(graph, rootId, options.designSystem) : [];
 
   // Step 3: font inlining.
   if (inlineFontsOpt) {
@@ -382,11 +382,17 @@ function swapValueOccurrences(haystack: string, needle: string, replacement: str
  *   - fontWeight: 'bold' → 700, 'normal' / absent → 400, numeric pass-through
  *   - italic boolean → 'italic' / 'normal' style
  *
- * Scene-level annotations always include Caveat @ 500 (hard-coded by
- * html.ts annotation emission), but ONLY if scene actually has annotations.
- * Skip Caveat entirely otherwise.
+ * Scene-level annotations include the brand's annotation font (T3 #9 —
+ * resolveAnnotationFont(ds) reads `typography.roles.annotation` when
+ * declared, else falls back to ANNOTATION_FONT — Caveat 500). Only
+ * when scene actually has annotations; otherwise skip the annotation
+ * font tuple entirely.
  */
-export function collectUsedVariants(graph: SceneGraph, rootId: string): UsedVariant[] {
+export function collectUsedVariants(
+  graph: SceneGraph,
+  rootId: string,
+  designSystem?: DesignSystem,
+): UsedVariant[] {
   const set = new Map<string, UsedVariant>();
   const key = (v: UsedVariant) => `${v.family}|${v.weight}|${v.style}`;
 
@@ -405,14 +411,17 @@ export function collectUsedVariants(graph: SceneGraph, rootId: string): UsedVari
   }
   walk(rootId);
 
-  // Annotation font (Caveat 500 today) — only when scene has annotations.
-  // Family/weight/style from the canonical engine binding so changes there
-  // propagate without hand-syncing this file.
+  // Annotation font — only when scene has annotations. T3 #9:
+  // resolveAnnotationFont(ds) returns the brand's annotation role
+  // (when declared in DESIGN.md `## Typography Roles`) or falls back
+  // to ANNOTATION_FONT (Caveat 500). Brand-undeclared scenes preserve
+  // pre-#9 byte-identical font subset.
   if (graph.annotations && graph.annotations.length > 0) {
+    const af = resolveAnnotationFont(designSystem);
     const annoFont: UsedVariant = {
-      family: ANNOTATION_FONT.family,
-      weight: ANNOTATION_FONT.weight,
-      style: ANNOTATION_FONT.style,
+      family: af.family,
+      weight: af.weight,
+      style: af.style,
     };
     set.set(key(annoFont), annoFont);
   }

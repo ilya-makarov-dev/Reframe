@@ -39,6 +39,8 @@ import type {
   ColorRole,
   TweakDef,
   UndertoneAxis,
+  TypographyRoles,
+  TypographyRoleSpec,
 } from './types';
 import { computeUndertone, type PaletteEntry } from './undertone.js';
 
@@ -1539,6 +1541,9 @@ export function parseDesignMd(markdown: string): DesignSystem {
   // T3 #7: ## Undertone — optional warm/cool/neutral declaration
   // overriding the palette-computed default.
   const undertoneSection = findSection(sections, 'undertone', 'temperature');
+  // T3 #9: ## Typography Roles — display / body / ui / annotation roles.
+  // Annotation role wires into engine/annotation.ts resolveAnnotationFont.
+  const typographyRolesSection = findSection(sections, 'typography roles', 'roles');
 
   // Parse layout, then overlay radius if separate section exists
   const parsedLayout = parseLayout(layoutSection);
@@ -1610,10 +1615,17 @@ export function parseDesignMd(markdown: string): DesignSystem {
   const undertone = declaredUndertone ?? computedUndertone ?? 'neutral';
   const undertoneSource: 'computed' | 'declared' = declaredUndertone ? 'declared' : 'computed';
 
+  // T3 #9 — parse typography roles after the legacy hierarchy.
+  // Roles attach to the typography object alongside the existing
+  // `hierarchy` / `allSizes` / `fontFeatures` fields.
+  const parsedTypography = parseTypography(typoSection);
+  const parsedRoles = parseTypographyRoles(typographyRolesSection);
+  if (parsedRoles) parsedTypography.roles = parsedRoles;
+
   return {
     brand: extractBrand(markdown),
     colors: parsedColors,
-    typography: parseTypography(typoSection),
+    typography: parsedTypography,
     // Pass the FULL markdown so the component parser can find sub-sections
     // wherever they live (not just under "Components"). Also hand in layout
     // and colors so missing specs can be filled with brand-appropriate defaults.
@@ -1628,6 +1640,95 @@ export function parseDesignMd(markdown: string): DesignSystem {
     undertoneSource,
     rawMarkdown: markdown,
   };
+}
+
+/**
+ * Parse the optional `## Typography Roles` section (T3 #9).
+ *
+ * Recognized format — per role, a label line followed by indented
+ * `key: value` fields:
+ *
+ *   display:
+ *     family: Inter
+ *     weight: 700
+ *     letterSpacing: -0.03em
+ *     sizes: [48, 64, 80, 96]
+ *
+ *   body:
+ *     family: Inter
+ *     ...
+ *
+ * Recognized role labels (case-insensitive): display, body, ui,
+ * annotation. Unknown labels skipped silently. Field tolerance:
+ * non-numeric weight → field skipped (with warning). Partial roles
+ * (only `family` set) survive — caller falls back to defaults.
+ *
+ * Returns undefined when the section is empty or no recognized roles
+ * surface — keeps DesignSystem.typography.roles undefined for byte-
+ * identical backward compat.
+ */
+function parseTypographyRoles(section: Section | undefined): TypographyRoles | undefined {
+  if (!section) return undefined;
+  const KNOWN = new Set(['display', 'body', 'ui', 'annotation']);
+  const lines = section.body.split('\n');
+
+  const roles: TypographyRoles = {};
+  let current: { label: keyof TypographyRoles; spec: TypographyRoleSpec } | null = null;
+
+  function commit(): void {
+    if (!current) return;
+    // Empty spec (no fields parsed) still registers — designer may
+    // declare a role with only `family` and rely on hierarchy defaults
+    // for the rest. But entirely-empty specs are useless, drop them.
+    const spec = current.spec;
+    const hasAny = spec.family !== undefined || spec.weight !== undefined ||
+      spec.letterSpacing !== undefined || (spec.sizes && spec.sizes.length > 0);
+    if (hasAny) roles[current.label] = spec;
+    current = null;
+  }
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    // Role-label opener: `display:`, `body:`, etc. — exactly one word + colon.
+    const labelMatch = line.match(/^([a-zA-Z]+)\s*:\s*$/);
+    if (labelMatch) {
+      const label = labelMatch[1].toLowerCase();
+      if (KNOWN.has(label)) {
+        commit();
+        current = { label: label as keyof TypographyRoles, spec: {} };
+      } else {
+        // Unknown role label — close any current, ignore this opener.
+        commit();
+      }
+      continue;
+    }
+    if (!current) continue;
+    const fieldMatch = line.match(/^([a-zA-Z]+)\s*:\s*(.+?)\s*$/);
+    if (!fieldMatch) continue;
+    const key = fieldMatch[1].toLowerCase();
+    const value = fieldMatch[2];
+    if (key === 'family') {
+      current.spec.family = value.replace(/^["']|["']$/g, '');  // strip surrounding quotes if any
+    } else if (key === 'weight') {
+      const n = parseInt(value, 10);
+      if (Number.isFinite(n)) current.spec.weight = n;
+      else console.warn(`[design-system] typography role "${current.label}".weight="${value}" not numeric, skipping`);
+    } else if (key === 'letterspacing' || key === 'letter-spacing') {
+      current.spec.letterSpacing = value;
+    } else if (key === 'sizes') {
+      // Accept `[48, 64, 80]` or `48, 64, 80` or `48 64 80`.
+      const nums = value.match(/-?\d+(?:\.\d+)?/g);
+      if (nums) {
+        current.spec.sizes = nums.map(s => parseFloat(s)).filter(n => Number.isFinite(n));
+      }
+    }
+    // Unknown keys silently dropped (additive schema).
+  }
+  commit();
+
+  if (Object.keys(roles).length === 0) return undefined;
+  return roles;
 }
 
 /**
