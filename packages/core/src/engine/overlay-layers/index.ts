@@ -28,6 +28,9 @@ import { goldImpl } from './gold.js';
 import { shaderGradientFlowImpl } from './shader-gradient-flow.js';
 import { shaderNoiseFieldImpl } from './shader-noise-field.js';
 import { shaderAuroraImpl } from './shader-aurora.js';
+import { realdataGlobeImpl } from './realdata-globe.js';
+import { realdataStarfieldImpl } from './realdata-starfield.js';
+import { realdataWeatherImpl } from './realdata-weather.js';
 import { OVERLAY_UTILS_BROWSER_SOURCE } from './utils.js';
 import { VERTEX_QUAD_BROWSER_SOURCE } from './webgl/vertex-quad.glsl.js';
 import { SHADER_HELPERS_BROWSER_SOURCE } from './webgl/shader-helpers.js';
@@ -49,6 +52,10 @@ export const LAYER_REGISTRY: Record<OverlayLayerType, LayerImpl> = {
   'shader-gradient-flow': shaderGradientFlowImpl,
   'shader-noise-field': shaderNoiseFieldImpl,
   'shader-aurora': shaderAuroraImpl,
+  // T2 (#29) — real-data primitives (embedded datasets, no live API)
+  'realdata-globe': realdataGlobeImpl,
+  'realdata-starfield': realdataStarfieldImpl,
+  'realdata-weather': realdataWeatherImpl,
 };
 
 /**

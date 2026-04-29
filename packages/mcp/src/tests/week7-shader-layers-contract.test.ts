@@ -66,7 +66,10 @@ const SHADER_TYPES = ['shader-gradient-flow', 'shader-noise-field', 'shader-auro
 // ─── TEST 1: registry shape ──
 async function testRegistryShape(): Promise<void> {
   const keys = Object.keys(LAYER_REGISTRY);
-  assert(keys.length === 12, `registry: 12 entries (got ${keys.length})`);
+  // Registry size grows as new layer categories land. Shader adds 3 to
+  // the canvas-2D 9 from #5+#10; #29 realdata adds 3 more. Assert the
+  // 3 shader entries specifically, not the registry size.
+  assert(keys.length >= 12, `registry: at least 12 entries (got ${keys.length})`);
   for (const t of SHADER_TYPES) {
     const impl = LAYER_REGISTRY[t];
     assert(typeof impl?.validate === 'function', `registry: ${t} has validate()`);

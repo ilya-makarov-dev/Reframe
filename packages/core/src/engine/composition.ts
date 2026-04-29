@@ -134,7 +134,9 @@ export type OverlayLayerType =
   // T2 (#10): physics-driven effects — canvas 2D
   | 'fire' | 'smoke' | 'wind' | 'snow' | 'electric' | 'gold'
   // T2 (#28): GPU shader layers — WebGL fragment shaders
-  | 'shader-gradient-flow' | 'shader-noise-field' | 'shader-aurora';
+  | 'shader-gradient-flow' | 'shader-noise-field' | 'shader-aurora'
+  // T2 (#29): real-data primitives — embedded datasets, no live API
+  | 'realdata-globe' | 'realdata-starfield' | 'realdata-weather';
 export type OverlayBlendMode = 'source-over' | 'lighter' | 'screen' | 'multiply';
 
 export interface OverlayLayer {
