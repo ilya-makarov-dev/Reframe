@@ -48,6 +48,72 @@ function collectEntranceTypes(node: INode, into: Set<string>): void {
   }
 }
 
+/**
+ * Walk an INode subtree, return true if any node has `meta.hero`. Drives
+ * the scene-level decision to emit the hero CSS rule (T3 #23). Same
+ * shape as treeHasInteractive — single boolean flag, no per-node data.
+ */
+function treeHasHero(node: INode): boolean {
+  if ((node as any).meta?.hero) return true;
+  for (const c of node.children ?? []) {
+    if (c.removed || c.visible === false) continue;
+    if (treeHasHero(c)) return true;
+  }
+  return false;
+}
+
+/**
+ * Walk an INode subtree, attach `reframe-hero-<mode>` class to the
+ * behaviorClassMap entry for every hero-bearing node. The class is
+ * appended (not replaced) so existing state/responsive/animation
+ * classes coexist on the same node.
+ */
+function walkAttachHeroClass(
+  node: INode,
+  behaviorClassMap: Map<string, string>,
+  keyFn: (n: INode) => string,
+): void {
+  const hero = (node as any).meta?.hero;
+  if (hero?.mode) {
+    const k = keyFn(node);
+    const heroCls = `reframe-hero-${hero.mode}`;
+    const existing = behaviorClassMap.get(k);
+    behaviorClassMap.set(k, existing ? `${existing} ${heroCls}` : heroCls);
+  }
+  for (const c of node.children ?? []) {
+    if (c.removed || c.visible === false) continue;
+    walkAttachHeroClass(c, behaviorClassMap, keyFn);
+  }
+}
+
+/**
+ * Build the hero CSS rule for React export. Mirrors the html.ts
+ * `buildHeroCss` shape (100vw escape + brand color via CSS var with
+ * literal fallback + max-width centering on inner content) but lives
+ * here because react.ts doesn't import from html.ts to avoid circular
+ * dependency between exporters.
+ */
+function buildHeroCssReact(ds: { colors?: { primary?: string } } | undefined): string {
+  const primary = ds?.colors?.primary ?? '#1a1a2e';
+  const onPrimary = '#ffffff';
+  return `
+.reframe-hero-full-bleed {
+  position: relative;
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  background: var(--reframe-color-primary, ${primary});
+  color: var(--reframe-color-on-primary, ${onPrimary});
+  padding: 96px 32px;
+  box-sizing: border-box;
+}
+.reframe-hero-full-bleed > * {
+  max-width: 1024px;
+  margin-left: auto;
+  margin-right: auto;
+}
+`;
+}
+
 // ─── Types ────────────────────────────────────────────────────
 
 export interface ReactExportOptions {
@@ -358,6 +424,12 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     }
   }
 
+  // T3 #23 — attach hero CSS class to behaviorClassMap so renderNode
+  // picks it up alongside state / responsive / animation classes.
+  // Walks the tree pre-render; CSS rule itself emitted below at scene
+  // level when the heroCss variable is built.
+  walkAttachHeroClass(node, behaviorClassMap, nodeKey);
+
   const jsx = renderNode(node, true, indentSize, 1, useCssModules, cssClasses, () => `node${classCounter++}`, useImages, behaviorClassMap, phase3.byNode);
 
   // ── Annotations (scene-level overlay) ─────────────────────
@@ -402,6 +474,14 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     ? `\n      <script dangerouslySetInnerHTML={{ __html: ${JSON.stringify(TEXT_ENTRANCE_RUNTIME_SOURCE)} }} />`
     : '';
 
+  // T3 #23 — hero mode CSS injection (no runtime, pure CSS). Hero
+  // class attachment had to happen BEFORE renderNode runs (line ~375)
+  // so behaviorClassMap is populated in time. The class-attach pass
+  // lives in the post-timeline block above; here we just emit the
+  // accumulated scene-level CSS.
+  const sceneHasHero = treeHasHero(node);
+  const heroCss = sceneHasHero ? buildHeroCssReact(options?.designSystem) : '';
+
   // Build style tag for :root tokens + states + responsive + animations, if any.
   const rootBlock = phase3.rootVars.size > 0
     ? `:root { ${[...phase3.rootVars].map(([k, v]) => `${k}: ${v}`).join('; ')} }`
@@ -409,7 +489,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   const animationBlocks: string[] = [];
   if (timelineCss.keyframes) animationBlocks.push(timelineCss.keyframes);
   for (const rule of timelineCss.classRules.values()) animationBlocks.push(rule);
-  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss, interactiveCss, entranceCss].filter(Boolean);
+  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss, interactiveCss, entranceCss, heroCss].filter(Boolean);
   const styleJsx = combinedStyles.length > 0
     ? `\n      <style>{\`\n        ${combinedStyles.join('\n        ')}\n      \`}</style>`
     : '';

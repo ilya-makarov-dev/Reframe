@@ -542,6 +542,23 @@ export interface NodeMeta {
    */
   entrance?: INodeEntrance;
 
+  // ── Hero mode (T3 #23) ────────────────────────────────────
+  /**
+   * Section-level full-bleed escape (T3 #23). When set, the exporter
+   * emits a CSS class that breaks the section out of its container to
+   * the viewport edges, paints the brand primary color, and centers
+   * inner content with a max-width.
+   *
+   * Phase 0 ships single mode 'full-bleed-brand'. Mode is an extensible
+   * enum so future variants (centered / split / asymmetric) add values
+   * without touching the field shape. Designer authors via
+   * `data-reframe-hero="full-bleed-brand"` on a section/container.
+   *
+   * Same metadata-on-meta pattern as interactive / entrance — auto-
+   * round-trips via the existing meta serializer.
+   */
+  hero?: HeroSpec;
+
   // ── Project-as-INode metadata ──────────────────────────────
   // Used when the project manifest itself is stored as a SceneGraph.
   // Scene-ref nodes in the project graph carry these fields.
@@ -576,6 +593,39 @@ export interface NodeMeta {
    * still fall back to the bbox.
    */
   svgMarkup?: string;
+}
+
+/**
+ * Hero section presentation mode (T3 #23).
+ *
+ * Phase 0 ships a single value, `'full-bleed-brand'` — section extends
+ * to viewport edges via `width:100vw` + `margin-left: calc(50% - 50vw)`,
+ * paints brand primary color (CSS var with hardcoded fallback), inner
+ * content centered with max-width 1024px.
+ *
+ * ─── Known edge cases (Phase 0) ─────────────────────────────
+ *
+ * The 100vw + margin escape pattern has two well-known limitations
+ * the exporter does NOT auto-fix:
+ *
+ *   1. **Parent with `overflow: hidden`** — escape clipped at parent
+ *      bounds; section appears container-bound rather than full-bleed.
+ *      Recommend hero on root level (not nested under overflow:hidden
+ *      ancestors).
+ *   2. **Windows scrollbar accounted for in 100vw** — produces a small
+ *      horizontal scroll on systems where vertical scrollbar takes
+ *      visible width. Not flagged in real-world usage where designs are
+ *      typically reviewed in scrollbar-overlay modes (macOS, Chrome with
+ *      "Always show scrollbars" off).
+ *
+ * Real-fix variants — CSS `@scope`, container queries, or `100svw`
+ * (small-viewport-width unit) — are reserved as future signal when
+ * designer flows surface them as friction.
+ */
+export type HeroMode = 'full-bleed-brand';
+
+export interface HeroSpec {
+  mode: HeroMode;
 }
 
 /**

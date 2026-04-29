@@ -308,6 +308,11 @@ export function exportToHtml(
   // unused types is omitted (subset emission). Single runtime IIFE
   // when the set is non-empty.
   const sceneEntranceTypes = new Set<string>();
+  // T3 #23 — flips when any node carries meta.hero. Drives whether the
+  // scene-level .reframe-hero-full-bleed CSS rule (with brand color
+  // resolution) gets injected. Single rule per scene regardless of
+  // hero-node count.
+  let sceneHasHero = false;
 
   function getClassName(): string {
     return `${prefix}${classCounter++}`;
@@ -573,6 +578,32 @@ export function exportToHtml(
       attrs.push(`data-reframe-entrance-config='${cfgStr.replace(/'/g, '&apos;')}'`);
     }
 
+    // T3 #23 — hero mode. Tag the element with the matching CSS class
+    // so the scene-level rule applies. We add to the existing class list
+    // (works whether the node is using inline style="..." or the
+    // useCssClasses class= path). The data-reframe-hero attr itself is
+    // NOT re-emitted on output — class is the runtime carrier; future
+    // re-import on output HTML rebuilds the metadata via class match if
+    // ever needed (Phase 0 doesn't round-trip output→reimport, so ok).
+    if (node.meta?.hero) {
+      sceneHasHero = true;
+      const heroClass = `reframe-hero-${node.meta.hero.mode}`;
+      // Find existing class="..." attr and append; else add new one.
+      const classAttrIdx = attrs.findIndex((a) => a.startsWith('class="') || a.startsWith("class='"));
+      if (classAttrIdx >= 0) {
+        const existing = attrs[classAttrIdx];
+        // Strip leading `class="` and trailing quote, append the hero class.
+        const m = existing.match(/^class=(["'])(.*)\1$/);
+        if (m) {
+          const sep = m[1];
+          const inner = m[2];
+          attrs[classAttrIdx] = `class=${sep}${inner ? inner + ' ' : ''}${heroClass}${sep}`;
+        }
+      } else {
+        attrs.push(`class="${heroClass}"`);
+      }
+    }
+
     const attrStr = attrs.join(' ');
 
     // Text node
@@ -764,10 +795,20 @@ export function exportToHtml(
     ? `<script>${TEXT_ENTRANCE_RUNTIME_SOURCE}</script>`
     : '';
 
+  // T3 #23 — hero mode CSS injection. Pure CSS, no runtime. Brand
+  // primary color resolves through the var-with-fallback pattern so
+  // #26 tweakable bundles can swap it at runtime; non-tweakable
+  // bundles get the hardcoded brand color and CSS var = no-op fallback.
+  // If no DesignSystem is in scope (rare but possible — uncached
+  // brand on a fresh import), the fallback is a neutral dark color so
+  // the hero still renders distinctly rather than collapsing to
+  // transparent.
+  const heroCss = sceneHasHero ? buildHeroCss(options.designSystem) : '';
+
   if (!fullDoc) {
-    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles || interactiveCss || entranceCss) {
+    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles || interactiveCss || entranceCss || heroCss) {
       const classBlock = useCssClasses ? generateCssBlock(classes) : '';
-      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}</style>\n${html}${annotationHtml}${interactiveScript}${entranceScript}`;
+      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}${heroCss}</style>\n${html}${annotationHtml}${interactiveScript}${entranceScript}`;
     }
     return `${html}${annotationHtml}${interactiveScript}${entranceScript}`;
   }
@@ -799,7 +840,7 @@ export function exportToHtml(
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility;${rootBgForBody(root, graph)} }
     body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root, graph)} }
     a { color: inherit; text-decoration: none; }
-    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}
+    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}${heroCss}
   </style>${css}
   ${graph.annotations.length > 0 ? ANNOTATION_FONT_LINK : ''}
 </head>
@@ -1567,6 +1608,46 @@ function escapeHtml(s: string): string {
 function indent(s: string, spaces: number): string {
   const pad = ' '.repeat(spaces);
   return s.split('\n').map(l => pad + l).join('\n');
+}
+
+// ─── Hero mode CSS (T3 #23) ──────────────────────────────────
+//
+// Builds the scene-level rule for the .reframe-hero-full-bleed class.
+// Width escape: `width:100vw + margin-left: calc(50% - 50vw)` is the
+// canonical pattern for breaking out of a container's max-width to
+// the viewport edges from inside that container's flow. Works
+// regardless of what container is wrapping the section, BUT will be
+// clipped if any ancestor has `overflow: hidden` — designer's job to
+// place hero on root level (documented in HeroSpec JSDoc).
+//
+// Brand color resolution:
+//   1. CSS variable `--reframe-color-primary` checked first — when
+//      #26 tweakable bundle is active this var is set in :root and
+//      end-users can mutate it at runtime
+//   2. Fallback to designSystem.colors.primary hex literal
+//   3. If no DesignSystem provided (uncached brand, fresh import),
+//      neutral dark `#1a1a2e` keeps the hero distinct rather than
+//      collapsing to transparent
+
+function buildHeroCss(ds: DesignSystem | undefined): string {
+  const primary = ds?.colors?.primary ?? '#1a1a2e';
+  const onPrimary = '#ffffff';
+  return `
+.reframe-hero-full-bleed {
+  position: relative;
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  background: var(--reframe-color-primary, ${primary});
+  color: var(--reframe-color-on-primary, ${onPrimary});
+  padding: 96px 32px;
+  box-sizing: border-box;
+}
+.reframe-hero-full-bleed > * {
+  max-width: 1024px;
+  margin-left: auto;
+  margin-right: auto;
+}
+`;
 }
 
 // ─── Overlay export (T2 #5) ──────────────────────────────────

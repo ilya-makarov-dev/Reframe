@@ -1823,6 +1823,7 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
   const data: Record<string, string> = {};
   const interactiveAttrs: Record<string, string> = {};
   const entranceAttrs: Record<string, string> = {};
+  let heroAttr: string | undefined;
   for (const [k, v] of Object.entries(el.attrs)) {
     if (!k.startsWith('data-')) continue;
     if (k === 'data-reframe-idx' || k === 'data-reframe-import-wrap') continue;
@@ -1832,6 +1833,10 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
     }
     if (k === 'data-reframe-entrance' || k.startsWith('data-reframe-entrance-')) {
       entranceAttrs[k] = v;
+      continue;
+    }
+    if (k === 'data-reframe-hero') {
+      heroAttr = v;
       continue;
     }
     data[k] = v;
@@ -1850,7 +1855,28 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
     if (entrance) meta.entrance = entrance;
   }
 
+  // Build the typed hero metadata (T3 #23) if data-reframe-hero is set.
+  // Phase 0 mode allowlist: 'full-bleed-brand' only. Unknown values
+  // skipped with warning, tag NOT preserved on output (engine-input attr,
+  // not designer-visible markup once compiled).
+  if (heroAttr !== undefined) {
+    const hero = parseHeroAttr(heroAttr);
+    if (hero) meta.hero = hero;
+  }
+
   return meta;
+}
+
+/**
+ * Parse data-reframe-hero into typed HeroSpec.
+ * Phase 0 allowlist is single-element ('full-bleed-brand') but the
+ * shape supports future modes by simple union extension.
+ */
+function parseHeroAttr(value: string): { mode: 'full-bleed-brand' } | undefined {
+  const v = value.trim();
+  if (v === 'full-bleed-brand') return { mode: 'full-bleed-brand' };
+  console.warn(`[html-import] data-reframe-hero="${v}" — unknown mode, ignoring (known: full-bleed-brand)`);
+  return undefined;
 }
 
 /**
