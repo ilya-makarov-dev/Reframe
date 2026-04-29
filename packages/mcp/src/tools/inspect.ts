@@ -267,6 +267,19 @@ export async function handleInspect(input: {
     ? session.getOrParseDesignMd(designMdText, parseDesignMd)
     : undefined;
 
+  // ── Design system summary (T3 #7 surfaces undertone here) ────
+  // Surface a one-line brand digest when a DESIGN.md is in scope.
+  // Today: brand name + undertone + source. Future: token counts,
+  // component coverage, or palette stats can extend the same line.
+  if (ds) {
+    sections.push('');
+    sections.push(`--- Design System: ${ds.brand || 'unknown'} ---`);
+    if (ds.undertone) {
+      const sourceTag = ds.undertoneSource === 'declared' ? 'declared' : 'computed from palette';
+      sections.push(`Undertone: ${ds.undertone} (${sourceTag})`);
+    }
+  }
+
   // ── a. Tree ──────────────────────────────────────────────────
 
   if (input.tree !== false) {

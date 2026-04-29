@@ -19,6 +19,7 @@ import type { INode, IPaint, ISolidPaint } from './host/types';
 import { NodeType, MIXED } from './host/types';
 import type { Transform, PipeContext } from './resize/pipe';
 import { transform } from './resize/pipe';
+import { colorClashesUndertone } from './design-system/undertone.js';
 
 // ─── Core Types ────────────────────────────────────────────────
 
@@ -84,6 +85,9 @@ export interface AuditContext {
 
 /** Minimal design system shape for audit rules. */
 interface DesignSystemLike {
+  /** Undertone axis (T3 #7) — drives undertone-clash audit rule. */
+  undertone?: 'warm' | 'cool' | 'neutral';
+  undertoneSource?: 'computed' | 'declared';
   colors?: { roles: Map<string, string>; primary?: string; background?: string; text?: string; accent?: string };
   typography?: {
     hierarchy: Array<{ role: string; fontFamily?: string; fontSize: number; fontWeight: number; lineHeight: number; letterSpacing: number; fontFeatures?: string[] }>;
@@ -443,6 +447,75 @@ export function colorInPalette(tolerance = 0.05): AuditRule {
 
     return issues;
   });
+}
+
+// ── Undertone Clash (T3 #7) ──
+
+/**
+ * Detect scene colors whose temperature fights the brand's declared
+ * undertone — a warm hex on a cool brand, or vice-versa.
+ *
+ * Skips:
+ *   - neutral brands (no axis to fight)
+ *   - low-saturation colors (don't carry temperature signal)
+ *   - colors that match an entry in the brand palette (designer used a
+ *     brand color knowingly — even if its hue feels "off-axis", that's
+ *     intentional palette design)
+ *   - token-bound fields (already brand-compliant by construction)
+ *
+ * Severity 'warn' — most clashes are designer-intent worth flagging,
+ * but rarely a hard error.
+ */
+export function undertoneClash(): AuditRule {
+  return rule('undertone-clash', (node, ctx) => {
+    const ds = ctx.designSystem;
+    const undertone = ds?.undertone;
+    if (!undertone || undertone === 'neutral') return [];
+
+    const fills = node.fills;
+    if (!fills || fills === MIXED) return [];
+
+    // Collect brand-palette hexes for quick membership check.
+    const paletteHexes = new Set<string>();
+    if (ds!.colors?.primary) paletteHexes.add(ds!.colors.primary.toLowerCase());
+    if (ds!.colors?.accent) paletteHexes.add(ds!.colors.accent.toLowerCase());
+    if (ds!.colors?.background) paletteHexes.add(ds!.colors.background.toLowerCase());
+    if (ds!.colors?.text) paletteHexes.add(ds!.colors.text.toLowerCase());
+    for (const hex of (ds!.colors?.roles ?? new Map()).values()) {
+      if (typeof hex === 'string') paletteHexes.add(hex.toLowerCase());
+    }
+
+    const issues: AuditIssue[] = [];
+    for (let fi = 0; fi < (fills as IPaint[]).length; fi++) {
+      const fill = (fills as IPaint[])[fi];
+      if (fill.type !== 'SOLID') continue;
+      if (fill.visible === false) continue;
+      if (ctx.tokenBoundFields?.has(`fills[${fi}].color`)) continue;
+      const c = (fill as ISolidPaint).color;
+      if (!c) continue;
+      // Build hex string for palette comparison.
+      const hex = `#${rgbHex(r255(c.r))}${rgbHex(r255(c.g))}${rgbHex(r255(c.b))}`;
+      if (paletteHexes.has(hex.toLowerCase())) continue;
+
+      if (colorClashesUndertone(hex, undertone)) {
+        issues.push({
+          rule: 'undertone-clash',
+          severity: 'warning',
+          message: `Color ${hex} on "${node.name}" clashes with brand undertone (${undertone}). Either pick a brand palette color or accept the temperature contrast deliberately.`,
+          nodeId: node.id,
+          nodeName: node.name,
+          path: ctx.path,
+        });
+      }
+    }
+    return issues;
+  });
+}
+
+function rgbHex(n: number): string {
+  const v = Math.max(0, Math.min(255, Math.round(n)));
+  const s = v.toString(16);
+  return s.length === 1 ? '0' + s : s;
 }
 
 // ── Contrast Ratio ──

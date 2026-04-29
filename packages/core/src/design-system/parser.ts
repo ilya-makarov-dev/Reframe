@@ -38,7 +38,9 @@ import type {
   ShadowLayer,
   ColorRole,
   TweakDef,
+  UndertoneAxis,
 } from './types';
+import { computeUndertone, type PaletteEntry } from './undertone.js';
 
 // ---------------------------------------------------------------------------
 //  Section splitting
@@ -1534,6 +1536,9 @@ export function parseDesignMd(markdown: string): DesignSystem {
   // T2 #26: ## Tweak Surface — tokens marked end-user-customizable
   // for bundle exports with tweakable=true.
   const tweakSurfaceSection = findSection(sections, 'tweak surface', 'tweak', 'tweakable');
+  // T3 #7: ## Undertone — optional warm/cool/neutral declaration
+  // overriding the palette-computed default.
+  const undertoneSection = findSection(sections, 'undertone', 'temperature');
 
   // Parse layout, then overlay radius if separate section exists
   const parsedLayout = parseLayout(layoutSection);
@@ -1595,6 +1600,16 @@ export function parseDesignMd(markdown: string): DesignSystem {
     }
   }
 
+  // T3 #7 — undertone resolution. DESIGN.md declaration wins over
+  // palette computation. Resolution happens after parsedColors so the
+  // computer has a usable palette to weigh.
+  const declaredUndertone = parseUndertoneDeclaration(undertoneSection);
+  const computedUndertone = declaredUndertone
+    ? undefined
+    : computeUndertoneFromColors(parsedColors);
+  const undertone = declaredUndertone ?? computedUndertone ?? 'neutral';
+  const undertoneSource: 'computed' | 'declared' = declaredUndertone ? 'declared' : 'computed';
+
   return {
     brand: extractBrand(markdown),
     colors: parsedColors,
@@ -1609,8 +1624,53 @@ export function parseDesignMd(markdown: string): DesignSystem {
     brandMark: parseBrandMark(brandMarkSection),
     vocabulary: parseBrandVocabulary(vocabularySection),
     tweakSurface: parseTweakSurface(tweakSurfaceSection),
+    undertone,
+    undertoneSource,
     rawMarkdown: markdown,
   };
+}
+
+/**
+ * Parse the optional `## Undertone` section. Body must be a single
+ * word — `warm`, `cool`, or `neutral`. Anything else returns undefined
+ * and the caller falls back to computed undertone.
+ */
+function parseUndertoneDeclaration(section: Section | undefined): UndertoneAxis | undefined {
+  if (!section) return undefined;
+  const lines = section.body
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith('#'));
+  if (lines.length === 0) return undefined;
+  const firstWord = lines[0].split(/\s+/)[0].toLowerCase().replace(/[.,;:]$/, '');
+  if (firstWord === 'warm' || firstWord === 'cool' || firstWord === 'neutral') return firstWord;
+  return undefined;
+}
+
+/**
+ * Build the palette entry list from parsed colors and feed it through
+ * `computeUndertone`. Pulls the named primary/accent/text/background
+ * fields plus the full role map. Achromatic colors are not filtered
+ * here — `computeUndertone` skips them via saturation gate.
+ */
+function computeUndertoneFromColors(colors: DesignSystemColors): UndertoneAxis {
+  const entries: PaletteEntry[] = [];
+  if (colors.primary) entries.push({ hex: colors.primary, role: 'primary' });
+  if (colors.accent) entries.push({ hex: colors.accent, role: 'accent' });
+  if (colors.background) entries.push({ hex: colors.background, role: 'background' });
+  if (colors.text) entries.push({ hex: colors.text, role: 'text' });
+  for (const [role, hex] of colors.roles ?? new Map()) {
+    if (typeof hex !== 'string') continue;
+    // Skip ones already pushed to keep weights honest (primary 2× otherwise).
+    if (
+      (role === 'primary' && colors.primary === hex) ||
+      (role === 'accent' && colors.accent === hex) ||
+      (role === 'background' && colors.background === hex) ||
+      (role === 'text' && colors.text === hex)
+    ) continue;
+    entries.push({ hex, role });
+  }
+  return computeUndertone(entries);
 }
 
 /**

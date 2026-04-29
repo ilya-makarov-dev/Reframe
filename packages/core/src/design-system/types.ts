@@ -256,9 +256,40 @@ export interface DesignSystem {
    */
   tweakSurface?: TweakDef[];
 
+  /**
+   * Undertone axis (T3 #7) — palette temperature classification.
+   *   warm    — red / orange / rose-leaning palette
+   *   cool    — blue / cyan / azure-leaning palette
+   *   neutral — balanced, achromatic-only, or below-threshold mix
+   *
+   * Computed via weighted hue analysis (see design-system/undertone.ts)
+   * unless DESIGN.md declares an override under `## Undertone`. Drives:
+   *   - inspect surfacing (one-line summary in design system section)
+   *   - audit.undertone-clash rule (warns on scene colors fighting axis)
+   *   - future warm-shifted / cool-shifted variant generation
+   */
+  undertone?: UndertoneAxis;
+
+  /**
+   * Origin of `undertone` field — 'computed' from palette, 'declared'
+   * via `## Undertone` section in DESIGN.md. Lets inspect distinguish
+   * "we inferred this" from "designer specified this".
+   */
+  undertoneSource?: 'computed' | 'declared';
+
   /** Raw markdown source (for debugging / re-export). */
   rawMarkdown?: string;
 }
+
+/**
+ * Undertone temperature axis (T3 #7).
+ *
+ * Three-bucket classification of brand color palette mood. Computed by
+ * `computeUndertone()` in design-system/undertone.ts via weighted hue
+ * analysis with primary 2× boost; threshold ±0.25 keeps balanced
+ * palettes labeled 'neutral' rather than slightly-warm or slightly-cool.
+ */
+export type UndertoneAxis = 'warm' | 'cool' | 'neutral';
 
 /**
  * Single tweakable token declared under `## Tweak Surface` in DESIGN.md.
