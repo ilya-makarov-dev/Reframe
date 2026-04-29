@@ -47,6 +47,14 @@ export async function initPlatformViewport(): Promise<void> {
   const container = canvasEl?.parentElement;
   if (!container) return;
 
+  // T3 #12 — paper-frame editor-mode body class. Scopes the desk-
+  // surface background (off-white + soft radial gradients) to the
+  // editor view only. Dashboard / project-list / other Platform UI
+  // surfaces don't reach this bootstrap path, so they keep their own
+  // background. The class drives the body.reframe-editor-mode rule
+  // in platform-ui.css.
+  document.body.classList.add('reframe-editor-mode');
+
   // Hide the legacy <canvas id="reframe-viewport"> — other scripts
   // may query for it by id, so we leave the element in the DOM but
   // make it non-rendering. The host page keeps its grid dimensions via

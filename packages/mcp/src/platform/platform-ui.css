@@ -6986,3 +6986,57 @@ html[data-viewport-preview="tablet"] .rfd-canvas-viewport::before {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
+
+/* ─── T3 #12: Paper-frame wrapper ─────────────────────────────
+ *
+ * Editor canvas iframes get visual paper-on-desk decoration. Three-tier
+ * shadow stack (close + medium + depth) gives convincing paper feel
+ * without heavy Material elevation. Hover slightly intensifies as a
+ * subtle interactivity hint.
+ *
+ * Phase 0 simplification (per #12 brief escape hatch):
+ * Styles applied DIRECTLY to .reframe-canvas-iframe element instead of
+ * a wrapper div. Reason: the iframe already lives inside an absolute-
+ * positioned container (composition columns / sampler cells / single-
+ * canvas mounts) and uses `position: absolute; left: 0; top: 0;` to
+ * fill it. A wrapper div would either need its own absolute positioning
+ * (matching iframe geometry — error-prone) or change the iframe to
+ * relative (breaking existing scroll/zoom-pan overlay sync). Direct
+ * styling on the iframe element achieves the same visual outcome with
+ * zero structural risk.
+ *
+ * .reframe-editor-mode body class scopes the desk-background styling
+ * to the editor view only — dashboard / project-list / other Platform
+ * UI surfaces are unaffected. Class added at platform-bootstrap mount
+ * time when the editor surface is active.
+ */
+.reframe-canvas-iframe {
+  background: #ffffff;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 4px 12px rgba(0, 0, 0, 0.06),
+    0 16px 40px rgba(0, 0, 0, 0.08);
+  transition: box-shadow 0.2s ease;
+}
+.reframe-canvas-iframe:hover {
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.05),
+    0 8px 24px rgba(0, 0, 0, 0.08),
+    0 24px 56px rgba(0, 0, 0, 0.10);
+}
+
+/* Editor body becomes desk surface — soft off-white with very subtle
+ * radial gradients so it doesn't read as flat. Limited to
+ * .reframe-editor-mode so non-editor Platform UI views keep their
+ * existing background.
+ *
+ * Light theme only Phase 0; dark variant deferred until Platform UI
+ * gains a dark mode toggle. */
+body.reframe-editor-mode {
+  background: #f5f5f3;
+  background-image:
+    radial-gradient(circle at 20% 20%, rgba(0, 0, 0, 0.015), transparent 50%),
+    radial-gradient(circle at 80% 80%, rgba(0, 0, 0, 0.015), transparent 50%);
+}

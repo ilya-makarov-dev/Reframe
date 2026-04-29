@@ -34,11 +34,23 @@ export function createSceneRenderer(opts: SceneRendererOptions): {
   destroy: () => void;
 } {
   const iframe = document.createElement('iframe');
+  // T3 #12 — paper-frame class. Visual treatment (shadow stack + border
+  // + radius) applied via CSS in platform-ui.css. Class is on the
+  // iframe directly, NOT a wrapper div — wrapping would require its
+  // own absolute positioning to match the iframe's `position: absolute`
+  // / left:0 / top:0 fill of its container, error-prone on multi-mount
+  // (variants column / sampler cell). Direct styling is structurally
+  // safe and visually identical for Phase 0.
+  iframe.className = 'reframe-canvas-iframe';
   Object.assign(iframe.style, {
     position: 'absolute',
     left: '0', top: '0',
-    border: 'none',
     background: 'white',
+    // Border + box-shadow + border-radius come from .reframe-canvas-iframe
+    // CSS class. Setting them inline here would shadow the class rule
+    // (inline > class specificity), suppressing the paper-frame look.
+    // Background kept inline as defensive fallback for cases where the
+    // platform stylesheet hasn't loaded yet (defaults to white anyway).
     // Size is set by reload() once we know the scene dimensions.
   });
   iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-popups');
