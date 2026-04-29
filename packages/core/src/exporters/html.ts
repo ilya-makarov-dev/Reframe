@@ -28,6 +28,11 @@ import {
   entranceCssFor,
 } from '../engine/text-entrance/text-entrance-runtime';
 import {
+  NARRATIVE_LOOP_RUNTIME_SOURCE,
+  buildNarrativeCss,
+  type NarrativeRule,
+} from '../engine/narrative/narrative-loop-runtime';
+import {
   shouldRenderAsSvg,
   shouldRenderTextAsSvg,
   isIconLikeFrame,
@@ -313,6 +318,18 @@ export function exportToHtml(
   // resolution) gets injected. Single rule per scene regardless of
   // hero-node count.
   let sceneHasHero = false;
+  // T3 #30 — collects per-narrative-element rules. Each rule produces
+  // its own @keyframes + class block (sprite stride is unique per
+  // element). Single shared runtime IIFE wires all of them via the
+  // data-reframe-narrative discriminator.
+  //
+  // Node id can't seed the keyframe/class slug because SceneGraph uses
+  // a process-global counter for synthesized id values — two compiles
+  // of the same input produce different ids, breaking determinism.
+  // Use an export-local counter incremented in tree-walk order; same
+  // input = same allocation order = byte-identical output.
+  const narrativeRules: NarrativeRule[] = [];
+  let narrativeCounter = 0;
 
   function getClassName(): string {
     return `${prefix}${classCounter++}`;
@@ -578,6 +595,41 @@ export function exportToHtml(
       attrs.push(`data-reframe-entrance-config='${cfgStr.replace(/'/g, '&apos;')}'`);
     }
 
+    // T3 #30 — narrative loop. Re-emit the discriminator + a small set
+    // of trigger / loop-mode attrs the runtime reads at attach time.
+    // Per-element CSS (keyframes + class) is collected here and emitted
+    // at scene level after the walk. The element receives the class
+    // tying it to its keyframe block.
+    if (node.meta?.narrative) {
+      const n = node.meta.narrative;
+      const slug = `n${narrativeCounter++}`;
+      narrativeRules.push({
+        nodeId: slug,
+        spriteUrl: n.spriteUrl,
+        frameWidth: n.frameWidth,
+        frameHeight: n.frameHeight,
+        frameCount: n.frameCount,
+        frameRate: n.frameRate,
+        loopMode: n.loopMode,
+      });
+      attrs.push(`data-reframe-narrative="${escapeHtml(n.kind)}"`);
+      if (n.loopMode) attrs.push(`data-reframe-loop-mode="${escapeHtml(n.loopMode)}"`);
+      if (n.trigger) attrs.push(`data-reframe-narrative-trigger="${escapeHtml(n.trigger)}"`);
+      const narrativeClass = `reframe-narrative-${slug}`;
+      const classAttrIdx = attrs.findIndex((a) => a.startsWith('class="') || a.startsWith("class='"));
+      if (classAttrIdx >= 0) {
+        const existing = attrs[classAttrIdx];
+        const m = existing.match(/^class=(["'])(.*)\1$/);
+        if (m) {
+          const sep = m[1];
+          const inner = m[2];
+          attrs[classAttrIdx] = `class=${sep}${inner ? inner + ' ' : ''}${narrativeClass}${sep}`;
+        }
+      } else {
+        attrs.push(`class="${narrativeClass}"`);
+      }
+    }
+
     // T3 #23 — hero mode. Tag the element with the matching CSS class
     // so the scene-level rule applies. We add to the existing class list
     // (works whether the node is using inline style="..." or the
@@ -805,12 +857,21 @@ export function exportToHtml(
   // transparent.
   const heroCss = sceneHasHero ? buildHeroCss(options.designSystem) : '';
 
+  // T3 #30 — narrative runtime + per-element CSS. CSS string concatenates
+  // each node's @keyframes + class rule (per-element because sprite
+  // stride is unique). Runtime IIFE is single-source, idempotent via
+  // window.__reframeNarrative guard.
+  const narrativeCss = narrativeRules.length > 0 ? buildNarrativeCss(narrativeRules) : '';
+  const narrativeScript = narrativeRules.length > 0
+    ? `<script>${NARRATIVE_LOOP_RUNTIME_SOURCE}</script>`
+    : '';
+
   if (!fullDoc) {
-    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles || interactiveCss || entranceCss || heroCss) {
+    if (useCssClasses || tokenBlock || behaviorBlock || annotationStyles || interactiveCss || entranceCss || heroCss || narrativeCss) {
       const classBlock = useCssClasses ? generateCssBlock(classes) : '';
-      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}${heroCss}</style>\n${html}${annotationHtml}${interactiveScript}${entranceScript}`;
+      return `<style>${tokenBlock}\n${classBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}${heroCss}${narrativeCss}</style>\n${html}${annotationHtml}${interactiveScript}${entranceScript}${narrativeScript}`;
     }
-    return `${html}${annotationHtml}${interactiveScript}${entranceScript}`;
+    return `${html}${annotationHtml}${interactiveScript}${entranceScript}${narrativeScript}`;
   }
 
   // Full document with production-quality base styles
@@ -840,7 +901,7 @@ export function exportToHtml(
     html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility;${rootBgForBody(root, graph)} }
     body { font-family: '${primaryFont}', system-ui, -apple-system, sans-serif; line-height: 1.5;${rootBgForBody(root, graph)} }
     a { color: inherit; text-decoration: none; }
-    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}${heroCss}
+    img, svg { display: block; max-width: 100%; }${tokenBlock}${behaviorBlock}${annotationStyles}${interactiveCss}${entranceCss}${heroCss}${narrativeCss}
   </style>${css}
   ${graph.annotations.length > 0 ? ANNOTATION_FONT_LINK : ''}
 </head>
@@ -849,6 +910,7 @@ ${indent(html, 2)}
 ${indent(annotationHtml, 2)}
 ${interactiveScript ? indent(interactiveScript, 2) : ''}
 ${entranceScript ? indent(entranceScript, 2) : ''}
+${narrativeScript ? indent(narrativeScript, 2) : ''}
 </body>
 </html>`;
 }

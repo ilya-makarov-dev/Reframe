@@ -19,6 +19,11 @@ import {
   TEXT_ENTRANCE_RUNTIME_SOURCE,
   entranceCssFor,
 } from '../engine/text-entrance/text-entrance-runtime';
+import {
+  NARRATIVE_LOOP_RUNTIME_SOURCE,
+  buildNarrativeCss,
+  type NarrativeRule,
+} from '../engine/narrative/narrative-loop-runtime';
 
 /**
  * Walk an INode subtree, return true if any node has `meta.interactive`
@@ -83,6 +88,58 @@ function walkAttachHeroClass(
   for (const c of node.children ?? []) {
     if (c.removed || c.visible === false) continue;
     walkAttachHeroClass(c, behaviorClassMap, keyFn);
+  }
+}
+
+/**
+ * Walk an INode subtree, accumulate narrative rules + attach the
+ * `reframe-narrative-<id>` class to the behaviorClassMap entry for
+ * every narrative-bearing node (T3 #30). Mirrors walkAttachHeroClass
+ * for the hero pattern. Returns the accumulated rule list — caller
+ * passes it to buildNarrativeCss for the scene-level <style> block.
+ */
+function walkAttachNarrativeClass(
+  node: INode,
+  behaviorClassMap: Map<string, string>,
+  keyFn: (n: INode) => string,
+  out: NarrativeRule[],
+  counter: { value: number },
+): void {
+  const narrative = (node as any).meta?.narrative as
+    | {
+        kind: string;
+        spriteUrl: string;
+        frameWidth: number;
+        frameHeight: number;
+        frameCount: number;
+        frameRate?: number;
+        loopMode?: 'forward' | 'reverse' | 'pingpong' | 'once';
+      }
+    | undefined;
+  if (narrative) {
+    const k = keyFn(node);
+    // Use a tree-walk-order counter for the slug — node id can be
+    // process-globally non-deterministic across compiles. Tree walk
+    // order is stable per input, so same input → same slug → byte-
+    // identical output. See html.ts narrativeCounter for the same
+    // reasoning.
+    const slug = `n${counter.value++}`;
+    const cls = `reframe-narrative-${slug}`;
+    const existing = behaviorClassMap.get(k);
+    behaviorClassMap.set(k, existing ? `${existing} ${cls}` : cls);
+    out.push({
+      nodeId: slug,
+      spriteUrl: narrative.spriteUrl,
+      frameWidth: narrative.frameWidth,
+      frameHeight: narrative.frameHeight,
+      frameCount: narrative.frameCount,
+      frameRate: narrative.frameRate,
+      loopMode: narrative.loopMode,
+    });
+  }
+  for (const c of node.children ?? []) {
+    if (c.removed || c.visible === false) continue;
+    walkAttachNarrativeClass(c, behaviorClassMap, keyFn, out, counter);
   }
 }
 
@@ -430,6 +487,12 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   // level when the heroCss variable is built.
   walkAttachHeroClass(node, behaviorClassMap, nodeKey);
 
+  // T3 #30 — narrative loop. Same pre-render attach pattern as hero —
+  // class lands on behaviorClassMap before renderNode reads it; the
+  // accumulated rule list is emitted as scene-level CSS below.
+  const narrativeRules: NarrativeRule[] = [];
+  walkAttachNarrativeClass(node, behaviorClassMap, nodeKey, narrativeRules, { value: 0 });
+
   const jsx = renderNode(node, true, indentSize, 1, useCssModules, cssClasses, () => `node${classCounter++}`, useImages, behaviorClassMap, phase3.byNode);
 
   // ── Annotations (scene-level overlay) ─────────────────────
@@ -482,6 +545,15 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   const sceneHasHero = treeHasHero(node);
   const heroCss = sceneHasHero ? buildHeroCssReact(options?.designSystem) : '';
 
+  // T3 #30 — narrative runtime + per-element CSS for React export.
+  // Mirrors html.ts: per-element @keyframes + class rule (sprite stride
+  // is unique), single shared runtime IIFE that wires viewport / mount /
+  // hover triggers via window.__reframeNarrative idempotent guard.
+  const narrativeCss = narrativeRules.length > 0 ? buildNarrativeCss(narrativeRules) : '';
+  const narrativeScriptJsx = narrativeRules.length > 0
+    ? `\n      <script dangerouslySetInnerHTML={{ __html: ${JSON.stringify(NARRATIVE_LOOP_RUNTIME_SOURCE)} }} />`
+    : '';
+
   // Build style tag for :root tokens + states + responsive + animations, if any.
   const rootBlock = phase3.rootVars.size > 0
     ? `:root { ${[...phase3.rootVars].map(([k, v]) => `${k}: ${v}`).join('; ')} }`
@@ -489,7 +561,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
   const animationBlocks: string[] = [];
   if (timelineCss.keyframes) animationBlocks.push(timelineCss.keyframes);
   for (const rule of timelineCss.classRules.values()) animationBlocks.push(rule);
-  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss, interactiveCss, entranceCss, heroCss].filter(Boolean);
+  const combinedStyles = [rootBlock, ...behaviorStyles, ...animationBlocks, annotationCss, interactiveCss, entranceCss, heroCss, narrativeCss].filter(Boolean);
   const styleJsx = combinedStyles.length > 0
     ? `\n      <style>{\`\n        ${combinedStyles.join('\n        ')}\n      \`}</style>`
     : '';
@@ -505,6 +577,7 @@ export function exportToReactModule(node: INode, options?: ReactExportOptions): 
     styleJsx ? styleJsx : '',
     interactiveScriptJsx ? interactiveScriptJsx : '',
     entranceScriptJsx ? entranceScriptJsx : '',
+    narrativeScriptJsx ? narrativeScriptJsx : '',
     `    </>`,
     `  );`,
     `};`,
@@ -980,7 +1053,16 @@ function tagForNode(node: INode): { tag: string; attrs: string } {
   const entranceAttrs = entrance
     ? ` data-reframe-entrance="${entrance.type}" data-reframe-entrance-config='${JSON.stringify(entrance.config).replace(/'/g, '&apos;')}'`
     : '';
-  const fin = (r: { tag: string; attrs: string }) => ({ tag: r.tag, attrs: r.attrs + interactiveAttrs + entranceAttrs });
+  // T3 #30 — narrative metadata. Discriminator + small set of trigger /
+  // loop-mode attrs the runtime reads at attach time. The class itself
+  // is wired through behaviorClassMap in walkAttachNarrativeClass.
+  const narrative = ((node as any).meta?.narrative as
+    | { kind: string; loopMode?: string; trigger?: string }
+    | undefined);
+  const narrativeAttrs = narrative
+    ? ` data-reframe-narrative="${narrative.kind}"${narrative.loopMode ? ` data-reframe-loop-mode="${narrative.loopMode}"` : ''}${narrative.trigger ? ` data-reframe-narrative-trigger="${narrative.trigger}"` : ''}`
+    : '';
+  const fin = (r: { tag: string; attrs: string }) => ({ tag: r.tag, attrs: r.attrs + interactiveAttrs + entranceAttrs + narrativeAttrs });
 
   // Interactive / semantic leaf tags first — they carry attributes too.
   if (role === 'link' || sourceTag === 'a') {
@@ -1140,7 +1222,8 @@ function renderNode(
     // meta.entrance — exporter still emits config blobs it'd drop.
     const hasInteractive = !!(node as any).meta?.interactive;
     const hasEntrance = !!(node as any).meta?.entrance;
-    const attrs = (textTag === semantic.tag || hasInteractive || hasEntrance) ? semantic.attrs : '';
+    const hasNarrative = !!(node as any).meta?.narrative;
+    const attrs = (textTag === semantic.tag || hasInteractive || hasEntrance || hasNarrative) ? semantic.attrs : '';
     if (text.includes('\n')) {
       const lines = text.split('\n');
       const content = lines.map((l, i) => i < lines.length - 1 ? `${l}<br />` : l).join(`\n${pad}  `);
@@ -1183,7 +1266,8 @@ function renderNode(
   const containerTag = semantic.tag || 'div';
   const hasInteractive = !!(node as any).meta?.interactive;
   const hasEntrance = !!(node as any).meta?.entrance;
-  const containerAttrs = (semantic.tag || hasInteractive || hasEntrance) ? semantic.attrs : '';
+  const hasNarrative = !!(node as any).meta?.narrative;
+  const containerAttrs = (semantic.tag || hasInteractive || hasEntrance || hasNarrative) ? semantic.attrs : '';
   const children = (node.children ?? []).filter(c => !c.removed && c.visible !== false);
 
   if (children.length === 0) {

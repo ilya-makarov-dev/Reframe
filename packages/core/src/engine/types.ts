@@ -542,6 +542,24 @@ export interface NodeMeta {
    */
   entrance?: INodeEntrance;
 
+  // ── Narrative loop (T3 #30) ───────────────────────────────
+  /**
+   * Element-level looping sprite-sheet animation. Designer attaches
+   * `data-reframe-narrative="sprite"` plus companion sprite-url / frame
+   * data attrs; importer populates this typed structure; exporter emits
+   * scoped CSS keyframes (background-position with `steps()` timing) +
+   * a single runtime IIFE that wires viewport / mount / hover triggers.
+   *
+   * Same metadata-on-meta pattern as `interactive` / `entrance` / `hero`
+   * — auto round-trips via the shared meta serializer.
+   *
+   * Phase 0 ships single-row sprite sheets (frames laid out left-to-right
+   * in one row). Multi-row grid support is reserved as future signal —
+   * tall sprite sheets are uncommon in real designs and the column
+   * stride math complicates the keyframe emitter without obvious payoff.
+   */
+  narrative?: INodeNarrative;
+
   // ── Hero mode (T3 #23) ────────────────────────────────────
   /**
    * Section-level full-bleed escape (T3 #23). When set, the exporter
@@ -689,6 +707,48 @@ export interface EntranceConfig {
   easing?: string;
   /** Animate once and disconnect observer (default true) vs replay on each viewport re-entry. */
   once?: boolean;
+}
+
+/**
+ * Narrative loop sprite animation (T3 #30).
+ *
+ * Looping element animation driven by a sprite sheet. Exporter emits
+ * `@keyframes` with `steps(N)` timing function so frame transitions are
+ * sharp (no smooth interpolation between adjacent frames). Runtime IIFE
+ * handles trigger logic (viewport / mount / hover) — animation itself
+ * is pure CSS, GPU-accelerated.
+ *
+ * Phase 0 ships single-row sprite sheets. Multi-row grids are a future
+ * signal once tall sheets show up in real designer flows.
+ *
+ * Sprite URL flows through the existing #3 bundle inliner — exported
+ * bundles inline the sprite as a data: URI alongside other images. No
+ * narrative-specific bundle code.
+ */
+export type NarrativeKind = 'sprite';
+
+export type NarrativeLoopMode = 'forward' | 'reverse' | 'pingpong' | 'once';
+
+export type NarrativeTrigger = 'viewport' | 'mount' | 'hover';
+
+export interface INodeNarrative {
+  kind: NarrativeKind;
+  spriteUrl: string;
+  frameWidth: number;
+  frameHeight: number;
+  frameCount: number;
+  /**
+   * Optional override for grid columns. Phase 0 only honors `frameCount`
+   * (single-row layout). Reserved for future multi-row support — held in
+   * the type so existing consumers don't break when the runtime grows.
+   */
+  columns?: number;
+  /** Frames per second. Default 12. */
+  frameRate?: number;
+  /** Default 'forward'. */
+  loopMode?: NarrativeLoopMode;
+  /** Default 'viewport'. */
+  trigger?: NarrativeTrigger;
 }
 
 export interface InteractiveConfig {

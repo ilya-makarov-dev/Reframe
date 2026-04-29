@@ -1823,6 +1823,7 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
   const data: Record<string, string> = {};
   const interactiveAttrs: Record<string, string> = {};
   const entranceAttrs: Record<string, string> = {};
+  const narrativeAttrs: Record<string, string> = {};
   let heroAttr: string | undefined;
   for (const [k, v] of Object.entries(el.attrs)) {
     if (!k.startsWith('data-')) continue;
@@ -1833,6 +1834,12 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
     }
     if (k === 'data-reframe-entrance' || k.startsWith('data-reframe-entrance-')) {
       entranceAttrs[k] = v;
+      continue;
+    }
+    if (k === 'data-reframe-narrative' || k.startsWith('data-reframe-narrative-')
+        || k.startsWith('data-reframe-sprite-') || k.startsWith('data-reframe-frame-')
+        || k === 'data-reframe-loop-mode') {
+      narrativeAttrs[k] = v;
       continue;
     }
     if (k === 'data-reframe-hero') {
@@ -1853,6 +1860,12 @@ function buildNodeMeta(el: HtmlElement, path: string): NodeMeta {
   if (entranceAttrs['data-reframe-entrance']) {
     const entrance = parseEntranceAttrs(entranceAttrs);
     if (entrance) meta.entrance = entrance;
+  }
+
+  // Build the typed narrative metadata (T3 #30) if data-reframe-narrative is set.
+  if (narrativeAttrs['data-reframe-narrative']) {
+    const narrative = parseNarrativeAttrs(narrativeAttrs);
+    if (narrative) meta.narrative = narrative;
   }
 
   // Build the typed hero metadata (T3 #23) if data-reframe-hero is set.
@@ -1967,6 +1980,105 @@ function parseEntranceAttrs(
   }
 
   return { type, config };
+}
+
+/**
+ * Parse data-reframe-narrative companion attrs into typed INodeNarrative.
+ * Returns undefined when discriminator is unknown OR mandatory frame
+ * data is missing — narrative without sprite-url + frame-* makes no
+ * sense to render, so we drop the metadata entirely (designer fixes
+ * the attrs on next compile).
+ *
+ * Tolerant on per-config parse errors: bad frame-rate / loop-mode value
+ * → fall back to default + console.warn, not throw. Designer iterates
+ * fast; one malformed attr shouldn't block import.
+ */
+function parseNarrativeAttrs(
+  attrs: Record<string, string>,
+):
+  | {
+      kind: 'sprite';
+      spriteUrl: string;
+      frameWidth: number;
+      frameHeight: number;
+      frameCount: number;
+      columns?: number;
+      frameRate?: number;
+      loopMode?: 'forward' | 'reverse' | 'pingpong' | 'once';
+      trigger?: 'viewport' | 'mount' | 'hover';
+    }
+  | undefined {
+  const rawKind = attrs['data-reframe-narrative'];
+  if (rawKind !== 'sprite') {
+    console.warn(`[html-import] data-reframe-narrative="${rawKind}" — unknown kind, ignoring (known: sprite)`);
+    return undefined;
+  }
+
+  const spriteUrl = attrs['data-reframe-sprite-url'];
+  if (!spriteUrl) {
+    console.warn('[html-import] data-reframe-narrative="sprite" missing data-reframe-sprite-url — ignoring');
+    return undefined;
+  }
+
+  function asNumber(key: string): number | undefined {
+    if (attrs[key] === undefined) return undefined;
+    const n = Number(attrs[key]);
+    if (!Number.isFinite(n)) {
+      console.warn(`[html-import] ${key}="${attrs[key]}" — not a finite number, using default`);
+      return undefined;
+    }
+    return n;
+  }
+
+  const frameWidth = asNumber('data-reframe-frame-width');
+  const frameHeight = asNumber('data-reframe-frame-height');
+  const frameCount = asNumber('data-reframe-frame-count');
+  if (frameWidth === undefined || frameHeight === undefined || frameCount === undefined) {
+    console.warn('[html-import] data-reframe-narrative="sprite" missing one of frame-width / frame-height / frame-count — ignoring');
+    return undefined;
+  }
+  if (frameWidth <= 0 || frameHeight <= 0 || frameCount <= 0) {
+    console.warn('[html-import] data-reframe-narrative frame dimensions/count must be positive — ignoring');
+    return undefined;
+  }
+
+  const result: {
+    kind: 'sprite';
+    spriteUrl: string;
+    frameWidth: number;
+    frameHeight: number;
+    frameCount: number;
+    columns?: number;
+    frameRate?: number;
+    loopMode?: 'forward' | 'reverse' | 'pingpong' | 'once';
+    trigger?: 'viewport' | 'mount' | 'hover';
+  } = { kind: 'sprite', spriteUrl, frameWidth, frameHeight, frameCount };
+
+  const columns = asNumber('data-reframe-frame-columns');
+  if (columns !== undefined && columns > 0) result.columns = columns;
+  const frameRate = asNumber('data-reframe-frame-rate');
+  if (frameRate !== undefined && frameRate > 0) result.frameRate = frameRate;
+
+  const rawLoopMode = attrs['data-reframe-loop-mode'];
+  if (rawLoopMode !== undefined) {
+    if (rawLoopMode === 'forward' || rawLoopMode === 'reverse'
+        || rawLoopMode === 'pingpong' || rawLoopMode === 'once') {
+      result.loopMode = rawLoopMode;
+    } else {
+      console.warn(`[html-import] data-reframe-loop-mode="${rawLoopMode}" — unknown, using default forward`);
+    }
+  }
+
+  const rawTrigger = attrs['data-reframe-narrative-trigger'];
+  if (rawTrigger !== undefined) {
+    if (rawTrigger === 'viewport' || rawTrigger === 'mount' || rawTrigger === 'hover') {
+      result.trigger = rawTrigger;
+    } else {
+      console.warn(`[html-import] data-reframe-narrative-trigger="${rawTrigger}" — unknown, using default viewport`);
+    }
+  }
+
+  return result;
 }
 
 /**
