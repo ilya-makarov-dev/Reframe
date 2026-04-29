@@ -1,3 +1,5 @@
+import { captureCaret, restoreCaret } from './caret-preservation.js';
+
 /**
  * Iframe-based scene renderer for the DOM canvas.
  *
@@ -205,7 +207,26 @@ export function createSceneRenderer(opts: SceneRendererOptions): {
         const data = JSON.parse(ev.data);
         if (data?.type === 'scene:session-changed' && (!data.sceneId || data.sceneId === opts.sceneId)) {
           opts.onSceneChange?.();
-          reload();
+          // T3 #14 — preserve caret across the SSE-triggered reload.
+          // If the user is mid-inline-edit when a property change
+          // arrives from the inspector or another agent, the iframe
+          // re-fetches and re-mounts the scene HTML; without capture/
+          // restore the caret jumps to start (or vanishes entirely).
+          // captureCaret returns null when there's no active selection
+          // — common case is a no-op overhead.
+          const beforeState = captureCaret(iframe.contentDocument, opts.sceneId);
+          const wrappedOnLoad = beforeState
+            ? () => { restoreCaret(iframe.contentDocument, beforeState); }
+            : null;
+          reload().then(() => {
+            if (wrappedOnLoad) {
+              // Restore happens AFTER the iframe.onload reset inside
+              // reloadFull (which assigns srcdoc + reads bbox). Schedule
+              // on next microtask so the reload's own onload finishes
+              // first.
+              Promise.resolve().then(wrappedOnLoad);
+            }
+          }).catch(() => { /* reload errors already logged inside */ });
         }
       } catch { /* non-JSON pings — ignore */ }
     });
