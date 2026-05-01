@@ -31,6 +31,7 @@ import {
   attachAnnotation,
   attachIntent,
   transitionThread,
+  getThread,
   type ThreadStatus,
 } from '../../../../core/src/project/threads/index.js';
 import {
@@ -140,6 +141,63 @@ export async function handleGestureApi(
       return true;
     }
     sendJson(res, 200, { ...result, ok: true });
+    return true;
+  }
+
+  // POST /platform/api/threads/reply — Phase 2 Brief 2c.
+  // Accepts a `body` string + threadId, persists a `comment` annotation
+  // anchored to the thread's anchor + sceneSlug. Reuses the same
+  // createAnnotation + attachAnnotation path the gesture handler uses
+  // so the schema + thread linkage stay consistent. Broadcasts SSE so
+  // any open thread panel re-renders. No intent emitted — pure visual
+  // reply.
+  if (pathname === '/platform/api/threads/reply' && req.method === 'POST') {
+    const body = await readJson(req);
+    const threadId = String(body.threadId || '').trim();
+    const replyBody = typeof body.body === 'string' ? body.body : '';
+    if (!threadId) {
+      sendError(res, 400, 'threadId required');
+      return true;
+    }
+    const trimmed = replyBody.trim();
+    if (!trimmed) {
+      sendError(res, 400, 'body required');
+      return true;
+    }
+    if (replyBody.length > 4000) {
+      sendError(res, 400, 'body too long (max 4000 chars)');
+      return true;
+    }
+    const thread = getThread(dir, threadId);
+    if (!thread) {
+      sendError(res, 404, `thread ${threadId} not found`);
+      return true;
+    }
+    const author = body.author && typeof body.author === 'object'
+      ? body.author as AnnotationAuthor
+      : { kind: 'human' as const, id: 'platform-ui' };
+    const annotation = createAnnotation(dir, {
+      anchor: thread.anchor,
+      sceneSlug: thread.sceneSlug,
+      threadId: thread.id,
+      author,
+      // CommentPayload uses `text` field. Accept `body` on the wire to
+      // match user-facing terminology, store as `text` to match the
+      // existing schema + render path.
+      payload: { kind: 'comment', text: trimmed },
+    });
+    attachAnnotation(dir, thread.id, annotation.id);
+
+    // Broadcast SSE so any open thread panel + canvas overlay re-renders.
+    try {
+      const { emitEvent } = await import('../../http-server.js');
+      emitEvent({
+        type: 'scene:session-changed',
+        sceneId: thread.sceneSlug,
+      } as any);
+    } catch { /* best-effort */ }
+
+    sendJson(res, 200, { ok: true, annotation });
     return true;
   }
 

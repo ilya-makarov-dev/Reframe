@@ -42,8 +42,16 @@ export type { SceneRenderer, SceneRendererHandle };
 
 export interface CompositionDescriptor {
   kind: 'single' | 'variants';
-  /** sceneIds to render. For 'single': length 1. For 'variants': length ≥ 2. */
+  /** sceneIds to render. For 'single': length 1. For 'variants': length ≥ 2.
+   *  Same value may repeat across cells (storage-backed variants render
+   *  the same base scene N times across an axis Cartesian product). */
   sceneIds: string[];
+  /** Optional per-cell host identifiers for the registry. When omitted,
+   *  hostId === sceneId (legacy CSV mode). When provided, must be unique
+   *  per cell — required for storage-backed variants where every cell
+   *  shares one base sceneId so the registry doesn't collapse them.
+   *  Must have the same length as sceneIds. */
+  hostIds?: string[];
   /** Optional labels shown above each scene in 'variants' mode. */
   labels?: string[];
 }
@@ -140,19 +148,19 @@ export function mountCompositionRenderer(
     host.appendChild(column);
 
     // Full editor per variant. Registry handles focus routing + global
-    // listener gating automatically — we just pass sceneId as hostId
-    // (matches registry's default anyway, but explicit for clarity) and
-    // propagate the composition kind so setFocused emits the right
-    // compositionKind on the focus event.
+    // listener gating automatically. hostId and sceneId can differ in
+    // storage-backed variants (one base sceneId, N synthetic hostIds);
+    // the iframe URL still loads the base scene via sceneId.
+    const hostId = composition.hostIds?.[i] ?? sceneId;
     const canvas = createDOMCanvas({
       container: sceneHost,
       sceneId,
-      hostId: sceneId,
+      hostId,
       compositionKind: composition.kind,
       onSelect: (ids) => opts.onCanvasSelect?.(sceneId, ids),
     });
-    canvases.set(sceneId, canvas);
-    ownedHostIds.add(sceneId);
+    canvases.set(hostId, canvas);
+    ownedHostIds.add(hostId);
   });
 
   // Forward focus events to the host only when they belong to this

@@ -6,6 +6,12 @@ allowed-tools:
   - "Read"
   - "Write"
   - "Edit"
+bus-context-types:
+  - design-intent
+  - scene-compile-request
+bus-result-kinds:
+  - design-result
+bus-streaming: true
 ---
 
 # reframe-design

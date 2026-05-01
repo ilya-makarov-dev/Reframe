@@ -340,6 +340,33 @@
       case 'design-system:updated':
         if (debouncedRefreshViewports) debouncedRefreshViewports();
         break;
+      case 'brand:applied':
+      case 'brand:edited':
+        // Phase 3 Brief 3a Pin #6 — scoped brand events. Surfaces that
+        // care about a specific brand or scene (workbench preview frame,
+        // dashboard chips, color picker rail) subscribe via
+        // window.__reframeBrandSubscribers and decide for themselves.
+        // Catch-all design-system:updated still fires so legacy surfaces
+        // ride along the broad reload.
+        if (typeof window !== 'undefined' && Array.isArray(window.__reframeBrandSubscribers)) {
+          window.__reframeBrandSubscribers.forEach(function(fn) {
+            try { fn(ev); } catch (_) {}
+          });
+        }
+        break;
+      case 'skill-bus:progress':
+      case 'skill-bus:result':
+        // Phase 3.5 Pin #4 — bus invocation events. Surfaces that
+        // initiated a skill invocation subscribe via
+        // window.__reframeSkillBusSubscribers and filter by their own
+        // requestId. Multiple surfaces can listen — each ignores
+        // requestIds it didn't issue.
+        if (typeof window !== 'undefined' && Array.isArray(window.__reframeSkillBusSubscribers)) {
+          window.__reframeSkillBusSubscribers.forEach(function(fn) {
+            try { fn(ev); } catch (_) {}
+          });
+        }
+        break;
     }
   }
 

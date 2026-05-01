@@ -35,6 +35,26 @@ Hyperframes (Apache License 2.0)
   skill at `.claude/skills/reframe-motion/` is original to reframe and
   licensed under AGPL-3.0-or-later.
 
+Open-design (Apache License 2.0)
+  https://github.com/nexu-io/open-design
+  The following content was adapted 2026-04-30 from open-design's
+  prompt-stack:
+    - 5 visual directions catalog (editorial-monocle, modern-minimal,
+      warm-soft, tech-utility, brutalist-experimental) shipped as
+      `.reframe/brands/<id>/DESIGN.md`. Source:
+      `apps/web/src/prompts/directions.ts`. Originally distilled in
+      open-design from alchaincyf/huashu-design's "5 schools × 20
+      philosophies" idea (https://github.com/alchaincyf/huashu-design).
+    - Brand vocalise step (one-sentence brand-system summary before
+      HTML write) adapted as guidance section в
+      `.claude/skills/reframe-brand/SKILL.md`. Source:
+      `apps/web/src/prompts/discovery.ts`.
+  Those adapted portions retain the Apache License 2.0. Reframe-native
+  extensions (INode AST integration, parser-shape DESIGN.md format,
+  auto-pick tone-signal mapping, structured one-line vocalise format,
+  attribution chain via NOTICE + README + per-file headers) are part
+  of reframe and licensed under AGPL-3.0-or-later.
+
 ─── Trademarks ──────────────────────────────────────────────────────────
 
 Brand names and trademarks referenced in brand catalogs (fetched via the

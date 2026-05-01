@@ -28,6 +28,39 @@ import { renderProjectCanvas } from './pages/project-canvas.js';
 import { findProjectBySlug } from './project-grouping.js';
 import { renderComponentsPage } from './pages/components.js';
 import { renderDesignSystemPage } from './pages/design-system.js';
+import { renderWorkbenchBrandsPage } from './pages/workbench-brands.js';
+import {
+  listBrandCatalog,
+  loadBrandDS,
+  listScenesUsingBrand,
+} from './api/brand-workbench-service.js';
+import { renderWorkbenchComponentsPage } from './pages/workbench-components.js';
+import {
+  listComponents as listComponentsForWorkbench,
+  loadComponent as loadComponentForWorkbench,
+  listInstancesUsing as listComponentInstances,
+} from './api/components-workbench-service.js';
+import { renderWorkbenchWizardsPage } from './pages/workbench-wizards.js';
+import { renderWizardVariantsPage } from './pages/wizard-variants.js';
+import { renderWizardSamplerPage } from './pages/wizard-sampler.js';
+import { renderWizardFlowPage } from './pages/wizard-flow.js';
+import { renderWizardOverlayPage } from './pages/wizard-overlay.js';
+import {
+  listVariants,
+  readVariantsSpec,
+} from '../../../core/src/project/variants-store.js';
+import {
+  listSamplers,
+  readSamplerSpec,
+} from '../../../core/src/project/sampler-store.js';
+import {
+  listFlows,
+  readFlowSpec,
+} from '../../../core/src/project/flow-store.js';
+import {
+  listOverlays,
+  readOverlaySpec,
+} from '../../../core/src/project/overlay-store.js';
 import { renderMacrosPage } from './pages/macros.js';
 import { handleIntentApi } from './api/intent.js';
 import { handleGestureApi } from './api/gesture.js';
@@ -317,7 +350,11 @@ export default async function(o){
         // router whitelist → fell through to "unknown api route".
         pathname.startsWith('/platform/api/tokens/') ||
         pathname === '/platform/api/aesthetic' ||
-        pathname.startsWith('/platform/api/aesthetic/')) {
+        pathname.startsWith('/platform/api/aesthetic/') ||
+        // Phase 3 Brief 3b — workbench editor endpoints. Token / vocab /
+        // typography write-back routes live in api/node-edit.ts; the
+        // whitelist needs them or they fall through to the catch-all 404.
+        pathname.startsWith('/platform/api/workbench/')) {
       return handleNodeEditApi(req, res, ctx);
     }
     // Gesture + annotations endpoints handled by the gesture module.
@@ -337,7 +374,7 @@ export default async function(o){
     //   GET  /platform/api/flow/:id/state          → live state
     //   POST /platform/api/flow/:id/state          → merge data into state
     //   POST /platform/api/flow/:id/transition     → set currentStep
-    if (pathname.startsWith('/platform/api/flow/')) {
+    if (pathname === '/platform/api/flow' || pathname.startsWith('/platform/api/flow/')) {
       const { handleFlowApi } = await import('./api/flow-api.js');
       return handleFlowApi(req, res, ctx);
     }
@@ -348,16 +385,37 @@ export default async function(o){
       const { handleSamplerApi } = await import('./api/sampler-api.js');
       return handleSamplerApi(req, res, ctx);
     }
+    // Variants spec endpoints (Phase 4 Brief 4b Pin #1):
+    //   GET    /platform/api/variants               → list ids
+    //   POST   /platform/api/variants               → create/update spec
+    //   GET    /platform/api/variants/:id           → single spec
+    //   DELETE /platform/api/variants/:id           → remove
+    if (pathname === '/platform/api/variants' ||
+        pathname.startsWith('/platform/api/variants/')) {
+      const { handleVariantsApi } = await import('./api/variants-api.js');
+      return handleVariantsApi(req, res, ctx);
+    }
     // Overlay spec + base-scene endpoints (T2 #5 Overlay kind):
     //   GET /platform/api/overlay/:id        → overlay.json spec
     //   GET /platform/api/overlay/:id/base   → base scene envelope
-    if (pathname.startsWith('/platform/api/overlay/')) {
+    if (pathname === '/platform/api/overlay' || pathname.startsWith('/platform/api/overlay/')) {
       const { handleOverlayApi } = await import('./api/overlay-api.js');
       return handleOverlayApi(req, res, ctx);
     }
-    // Brand mark serving (Week 5 #21):
-    //   GET /platform/api/brand/:slug/mark/:variant  → SVG file bytes
-    if (pathname.startsWith('/platform/api/brand/') && pathname.includes('/mark/')) {
+    // Phase 3.5 — skill bus invocation router. Single canonical
+    // surface every workbench / palette / verb / chat client routes
+    // through. Validates against skill registry, broadcasts SSE
+    // progress + result events.
+    if (pathname.startsWith('/platform/api/skill-bus/')) {
+      const { handleSkillBusApi } = await import('./api/skill-bus.js');
+      return handleSkillBusApi(req, res, ctx);
+    }
+    // Brand mark serving (Week 5 #21) + Brief 3d Pin #1 upload + list:
+    //   GET  /platform/api/brand/:slug/mark/:variant  → SVG file bytes
+    //   POST /platform/api/brand/:slug/mark/:variant  → multipart upload
+    //   GET  /platform/api/brand/:slug/marks          → variants list JSON
+    if (pathname.startsWith('/platform/api/brand/') &&
+        (pathname.includes('/mark/') || pathname.endsWith('/marks'))) {
       const { handleBrandMarkApi } = await import('./api/brand-mark.js');
       return handleBrandMarkApi(req, res, ctx);
     }
@@ -482,6 +540,241 @@ export default async function(o){
     }
     const html = renderComponentsPage(data);
     send(res, 200, 'text/html', html);
+    return true;
+  }
+
+  // Phase 3 Brief 3a — Brand Workbench. Catalog mode by default, workbench
+  // mode when ?slug=<brand> is set. Service layer in api/brand-workbench-service.ts
+  // orchestrates state owners (manifest.activeBrand, StoredScene.brand,
+  // applyBrandToScene). The route mounts as a standalone page — separate
+  // from /platform/project/:slug editor-shell — to avoid the mount-debt
+  // patterns Brief 2b Pin #10 / 2c Pin #8 had to retroactively fix.
+  if (pathname === '/platform/workbench/brands' && req.method === 'GET') {
+    if (!ctx.projectDir) {
+      send(res, 400, 'text/plain; charset=utf-8', 'No project open. Run reframe_project init first.');
+      return true;
+    }
+    const slug = url.searchParams.get('slug') || undefined;
+    const activeSceneId = url.searchParams.get('scene') || ctx.sessionScenes[0]?.id;
+    const catalog = listBrandCatalog(ctx.projectDir);
+    let selectedDS: any = undefined;
+    let selectedRawMd: string | undefined;
+    let scenesUsing: any = undefined;
+    let markVariants: string[] | undefined;
+    let defaultMarkVariant: string | null | undefined;
+    if (slug) {
+      const loaded = loadBrandDS(ctx.projectDir, slug);
+      if (loaded) {
+        selectedDS = loaded.ds;
+        selectedRawMd = loaded.raw;
+      }
+      scenesUsing = listScenesUsingBrand(slug);
+      // Read marks/ directory for the selected brand. Cheap (sync readdirSync).
+      try {
+        const fs = await import('node:fs');
+        const path = await import('node:path');
+        const dir = path.join(ctx.projectDir, '.reframe', 'brands', slug, 'marks');
+        if (fs.existsSync(dir)) {
+          markVariants = fs.readdirSync(dir).filter((f) => f.endsWith('.svg')).map((f) => f.slice(0, -4)).sort();
+          defaultMarkVariant = markVariants.includes('primary')
+            ? 'primary'
+            : (markVariants.includes('logo') ? 'logo' : (markVariants[0] ?? null));
+        } else {
+          markVariants = [];
+          defaultMarkVariant = null;
+        }
+      } catch { markVariants = []; defaultMarkVariant = null; }
+    }
+    // Phase 3 Brief 3d Pin #3 — catalog cards show brand logos. Read each
+    // brand's marks dir up-front so the catalog grid renders correctly
+    // server-side without an N+1 fetch per card.
+    const catalogMarks: Record<string, { defaultVariant: string | null }> = {};
+    try {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      for (const c of catalog) {
+        const dir = path.join(ctx.projectDir, '.reframe', 'brands', c.slug, 'marks');
+        if (!fs.existsSync(dir)) continue;
+        try {
+          const variants = fs.readdirSync(dir).filter((f) => f.endsWith('.svg')).map((f) => f.slice(0, -4)).sort();
+          if (variants.length > 0) {
+            const dv = variants.includes('primary') ? 'primary'
+                     : variants.includes('logo') ? 'logo' : variants[0];
+            catalogMarks[c.slug] = { defaultVariant: dv };
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* fs unavailable; skip catalog logos */ }
+
+    const html = renderWorkbenchBrandsPage({
+      selectedSlug: slug,
+      catalog,
+      selectedDS,
+      selectedRawMd,
+      scenesUsing,
+      activeSceneId,
+      markVariants,
+      defaultMarkVariant,
+      catalogMarks,
+    });
+    send(res, 200, 'text/html; charset=utf-8', html);
+    return true;
+  }
+
+  // Phase 4 Brief 4a — Components Workbench. Catalog mode by default,
+  // workbench mode when ?slug=<component> is set. Service layer in
+  // api/components-workbench-service.ts orchestrates Phase 6 engine
+  // (component-registry + ops + .reframe/components/<slug>.component.json).
+  // Pattern matches brand workbench (Phase 3a) for visual + UX consistency.
+  if (pathname === '/platform/workbench/components' && req.method === 'GET') {
+    if (!ctx.projectDir) {
+      send(res, 400, 'text/plain; charset=utf-8', 'No project open. Run reframe_project init first.');
+      return true;
+    }
+    const slug = url.searchParams.get('slug') || undefined;
+    const activeSceneId = url.searchParams.get('scene') || ctx.sessionScenes[0]?.id;
+    const activeSceneSlug = ctx.sessionScenes.find((s: any) => s.id === activeSceneId)?.slug;
+    const catalog = listComponentsForWorkbench(ctx.projectDir);
+    let selectedMaster: any = undefined;
+    let instances: any = undefined;
+    if (slug) {
+      selectedMaster = loadComponentForWorkbench(ctx.projectDir, slug) ?? undefined;
+      instances = listComponentInstances(ctx.projectDir, slug);
+    }
+    const availableScenes = ctx.sessionScenes.map((s: any) => ({
+      id: s.id, slug: s.slug, name: s.name,
+    }));
+    const html = renderWorkbenchComponentsPage({
+      selectedSlug: slug,
+      catalog,
+      selectedMaster,
+      instances,
+      activeSceneId,
+      activeSceneSlug,
+      availableScenes,
+    });
+    send(res, 200, 'text/html; charset=utf-8', html);
+    return true;
+  }
+
+  // Phase 4 Brief 4b — Wizards catalog + per-kind wizard pages.
+  // /platform/workbench/wizards          — catalog landing
+  // /platform/workbench/wizards/variants — variants wizard
+  // /platform/workbench/wizards/sampler  — sampler wizard
+  if (pathname === '/platform/workbench/wizards' && req.method === 'GET') {
+    if (!ctx.projectDir) {
+      send(res, 400, 'text/plain; charset=utf-8', 'No project open. Run reframe_project init first.');
+      return true;
+    }
+    const variantIds = listVariants(ctx.projectDir);
+    const samplerIds = listSamplers(ctx.projectDir);
+    const flowIds = listFlows(ctx.projectDir);
+    const overlayIds = listOverlays(ctx.projectDir);
+    const variantsExisting = variantIds.map((id) => {
+      const spec = readVariantsSpec(ctx.projectDir!, id);
+      return { id, name: spec?.name, updatedAt: spec?.updatedAt };
+    });
+    const samplersExisting = samplerIds.map((id) => {
+      const spec = readSamplerSpec(ctx.projectDir!, id);
+      return { id, name: spec?.name, updatedAt: spec?.updatedAt };
+    });
+    const flowsExisting = flowIds.map((id) => {
+      const spec = readFlowSpec(ctx.projectDir!, id);
+      return { id, name: spec?.name, updatedAt: spec?.updatedAt };
+    });
+    const overlaysExisting = overlayIds.map((id) => {
+      const spec = readOverlaySpec(ctx.projectDir!, id);
+      return { id, name: spec?.name, updatedAt: spec?.updatedAt };
+    });
+    const html = renderWorkbenchWizardsPage({
+      cards: [
+        {
+          kind: 'variants',
+          name: 'Variants',
+          description: 'Cartesian product of axes around a base scene. Density × radius × brand → grid of cells.',
+          iconSvgPath: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+          existing: variantsExisting,
+          shipping: true,
+        },
+        {
+          kind: 'sampler',
+          name: 'Sampler',
+          description: 'N variations of one base scene laid out as a specimen sheet — sequential, random, or weighted sampling.',
+          iconSvgPath: '<rect x="3" y="3" width="5" height="5"/><rect x="9.5" y="3" width="5" height="5"/><rect x="16" y="3" width="5" height="5"/><rect x="3" y="9.5" width="5" height="5"/><rect x="9.5" y="9.5" width="5" height="5"/><rect x="16" y="9.5" width="5" height="5"/>',
+          existing: samplersExisting,
+          shipping: true,
+        },
+        {
+          kind: 'flow',
+          name: 'Flow',
+          description: 'Linear step transitions over a sequence of scenes — onboarding, multi-step forms, micro-interactions.',
+          iconSvgPath: '<rect x="2" y="9" width="6" height="6" rx="1"/><rect x="16" y="9" width="6" height="6" rx="1"/><path d="M8 12h8M14 9l3 3-3 3"/>',
+          existing: flowsExisting,
+          shipping: true,
+        },
+        {
+          kind: 'overlay',
+          name: 'Overlay',
+          description: 'Base scene with up to 3 effect layers — noise, shaders, particles, motion.',
+          iconSvgPath: '<rect x="3" y="3" width="14" height="14" rx="1"/><rect x="7" y="7" width="14" height="14" rx="1" opacity="0.5"/>',
+          existing: overlaysExisting,
+          shipping: true,
+        },
+      ],
+    });
+    send(res, 200, 'text/html; charset=utf-8', html);
+    return true;
+  }
+
+  if (pathname === '/platform/workbench/wizards/variants' && req.method === 'GET') {
+    if (!ctx.projectDir) {
+      send(res, 400, 'text/plain; charset=utf-8', 'No project open.');
+      return true;
+    }
+    const scenes = ctx.sessionScenes.map((s: any) => ({
+      id: s.id, slug: s.slug, name: s.name,
+      width: s.width, height: s.height, nodes: s.nodes,
+    }));
+    send(res, 200, 'text/html; charset=utf-8', renderWizardVariantsPage({ scenes }));
+    return true;
+  }
+
+  if (pathname === '/platform/workbench/wizards/sampler' && req.method === 'GET') {
+    if (!ctx.projectDir) {
+      send(res, 400, 'text/plain; charset=utf-8', 'No project open.');
+      return true;
+    }
+    const scenes = ctx.sessionScenes.map((s: any) => ({
+      id: s.id, slug: s.slug, name: s.name,
+      width: s.width, height: s.height, nodes: s.nodes,
+    }));
+    send(res, 200, 'text/html; charset=utf-8', renderWizardSamplerPage({ scenes }));
+    return true;
+  }
+
+  if (pathname === '/platform/workbench/wizards/flow' && req.method === 'GET') {
+    if (!ctx.projectDir) {
+      send(res, 400, 'text/plain; charset=utf-8', 'No project open.');
+      return true;
+    }
+    const scenes = ctx.sessionScenes.map((s: any) => ({
+      id: s.id, slug: s.slug, name: s.name,
+      width: s.width, height: s.height, nodes: s.nodes,
+    }));
+    send(res, 200, 'text/html; charset=utf-8', renderWizardFlowPage({ scenes }));
+    return true;
+  }
+
+  if (pathname === '/platform/workbench/wizards/overlay' && req.method === 'GET') {
+    if (!ctx.projectDir) {
+      send(res, 400, 'text/plain; charset=utf-8', 'No project open.');
+      return true;
+    }
+    const scenes = ctx.sessionScenes.map((s: any) => ({
+      id: s.id, slug: s.slug, name: s.name,
+      width: s.width, height: s.height, nodes: s.nodes,
+    }));
+    send(res, 200, 'text/html; charset=utf-8', renderWizardOverlayPage({ scenes }));
     return true;
   }
 

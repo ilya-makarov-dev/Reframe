@@ -162,6 +162,20 @@ export interface TimeScrubGesture extends GestureBase {
   action: 'branch' | 'cherry-pick' | 'compare' | 'revive';
 }
 
+/** Free-vector — designer-drawn polyline floating above the scene. Captured
+ *  on Pen-tool drag-release. Has no anchor (free-floating); the gesture
+ *  itself carries the full path + style and translates 1:1 to a free-vector
+ *  annotation. No intent is emitted — it's pure visual annotation. */
+export interface FreeVectorGesture extends GestureBase {
+  kind: 'free-vector';
+  /** Polyline points in iframe-doc coordinate space. */
+  points: Array<{ x: number; y: number }>;
+  stroke: string;
+  width: number;
+  opacity: number;
+  smooth: boolean;
+}
+
 // ─── Union ──────────────────────────────────────────────────
 
 export type Gesture =
@@ -175,9 +189,11 @@ export type Gesture =
   | EchoGesture
   | PinGesture
   | RuleGesture
-  | TimeScrubGesture;
+  | TimeScrubGesture
+  | FreeVectorGesture;
 
 export const KNOWN_GESTURE_KINDS = new Set<Gesture['kind']>([
   'hover', 'select',
   'ask', 'drag', 'lasso', 'brush', 'resonance', 'echo', 'pin', 'rule', 'time-scrub',
+  'free-vector',
 ]);

@@ -308,6 +308,13 @@
     bindMacroApplyBtns();
     bindHeaderToolbar();
     bindMacroDropdowns();
+    if (typeof bindPenToolbarButton === 'function') bindPenToolbarButton();
+    if (typeof bindBrandWorkbench === 'function') bindBrandWorkbench();
+    if (typeof bindComponentsWorkbench === 'function') bindComponentsWorkbench();
+    if (typeof window.reframeBindVariantsWizard === 'function') window.reframeBindVariantsWizard();
+    if (typeof window.reframeBindSamplerWizard === 'function') window.reframeBindSamplerWizard();
+    if (typeof window.reframeBindFlowWizard === 'function') window.reframeBindFlowWizard();
+    if (typeof window.reframeBindOverlayWizard === 'function') window.reframeBindOverlayWizard();
     bindSidebarActions();
     bindContextMenu();
     bindInlinePopover();
@@ -315,6 +322,7 @@
     bindZoomPill();
     bindViewportPreview();
     bindTweaksPanel();
+    if (typeof bindDrawer === 'function') bindDrawer();
     bindBatchExport();
     bindVariantStrip();
     bindPipelineStepper();

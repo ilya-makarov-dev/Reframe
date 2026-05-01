@@ -143,6 +143,18 @@ function renderOverview(data: DashboardData): string {
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
         Create Canvas
       </button>
+      <a class="btn btn-ghost btn-sm" href="/platform/workbench/brands" style="display:flex;align-items:center;gap:6px;text-decoration:none">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><circle cx="4" cy="7" r="2.5" stroke="currentColor" stroke-width="1.3"/><circle cx="10" cy="7" r="2.5" stroke="currentColor" stroke-width="1.3"/></svg>
+        Brand workbench
+      </a>
+      <a class="btn btn-ghost btn-sm" href="/platform/workbench/components" data-testid="dashboard-components-workbench" style="display:flex;align-items:center;gap:6px;text-decoration:none">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><rect x="2" y="2" width="4" height="4" stroke="currentColor" stroke-width="1.3"/><rect x="8" y="2" width="4" height="4" stroke="currentColor" stroke-width="1.3"/><rect x="2" y="8" width="4" height="4" stroke="currentColor" stroke-width="1.3"/><rect x="8" y="8" width="4" height="4" stroke="currentColor" stroke-width="1.3"/></svg>
+        Components workbench
+      </a>
+      <a class="btn btn-ghost btn-sm" href="/platform/workbench/wizards" data-testid="dashboard-wizards" style="display:flex;align-items:center;gap:6px;text-decoration:none">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 11l4-4 2 2 4-4M11 5h2v2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Composition wizards
+      </a>
     </div>
     <div class="overview-grid">${cards}</div>
   </div>`;

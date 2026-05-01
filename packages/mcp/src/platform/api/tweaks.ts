@@ -177,6 +177,16 @@ export async function handleTweaksApi(
       }
     }
 
+    // SSE parity with /update + /remove (Brief 2b carry-over from 2a).
+    // Without this, agent-side and external-script /declare calls leave
+    // any open Tweaks panel stale until the next poll. Designer-side
+    // declare-via-modal already triggers a manual refresh, so this
+    // closes the divergence rather than altering existing UI flows.
+    try {
+      const { emitEvent } = await import('../../http-server.js');
+      emitEvent({ type: 'scene:session-changed', sceneId } as any);
+    } catch { /* best-effort */ }
+
     sendJson(res, 200, { ok: true, count: tweaks.length, warnings });
     return true;
   }
@@ -244,6 +254,83 @@ export async function handleTweaksApi(
     } catch (e: any) {
       sendJson(res, 400, { ok: false, error: e?.message ?? 'apply failed' });
     }
+    return true;
+  }
+
+  // ── POST /platform/api/tweaks/update ──────────────────────
+  // Phase 2 Brief 2a Pin #5 — designer-side authoring.
+  //
+  // Replaces a single tweak in-place. Body shape:
+  //   { sceneId, id, updates: Partial<TweakDecl> }
+  // Reuses validateTweaks via a single-element array so the same
+  // schema rules apply (id immutable here — `updates.id` is ignored,
+  // identity is the path param). Broadcasts SSE so any open Tweaks
+  // panel re-renders the row.
+  if (pathname === '/platform/api/tweaks/update' && req.method === 'POST') {
+    const body = await readJson(req);
+    const sceneId = String(body.sceneId || '').trim();
+    const id = String(body.id || '').trim();
+    if (!sceneId || !id) {
+      sendJson(res, 400, { ok: false, error: 'sceneId and id required' });
+      return true;
+    }
+    const stored = getScene(sceneId);
+    if (!stored) { sendJson(res, 404, { ok: false, error: `scene ${sceneId} not found` }); return true; }
+    const tweaks = stored.tweaks || [];
+    const idx = tweaks.findIndex((t) => t.id === id);
+    if (idx < 0) {
+      sendJson(res, 404, { ok: false, error: `tweak ${id} not declared` });
+      return true;
+    }
+    const updates = body.updates && typeof body.updates === 'object' ? body.updates : {};
+    // Build the merged candidate; force id to be authoritative from path param.
+    const merged = { ...tweaks[idx], ...updates, id };
+    let validated: TweakDecl[];
+    try {
+      validated = validateTweaks([merged]);
+    } catch (e: any) {
+      sendJson(res, 400, { ok: false, error: e?.message ?? 'invalid update' });
+      return true;
+    }
+    tweaks[idx] = validated[0];
+    stored.tweaks = tweaks;
+    stored.sessionRevision = (stored.sessionRevision ?? 0) + 1;
+    try {
+      const { emitEvent } = await import('../../http-server.js');
+      emitEvent({ type: 'scene:session-changed', sceneId } as any);
+    } catch { /* best-effort */ }
+    sendJson(res, 200, { ok: true, updated: validated[0] });
+    return true;
+  }
+
+  // ── POST /platform/api/tweaks/remove ──────────────────────
+  // Phase 2 Brief 2a Pin #5. Hard delete; no soft-delete state since
+  // tweaks are scene-scoped editor metadata, not user content. The
+  // SSE broadcast triggers panel re-render → row fades out.
+  if (pathname === '/platform/api/tweaks/remove' && req.method === 'POST') {
+    const body = await readJson(req);
+    const sceneId = String(body.sceneId || '').trim();
+    const id = String(body.id || '').trim();
+    if (!sceneId || !id) {
+      sendJson(res, 400, { ok: false, error: 'sceneId and id required' });
+      return true;
+    }
+    const stored = getScene(sceneId);
+    if (!stored) { sendJson(res, 404, { ok: false, error: `scene ${sceneId} not found` }); return true; }
+    const tweaks = stored.tweaks || [];
+    const idx = tweaks.findIndex((t) => t.id === id);
+    if (idx < 0) {
+      sendJson(res, 404, { ok: false, error: `tweak ${id} not declared` });
+      return true;
+    }
+    tweaks.splice(idx, 1);
+    stored.tweaks = tweaks;
+    stored.sessionRevision = (stored.sessionRevision ?? 0) + 1;
+    try {
+      const { emitEvent } = await import('../../http-server.js');
+      emitEvent({ type: 'scene:session-changed', sceneId } as any);
+    } catch { /* best-effort */ }
+    sendJson(res, 200, { ok: true, removed: id });
     return true;
   }
 

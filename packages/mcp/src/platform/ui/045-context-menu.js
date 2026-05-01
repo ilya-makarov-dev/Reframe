@@ -64,6 +64,7 @@
         '<div class="ctx-item" data-ctx="duplicate">Duplicate<span class="shortcut">⌘D</span></div>' +
         '<div class="ctx-item" data-ctx="wrap">Wrap in container</div>' +
         '<div class="ctx-item" data-ctx="extract">Extract component</div>' +
+        '<div class="ctx-item" data-ctx="insert-component">Insert component…</div>' +
         '<div class="ctx-item" data-ctx="add-frame">Add frame (child)</div>' +
         '<div class="ctx-item" data-ctx="add-text">Add text (child)</div>' +
         '<div class="ctx-item danger" data-ctx="delete">Delete<span class="shortcut">⌫</span></div>' +
@@ -76,6 +77,21 @@
         '<div class="ctx-item ai-verb" data-ctx="brush">✦ Brush with macro</div>' +
         '<div class="ctx-sep"></div>';
     }
+
+    // ── Annotations section — anchor-free annotations (Pen, Pin/Comment,
+    //    Reference). Always available, doesn't require selection. The Pen
+    //    entry mirrors the toolbar Pen button — both call togglePenMode().
+    //    The "Add comment here" / "Reference here" entries reuse existing
+    //    verb handlers but only when a node is selected. ──
+    html +=
+      '<div class="ctx-section-label">Annotations</div>' +
+      '<div class="ctx-item ai-verb" data-ctx="pen-draw">✎ Draw on top<span class="shortcut">pen</span></div>';
+    if (hasSelection) {
+      html +=
+        '<div class="ctx-item ai-verb" data-ctx="ask">＋ Add comment here</div>' +
+        '<div class="ctx-item ai-verb" data-ctx="pin">＋ Reference here</div>';
+    }
+    html += '<div class="ctx-sep"></div>';
 
     // ── Generate section ──
     html +=

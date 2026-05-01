@@ -653,6 +653,16 @@
       '</div>';
     }
 
+    // Phase 4 Brief 4a Pin #5 — Slot overrides section, only for INSTANCE
+    // nodes. Surfaces per-slot overrides keyed by slot name; values land
+    // in node.overrides[slot] which engine merges over master defaults at
+    // expand time. "Reset to master" clears that entry → instance falls
+    // back to master value. Master itself is read-only here; edit it via
+    // the components workbench (/platform/workbench/components?slug=…).
+    if ((props.type || '').toLowerCase() === 'instance') {
+      html += renderSlotOverridesSection(props, sessionId, nodeId);
+    }
+
     panel.innerHTML = html;
     bindPropInputs();
     bindResetButtons(sessionId, nodeId);
@@ -660,6 +670,9 @@
     bindCollapsePersistence();
     bindStatesAndAnimation(sessionId, nodeId);
     bindAiBar(sessionId, nodeId);
+    if ((props.type || '').toLowerCase() === 'instance') {
+      bindSlotOverrideEditors(sessionId, nodeId);
+    }
     // Async: fetch audit + brand fidelity → populate banners. Doesn't
     // block the rest of the panel; if it fails we just show nothing.
     fetchAndRenderSuggestions(sessionId, nodeId);
@@ -1064,5 +1077,119 @@
           }));
         });
       });
+    });
+  }
+
+  // ════════════════════════════════════════════════════════
+  // Phase 4 Brief 4a Pin #5 — Slot overrides editor.
+  //
+  // Activates only when the selected node is an INSTANCE. Reads slot
+  // names from props.slots (server-side surface from componentAPI) and
+  // overrides from props.overrides; renders one row per slot with the
+  // current override value editable + a Reset button. Commits via
+  // /platform/api/workbench/components/edit-instance which dispatches
+  // editInstance through the service layer.
+  //
+  // Edit shape: text-only fields в v1. Phase 4d adds typed editors per
+  // slot semantic — color/spacing/typography pickers wired to the same
+  // endpoint with richer payload shapes.
+  // ════════════════════════════════════════════════════════
+
+  function renderSlotOverridesSection(props, sessionId, nodeId) {
+    var slots = Array.isArray(props.slots) ? props.slots : [];
+    var overrides = (props.overrides && typeof props.overrides === 'object') ? props.overrides : {};
+    var componentName = (props.meta && props.meta.componentName) || props['component-name'] || '';
+
+    var headLabel = componentName
+      ? 'Slot overrides &middot; <span class="props-section-meta">' + escape(componentName) + '</span>'
+      : 'Slot overrides';
+
+    var body = '';
+    if (slots.length === 0) {
+      body = '<div class="props-empty-row" style="padding:8px 12px;color:var(--text-muted,#888);font-size:11px;line-height:1.5">' +
+        'This component has no exposed slots. Mark nodes with <code>data-reframe-slot</code> in source HTML to expose them.' +
+        '</div>';
+    } else {
+      body = slots.map(function(slot) {
+        var current = overrides[slot] || {};
+        var hasOverride = Object.keys(current).length > 0;
+        // Phase 4a v1 — single freeform "value" field per slot. Stores
+        // under overrides[slot].text по умолчанию (tracks the most common
+        // override target — text content). Designers needing typed
+        // overrides land them via Phase 4d typed editors.
+        var currentValue = current.text != null ? String(current.text) :
+                           current.fill != null ? String(current.fill) : '';
+        return '<div class="prop-row slot-override-row" data-slot-row="' + escape(slot) + '">' +
+          '<div class="prop-label" style="display:flex;align-items:center;gap:6px">' +
+            escape(slot) +
+            (hasOverride ? '<span class="slot-override-tag" style="font-size:10px;background:var(--accent,#2b74ff);color:#fff;padding:1px 5px;border-radius:8px">overridden</span>' : '') +
+          '</div>' +
+          '<div class="prop-control">' +
+            '<input type="text" class="prop-input" data-slot-input="' + escape(slot) +
+              '" value="' + escape(currentValue) +
+              '" placeholder="(master default)" />' +
+            (hasOverride
+              ? '<button class="prop-reset-btn" data-slot-reset="' + escape(slot) + '" title="Reset to master">↺</button>'
+              : '') +
+          '</div>' +
+        '</div>';
+      }).join('');
+    }
+
+    return '<div class="props-section instance-overrides-section">' +
+      '<div class="props-section-header" data-collapse-toggle>' + headLabel + '<span class="chevron">▼</span></div>' +
+      '<div class="props-section-body">' + body + '</div>' +
+    '</div>';
+  }
+
+  function bindSlotOverrideEditors(sessionId, nodeId) {
+    var section = $('.instance-overrides-section');
+    if (!section) return;
+
+    function commitSlot(slot, value) {
+      // value === null → reset slot back to master default.
+      var patch = {};
+      if (value === null) patch[slot] = null;
+      else patch[slot] = { text: value };
+      return api('/platform/api/workbench/components/edit-instance', {
+        sceneId: sessionId,
+        nodeId: nodeId,
+        patch: patch,
+      });
+    }
+
+    section.addEventListener('change', async function(e) {
+      var input = e.target && e.target.closest && e.target.closest('[data-slot-input]');
+      if (!input) return;
+      var slot = input.getAttribute('data-slot-input');
+      var value = String(input.value || '').trim();
+      try {
+        if (value === '') {
+          await commitSlot(slot, null);
+          if (typeof flash === 'function') flash('Slot reset', 'success');
+        } else {
+          await commitSlot(slot, value);
+          if (typeof flash === 'function') flash('Slot overridden', 'success');
+        }
+      } catch (_) {
+        if (typeof flash === 'function') flash('Slot edit failed', 'error');
+      }
+    });
+
+    section.addEventListener('click', async function(e) {
+      var btn = e.target && e.target.closest && e.target.closest('[data-slot-reset]');
+      if (!btn) return;
+      e.preventDefault();
+      var slot = btn.getAttribute('data-slot-reset');
+      try {
+        await commitSlot(slot, null);
+        if (typeof flash === 'function') flash('Slot reset', 'success');
+        // Refresh inspector to remove the override badge + reset button.
+        if (typeof showPropsForNode === 'function') {
+          showPropsForNode(nodeId, sessionId);
+        }
+      } catch (_) {
+        if (typeof flash === 'function') flash('Reset failed', 'error');
+      }
     });
   }

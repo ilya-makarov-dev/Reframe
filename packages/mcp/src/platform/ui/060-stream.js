@@ -330,30 +330,126 @@
     var results = document.createElement('div');
     results.style.cssText = 'max-height:320px;overflow-y:auto;padding:8px';
 
+    // Phase 3.5 Pin #7 — bus-aware result panel + feature flag.
+    // The flag opts the palette into routing through the skill bus.
+    // OFF: legacy hardcoded actions (backward compat default).
+    // ON:  selected commands invoke skills via /skill-bus/invoke and
+    //      the palette renders results inline beneath the command list
+    //      via the result-rendering library (152-skill-result-render.js).
+    var busOn = false;
+    try {
+      var qs = (typeof window !== 'undefined' && window.location.search) || '';
+      if (/[?&]bus=on\b/.test(qs)) busOn = true;
+      else if (window.localStorage && window.localStorage.getItem('reframe-skill-bus-enabled') === '1') busOn = true;
+    } catch (_) {}
+
+    var resultPanel = document.createElement('div');
+    resultPanel.className = 'cmd-bus-result';
+    resultPanel.style.cssText = busOn
+      ? 'border-top:1px solid var(--border);padding:12px;display:none;'
+      : 'display:none;';
+
+    function busInvokeFromPalette(skillName, contextKind, action) {
+      if (!busOn) return null;
+      var requestId = 'r-' + Date.now().toString(36) + '-' +
+        Math.random().toString(36).slice(2, 7);
+      var ctx = { kind: contextKind, action: action, source: 'cmd-k' };
+      // Optimistic progress entry — palette result panel becomes visible.
+      resultPanel.style.display = 'block';
+      resultPanel.innerHTML = renderSkillProgress({
+        requestId: requestId, skill: skillName, phase: 'queued',
+      });
+      // Subscribe scoped to this requestId.
+      if (!Array.isArray(window.__reframeSkillBusSubscribers)) {
+        window.__reframeSkillBusSubscribers = [];
+      }
+      window.__reframeSkillBusSubscribers.push(function(ev) {
+        if (!ev || ev.requestId !== requestId) return;
+        if (ev.type === 'skill-bus:progress') {
+          resultPanel.innerHTML = renderSkillProgress({
+            requestId: ev.requestId, skill: ev.skill, phase: ev.phase,
+          });
+        } else if (ev.type === 'skill-bus:result') {
+          resultPanel.innerHTML = renderSkillResult({
+            requestId: ev.requestId, skill: ev.skill,
+            ok: ev.ok, payload: ev.payload, error: ev.error,
+          });
+          bindSkillResultActions(resultPanel, {
+            handlers: {
+              dismiss: function() { resultPanel.style.display = 'none'; resultPanel.innerHTML = ''; },
+            },
+          });
+        }
+      });
+      api('/platform/api/skill-bus/invoke', {
+        skill: skillName,
+        context: ctx,
+        requestId: requestId,
+      }).catch(function(err) {
+        resultPanel.innerHTML = renderSkillResult({
+          requestId: requestId, skill: skillName,
+          ok: false, error: (err && err.message) || 'invoke failed',
+        });
+        bindSkillResultActions(resultPanel);
+      });
+      return true;
+    }
+
+    // Legacy command list. When bus flag ON, selected commands have
+    // their `action` swapped to a bus invocation that keeps the palette
+    // open + renders the result inline. Direct-action commands (Export
+    // HTML / API docs / Batch export / etc.) stay on their original
+    // path per brief Q4 — CRUD fallback.
     var commands = [
       { icon: '🎨', label: 'Design from scratch', desc: 'AI writes full page from your brief', action: function() { var btn = document.querySelector('[data-kind="describe"]'); if(btn) btn.click(); } },
       { icon: '🧱', label: 'Build from blocks', desc: 'Pick sections from block library', action: function() { window.location.href = '/platform/blocks'; } },
       { icon: '🔄', label: 'Rebrand', desc: 'Paste HTML, apply any brand', action: function() { var btn = document.querySelector('[data-kind="html"]'); if(btn) btn.click(); } },
-      { icon: '📊', label: 'Quality audit', desc: 'Check design quality (37 rules + 8 metrics)', action: function() { var tab = document.querySelector('[data-tab="quality"]'); if(tab) tab.click(); } },
+      { icon: '📊', label: 'Quality audit', desc: 'Check design quality (37 rules + 8 metrics) — ⌘\\', action: function() { if (typeof window.reframeOpenDrawer === 'function') window.reframeOpenDrawer('quality'); else { var tab = document.querySelector('[data-tab="quality"]'); if(tab) tab.click(); } } },
       { icon: '📦', label: 'Batch export', desc: 'N brands × M viewports × K formats', action: function() { window.location.href = '/platform/batch'; } },
-      { icon: '🎭', label: 'Switch brand', desc: 'Apply a different brand to this design', action: function() { var tab = document.querySelector('[data-tab="rebrand"]'); if(tab) tab.click(); } },
-      { icon: '🎲', label: 'Generate variants', desc: 'Density × Radius × Shadows grid', action: function() { var tab = document.querySelector('[data-tab="vary"]'); if(tab) tab.click(); } },
+      { icon: '🎭', label: 'Switch brand', desc: 'Apply a different brand to this design — ⌘\\', action: function() { if (typeof window.reframeOpenDrawer === 'function') window.reframeOpenDrawer('rebrand'); else { var tab = document.querySelector('[data-tab="rebrand"]'); if(tab) tab.click(); } } },
+      { icon: '🎲', label: 'Generate variants', desc: 'Density × Radius × Shadows grid — ⌘\\', action: function() { if (typeof window.reframeOpenDrawer === 'function') window.reframeOpenDrawer('variations'); else { var tab = document.querySelector('[data-tab="vary"]'); if(tab) tab.click(); } } },
       { icon: '⬇️', label: 'Export HTML', desc: 'Static HTML with inline styles', action: function() { var btn = document.querySelector('[data-format="html"]'); if(btn) btn.click(); } },
       { icon: '🖼️', label: 'Export PNG', desc: 'Raster image via CanvasKit', action: function() { var btn = document.querySelector('[data-format="png"]'); if(btn) btn.click(); } },
       { icon: '📄', label: 'Export PDF', desc: 'Print-ready PDF document', action: function() { var btn = document.querySelector('[data-format="pdf"]'); if(btn) btn.click(); } },
       { icon: '⚛️', label: 'Export React', desc: 'TSX with TypeScript annotations', action: function() { var btn = document.querySelector('[data-format="react"]'); if(btn) btn.click(); } },
       { icon: '🌐', label: 'Export Site', desc: 'Multi-page app with routing', action: function() { var btn = document.querySelector('[data-format="site"]'); if(btn) btn.click(); } },
-      { icon: '🔑', label: 'Tokens', desc: 'View/export design tokens (DTCG)', action: function() { var tab = document.querySelector('[data-tab="tokens"]'); if(tab) tab.click(); } },
+      { icon: '🔑', label: 'Tokens', desc: 'View/export design tokens (DTCG) — ⌘\\', action: function() { if (typeof window.reframeOpenDrawer === 'function') window.reframeOpenDrawer('tokens'); else { var tab = document.querySelector('[data-tab="tokens"]'); if(tab) tab.click(); } } },
       { icon: '🔌', label: 'API docs', desc: 'Headless render API reference', action: function() { window.location.href = '/platform/api-docs'; } },
     ];
+
+    // When bus flag ON, override actions for the bus-applicable subset.
+    // The legacy actions stay defined above so toggling the flag OFF
+    // returns to the prior behavior without code-path forks elsewhere.
+    if (busOn) {
+      var busOverrides = {
+        'Design from scratch':  { skill: 'reframe-design', kind: 'design-intent', action: 'compose' },
+        'Quality audit':        { skill: 'reframe-critic', kind: 'scene-compiled', action: 'audit' },
+        'Switch brand':         { skill: 'reframe-brand',  kind: 'brand-load',     action: 'switch' },
+        'Generate variants':    { skill: 'reframe-design', kind: 'design-intent',  action: 'variants' },
+        'Tokens':               { skill: 'reframe-brand',  kind: 'brand-load',     action: 'tokens' },
+        'Export React':         { skill: 'reframe-to-react', kind: 'export-intent', action: 'tsx' },
+      };
+      for (var i = 0; i < commands.length; i++) {
+        var cmd = commands[i];
+        var ov = busOverrides[cmd.label];
+        if (!ov) continue;
+        cmd.busBadge = true;
+        cmd.action = (function(target) {
+          return function() { busInvokeFromPalette(target.skill, target.kind, target.action); };
+        })(ov);
+      }
+    }
 
     function renderResults(filter) {
       var q = (filter || '').toLowerCase();
       var filtered = q ? commands.filter(function(c) { return c.label.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q); }) : commands;
       results.innerHTML = filtered.map(function(cmd, i) {
+        var busBadge = cmd.busBadge
+          ? '<span class="cmd-bus-badge" style="font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(43,116,255,0.1);color:rgb(43,116,255);font-weight:600;letter-spacing:0.04em;text-transform:uppercase;margin-left:6px">bus</span>'
+          : '';
         return '<div class="cmd-item" data-cmd-idx="' + commands.indexOf(cmd) + '" style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;cursor:pointer;transition:background 0.1s' + (i === 0 ? ';background:var(--surface-sunken)' : '') + '">'
           + '<span style="font-size:18px;width:24px;text-align:center">' + cmd.icon + '</span>'
-          + '<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:500;color:var(--text-base)">' + cmd.label + '</div>'
+          + '<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:500;color:var(--text-base)">' + cmd.label + busBadge + '</div>'
           + '<div style="font-size:12px;color:var(--text-muted)">' + cmd.desc + '</div></div>'
           + '</div>';
       }).join('');
@@ -361,9 +457,15 @@
       results.querySelectorAll('.cmd-item').forEach(function(item) {
         item.addEventListener('click', function() {
           var idx = parseInt(item.getAttribute('data-cmd-idx') || '0');
-          overlay.remove();
-          commandPaletteEl = null;
-          if (commands[idx]) commands[idx].action();
+          var cmd = commands[idx];
+          // Bus-routed commands keep the palette open so the result
+          // renders inline beneath the command list. Direct-action
+          // commands close the palette (legacy behavior preserved).
+          if (!(cmd && cmd.busBadge)) {
+            overlay.remove();
+            commandPaletteEl = null;
+          }
+          if (cmd) cmd.action();
         });
         item.addEventListener('mouseenter', function() {
           results.querySelectorAll('.cmd-item').forEach(function(i) { i.style.background = 'transparent'; });
@@ -383,6 +485,7 @@
 
     palette.appendChild(input);
     palette.appendChild(results);
+    palette.appendChild(resultPanel);
     overlay.appendChild(palette);
     document.body.appendChild(overlay);
     commandPaletteEl = overlay;

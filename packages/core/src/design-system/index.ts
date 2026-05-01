@@ -26,6 +26,14 @@ export {
 } from './types';
 
 export { parseDesignMd } from './parser';
+export {
+  serializeDesignMd,
+  replaceSection,
+  replaceHexInPlace,
+  type SerializeOpts,
+  type SectionPatch,
+  type HexReplaceResult,
+} from './serializer';
 export { extractDesignSystemFromFrame } from './extractor';
 export { exportDesignMd } from './exporter';
 export { applyBrandInheritance } from './inheritance';

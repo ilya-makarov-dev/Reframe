@@ -5,6 +5,11 @@ allowed-tools:
   - "Read"
   - "Write"
   - "Edit"
+bus-context-types:
+  - vague-intent
+bus-result-kinds:
+  - generic
+bus-streaming: false
 ---
 
 # reframe-enhance
@@ -69,6 +74,32 @@ When in doubt, ask **one** clarifying question instead of two.
 - If you'd need a 4th question — write the draft brief with `[?]` markers on unknowns and show the user. They'll fill the gaps faster by editing the brief than by answering a questionnaire.
 - Never block indefinitely. Worst case: propose a brief with 2+ `[?]` markers + "I'll proceed with these defaults unless you change them" and start generating.
 
+## The 5 directions — when no brand is named
+
+When the user gives a vague ask without a brand reference, **don't** ask open-ended "what mood". Instead, **offer 5 deterministic directions** as a numbered choice. Each direction is a complete spec — palette, type, posture — so the downstream `reframe-design` skill binds tokens verbatim instead of improvising.
+
+**The 5 directions:**
+
+1. **`editorial-monocle`** — Editorial · Monocle / FT magazine. Print-magazine feel: generous whitespace, large serif headlines, restrained palette of off-white paper + ink + a single warm rust accent.
+2. **`modern-minimal`** — Modern minimal · Linear / Vercel. Quiet, precise, software-native: system fonts, near-greyscale palette, single saturated cobalt accent.
+3. **`warm-soft`** — Warm & soft · Stripe pre-2020 / Headspace. Cream backgrounds, soft terracotta accent, gentle 12-16px radii. Reads like thoughtful product magazine.
+4. **`tech-utility`** — Tech / utility · Datadog / GitHub. Data-dense, monospace-friendly, signal-green accent. Made for engineers and operators who want information per square inch.
+5. **`brutalist-experimental`** — Brutalist · Are.na / Yale. Loud type, visible grid, system sans + oversized serif, hot red accent. Deliberate ugliness as confidence.
+
+**Auto-pick decision table:** if user's brief carries even one tone signal, auto-route to matching direction and *say which one and why* в brief. User can override в одно сообщение.
+
+| Tone signal in user's brief | Auto-pick direction |
+|---|---|
+| editorial / magazine / longform / journalism / brand-led marketing | `editorial-monocle` |
+| modern / minimal / SaaS / B2B / dev-tool / Linear-like / Vercel-like | `modern-minimal` |
+| warm / soft / cream / thoughtful / fintech / wellness / indie SaaS / Stripe-like | `warm-soft` |
+| dashboard / admin / ops / data-tool / log-viewer / monitoring / table-heavy / utility | `tech-utility` |
+| brutalist / experimental / agency / manifesto / art / gallery / bold / loud | `brutalist-experimental` |
+
+When **no signal** is present, ask the user with a 1-question pick from the 5 — phrased per existing skill's interview rule. **Don't auto-default to `modern-minimal` silently** — that re-creates the failure mode.
+
+**Output discipline:** when a direction is chosen, the brief's `## DESIGN SYSTEM > Brand` field becomes `none — direction: <id>`. The `## DESIGN SYSTEM > Mood` field is the direction's `mood` paragraph verbatim (read via `reframe_design action=extract brand=<direction-id>`). Primary accent is the direction's accent hex.
+
 ## What a structured brief contains (always)
 
 1. **Scene identity** — what kind of page / section
@@ -100,6 +131,7 @@ Where brief-writing fails:
 | Brief bundles multiple pages ("landing + pricing") | Single-page briefs only | Route to `reframe-site-loop` instead, write one brief per page |
 | Brief contradicts itself ("minimal but with lots of components") | Designer will pick one randomly | Flag and ask which wins |
 | Brief uses `"something nice"` phrase | Zero signal extracted | Push back, ask 2 clarifying questions (audience + mood) |
+| Brief says "no brand" but mood is also unspecified | Designer gets a generic blue-button SaaS slop scene every time | Pick from the 5-direction library above; auto-pick if any tone signal present, otherwise ask the user to pick one |
 
 ## Canonical flows
 
@@ -115,6 +147,7 @@ Where brief-writing fails:
 ```markdown
 ## DESIGN SYSTEM
 Brand: <slug OR "none — mood-only">
+Direction: <id from 5-direction library, OR omit if Brand is set>
 Mood: <1 line, specific, no "modern"/"clean">
 Primary accent: <hex or "from brand">
 Typography: <primary family + one tone word>

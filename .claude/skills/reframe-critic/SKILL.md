@@ -6,6 +6,13 @@ allowed-tools:
   - "mcp__reframe__reframe_edit"
   - "mcp__reframe__reframe_ui"
   - "Read"
+bus-context-types:
+  - scene-compiled
+  - brand-edit
+bus-result-kinds:
+  - critique-result
+  - audit-result
+bus-streaming: true
 ---
 
 # reframe-critic

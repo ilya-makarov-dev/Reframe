@@ -6,6 +6,12 @@ allowed-tools:
   - "Read"
   - "Write"
   - "Edit"
+bus-context-types:
+  - motion-intent
+  - scene-compiled
+bus-result-kinds:
+  - motion-result
+bus-streaming: true
 ---
 
 # reframe-motion

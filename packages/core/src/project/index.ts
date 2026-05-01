@@ -28,6 +28,7 @@ export {
   loadSourceHtml,
   compileHtmlIntoProject,
   registerBrand,
+  cloneBrand,
   loadBrandFromProject,
   setActiveBrand,
   resolveActiveBrand,

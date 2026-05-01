@@ -230,6 +230,22 @@ function nodeToCssProps(node: any): Record<string, any> {
     out['token-bindings'] = node.meta.tokenBindings;
   }
 
+  // Phase 4 Brief 4a Pin #5 — INSTANCE node component link + slot overrides.
+  // Inspector renders a Slot overrides section when type === 'INSTANCE'; the
+  // section pulls slots[] from the master via the workbench service path
+  // surfaced server-side so the client doesn't take a dependency on the
+  // components store directly.
+  if (node.type === 'INSTANCE') {
+    out['overrides'] = (node.overrides && typeof node.overrides === 'object')
+      ? node.overrides : {};
+    if (node.meta?.componentName) {
+      out['component-name'] = node.meta.componentName;
+    }
+    out['meta'] = { componentName: node.meta?.componentName };
+    // slots[] resolved by /api/node/get handler — see route below where
+    // it loads the master and merges the slots list onto the response.
+  }
+
   // ── Interaction states (hover/active/focus/disabled) ──
   if (node.states && typeof node.states === 'object') {
     out['states'] = node.states;
@@ -455,6 +471,23 @@ export async function handleNodeEditApi(
       return true;
     }
     const props = nodeToCssProps(node);
+    // Phase 4a Pin #5 — for INSTANCE nodes, attach slots[] from the
+    // master so the inspector knows which override rows to render. We
+    // do this here (not in nodeToCssProps) because the master read
+    // requires projectDir which lives on the platform context, not on
+    // the SceneNode.
+    if (node.type === 'INSTANCE' && ctx.projectDir) {
+      const componentName = (node.meta as any)?.componentName;
+      if (componentName) {
+        try {
+          const { loadComponentMaster } = await import('../../../../core/src/project/components.js');
+          const master = loadComponentMaster(ctx.projectDir, componentName);
+          if (master) {
+            (props as any).slots = master.slots ?? [];
+          }
+        } catch { /* best-effort */ }
+      }
+    }
     sendJson(res, 200, { ok: true, nodeId: resolvedNodeId, sceneId, props });
     return true;
   }
@@ -1590,10 +1623,13 @@ export async function handleNodeEditApi(
       const virtualSlug = (body.project as string | undefined)
         ?? extractVirtualSlugFromReferer(req);
       const entry = setActiveBrand(ctx.projectDir, slug, virtualSlug);
-      // SSE notify.
+      // SSE notify. Phase 3 Brief 3a Pin #6 — emit scoped events alongside
+      // catch-all so the brand workbench live-preview iframe can subscribe
+      // narrowly. Catch-all stays for surfaces that haven't migrated yet.
       try {
         const { emitEvent } = await import('../../http-server.js');
         emitEvent({ type: 'design-system:updated' } as any);
+        emitEvent({ type: 'brand:edited', slug } as any);
       } catch { /* best-effort */ }
       sendJson(res, 200, { ok: true, brand: entry });
     } catch (e: any) {
@@ -1661,10 +1697,312 @@ export async function handleNodeEditApi(
       try {
         const { emitEvent } = await import('../../http-server.js');
         emitEvent({ type: 'design-system:updated' } as any);
+        // Phase 3 Brief 3a Pin #6 — scoped applied event. Workbench
+        // preview iframe subscribes for its own scene only so rapid
+        // brand switches don't reload-storm every viewport.
+        emitEvent({ type: 'brand:applied', slug, sceneId: body.sceneId } as any);
       } catch { /* best-effort */ }
       sendJson(res, 200, { ok: true, brand: entry, extracted });
     } catch (e: any) {
       sendError(res, 400, e?.message ?? 'brand apply failed');
+    }
+    return true;
+  }
+
+  // ── POST /platform/api/workbench/clone-brand ─────
+  // Phase 3 Brief 3d Pin #5 — Remix wire. Body: { sourceSlug, newSlug,
+  // copyMarks?: boolean }. Wraps core/project/io.cloneBrand. Emits
+  // scoped brand:edited SSE on the new slug so any open catalog
+  // page refreshes its catalog grid.
+  if (pathname === '/platform/api/workbench/clone-brand' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const sourceSlug = String(body.sourceSlug || '').trim();
+    const newSlug = String(body.newSlug || '').trim();
+    const copyMarks = body.copyMarks !== false;
+    if (!sourceSlug || !newSlug) {
+      sendError(res, 400, 'sourceSlug and newSlug required');
+      return true;
+    }
+    try {
+      const projectIo = await import('../../../../core/src/project/io.js');
+      const result = projectIo.cloneBrand(ctx.projectDir, sourceSlug, newSlug, { copyMarks });
+      if (!result.ok) {
+        sendError(res, 400, result.error);
+        return true;
+      }
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'design-system:updated' } as any);
+        emitEvent({ type: 'brand:edited', slug: newSlug } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, brand: result.entry });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'clone-brand failed');
+    }
+    return true;
+  }
+
+  // ── GET /platform/api/workbench/role-for-hex ─────
+  // Phase 3 Brief 3c Pin #4 support — inspector calls this before
+  // submitting a node hex edit so it can include tokenBindings when
+  // the user picks a brand-matching color. Returns { role: string|null }.
+  if (pathname === '/platform/api/workbench/role-for-hex' && req.method === 'GET') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const brandSlug = url.searchParams.get('brandSlug') ?? '';
+    const hex = url.searchParams.get('hex') ?? '';
+    if (!brandSlug || !hex) {
+      sendError(res, 400, 'brandSlug and hex required');
+      return true;
+    }
+    try {
+      const { getRoleForHex } = await import('./brand-workbench-service.js');
+      const role = getRoleForHex(ctx.projectDir, brandSlug, hex);
+      sendJson(res, 200, { ok: true, role });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'role-for-hex failed');
+    }
+    return true;
+  }
+
+  // ── POST /platform/api/workbench/edit-token ─────
+  // Phase 3 Brief 3b Pin #2 — workbench Palette swatch edit.
+  // Body: { brandSlug, role, hex }
+  // Reads DESIGN.md, mutates the role, section-replaces the palette
+  // block, writes back, emits scoped SSE so the workbench's iframe
+  // reloads only the affected scenes.
+  if (pathname === '/platform/api/workbench/edit-token' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const brandSlug = String(body.brandSlug || '').trim();
+    const role = String(body.role || '').trim();
+    const hex = String(body.hex || '').trim();
+    if (!brandSlug || !role || !hex) {
+      sendError(res, 400, 'brandSlug, role, hex required');
+      return true;
+    }
+    try {
+      const { editToken } = await import('./brand-workbench-service.js');
+      const result = editToken(ctx.projectDir, brandSlug, role, hex);
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'design-system:updated' } as any);
+        emitEvent({ type: 'brand:edited', slug: brandSlug } as any);
+        // Phase 3 Brief 3b Pin #6 — skill-bus hook surface. Foundation
+        // only — bus subscribers land in Phase 3.5; for now this just
+        // makes the context payload observable on the wire.
+        emitEvent({
+          type: 'skill-context:ready',
+          context: result.skillContext,
+        } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, skillContext: result.skillContext });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'edit-token failed');
+    }
+    return true;
+  }
+
+  // ── POST /platform/api/workbench/edit-vocab ─────
+  // Body: { brandSlug, patch: Partial<BrandVocabulary> }
+  if (pathname === '/platform/api/workbench/edit-vocab' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const brandSlug = String(body.brandSlug || '').trim();
+    const patch = body.patch && typeof body.patch === 'object' ? body.patch : null;
+    if (!brandSlug || !patch) {
+      sendError(res, 400, 'brandSlug and patch required');
+      return true;
+    }
+    try {
+      const { editVocab } = await import('./brand-workbench-service.js');
+      const result = editVocab(ctx.projectDir, brandSlug, patch);
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'design-system:updated' } as any);
+        emitEvent({ type: 'brand:edited', slug: brandSlug } as any);
+        emitEvent({ type: 'skill-context:ready', context: result.skillContext } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, skillContext: result.skillContext });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'edit-vocab failed');
+    }
+    return true;
+  }
+
+  // ── POST /platform/api/workbench/edit-typography ─────
+  // Body: { brandSlug, patch: { primaryFont?, secondaryFont?, scale? } }
+  if (pathname === '/platform/api/workbench/edit-typography' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const brandSlug = String(body.brandSlug || '').trim();
+    const patch = body.patch && typeof body.patch === 'object' ? body.patch : null;
+    if (!brandSlug || !patch) {
+      sendError(res, 400, 'brandSlug and patch required');
+      return true;
+    }
+    try {
+      const { editTypography } = await import('./brand-workbench-service.js');
+      const result = editTypography(ctx.projectDir, brandSlug, patch);
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'design-system:updated' } as any);
+        emitEvent({ type: 'brand:edited', slug: brandSlug } as any);
+        emitEvent({ type: 'skill-context:ready', context: result.skillContext } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, skillContext: result.skillContext });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'edit-typography failed');
+    }
+    return true;
+  }
+
+  // ── Phase 4 Brief 4a — Components Workbench endpoints ─────
+  // POST /platform/api/workbench/components/extract
+  //   Body: { sceneId, nodeId, name, description? }
+  //   Wraps extractComponent op via service layer; returns slug + instanceId.
+  if (pathname === '/platform/api/workbench/components/extract' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const sceneId = String(body.sceneId || '').trim();
+    const nodeId = String(body.nodeId || '').trim();
+    const name = String(body.name || '').trim();
+    const description = body.description ? String(body.description) : undefined;
+    if (!sceneId || !nodeId || !name) {
+      sendError(res, 400, 'sceneId, nodeId, name required');
+      return true;
+    }
+    try {
+      const svc = await import('./components-workbench-service.js');
+      const result = await svc.extractFromSelection({
+        projectDir: ctx.projectDir, sceneId, nodeId, name, description,
+      });
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'component:extracted', slug: result.slug } as any);
+        emitEvent({ type: 'scene:tree-changed', sceneId } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, slug: result.slug, instanceId: result.instanceId });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'extract failed');
+    }
+    return true;
+  }
+
+  // POST /platform/api/workbench/components/instantiate
+  //   Body: { slug, sceneId, parentId? }
+  //   parentId defaults to scene rootId. Wraps instantiateComponent op.
+  if (pathname === '/platform/api/workbench/components/instantiate' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const slug = String(body.slug || '').trim();
+    const sceneId = String(body.sceneId || '').trim();
+    let parentId = body.parentId ? String(body.parentId) : '';
+    if (!slug || !sceneId) {
+      sendError(res, 400, 'slug, sceneId required');
+      return true;
+    }
+    if (!parentId) {
+      const store = await getStore();
+      const stored = store.getScene(sceneId);
+      if (!stored) { sendError(res, 404, 'scene not found'); return true; }
+      parentId = (stored as any).rootId || '';
+      if (!parentId) { sendError(res, 400, 'scene has no rootId'); return true; }
+    }
+    try {
+      const svc = await import('./components-workbench-service.js');
+      const result = await svc.instantiate({
+        projectDir: ctx.projectDir,
+        sceneId,
+        parentId,
+        componentSlug: slug,
+      });
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'component:instantiated', slug, sceneId } as any);
+        emitEvent({ type: 'scene:tree-changed', sceneId } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, instanceId: result.instanceId });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'instantiate failed');
+    }
+    return true;
+  }
+
+  // POST /platform/api/workbench/components/edit-instance
+  //   Body: { sceneId, nodeId, patch: Record<slot, override|null> }
+  //   null clears that slot back to master default.
+  if (pathname === '/platform/api/workbench/components/edit-instance' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const sceneId = String(body.sceneId || '').trim();
+    const nodeId = String(body.nodeId || '').trim();
+    const patch = body.patch && typeof body.patch === 'object' ? body.patch : null;
+    if (!sceneId || !nodeId || !patch) {
+      sendError(res, 400, 'sceneId, nodeId, patch required');
+      return true;
+    }
+    try {
+      const svc = await import('./components-workbench-service.js');
+      const result = await svc.editInstance({
+        projectDir: ctx.projectDir, sceneId, nodeId, patch,
+      });
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'component:instance-edited', sceneId, nodeId } as any);
+        emitEvent({ type: 'scene:tree-changed', sceneId } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, overrides: result.overrides });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'edit-instance failed');
+    }
+    return true;
+  }
+
+  // POST /platform/api/workbench/components/unlink
+  //   Body: { sceneId, nodeId }  — sever instance from master.
+  if (pathname === '/platform/api/workbench/components/unlink' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const sceneId = String(body.sceneId || '').trim();
+    const nodeId = String(body.nodeId || '').trim();
+    if (!sceneId || !nodeId) {
+      sendError(res, 400, 'sceneId, nodeId required');
+      return true;
+    }
+    try {
+      const svc = await import('./components-workbench-service.js');
+      await svc.unlinkInstance({ projectDir: ctx.projectDir, sceneId, nodeId });
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'scene:tree-changed', sceneId } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'unlink failed');
+    }
+    return true;
+  }
+
+  // POST /platform/api/workbench/components/delete
+  //   Body: { slug }  — delete master from disk. Caller responsible for
+  //   detaching instances via /unlink first; otherwise they become
+  //   "missing master" warnings on next expandInstances.
+  if (pathname === '/platform/api/workbench/components/delete' && req.method === 'POST') {
+    if (!ctx.projectDir) { sendError(res, 400, 'no project open'); return true; }
+    const body = await readJson(req);
+    const slug = String(body.slug || '').trim();
+    if (!slug) { sendError(res, 400, 'slug required'); return true; }
+    try {
+      const svc = await import('./components-workbench-service.js');
+      const removed = svc.deleteComponent(ctx.projectDir, slug);
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'component:deleted', slug } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, removed });
+    } catch (e: any) {
+      sendError(res, 400, e?.message ?? 'delete failed');
     }
     return true;
   }

@@ -218,6 +218,27 @@ export interface ResonanceOverlayPayload {
   matches: string[];
 }
 
+/** Free-vector — designer-drawn polyline that floats above the scene. Unlike
+ *  every other annotation kind, it has no semantic anchor — it lives in
+ *  viewport (or scene-relative) coordinate space and persists as part of the
+ *  scene. Phase 2 Brief 2b. */
+export interface FreeVectorPayload {
+  kind: 'free-vector';
+  /** Polyline points in iframe-doc coordinate space (matches the SVG overlay's
+   *  viewBox so a redraw at any zoom places strokes correctly). */
+  points: Array<{ x: number; y: number }>;
+  /** CSS hex / rgba stroke color. Default = brand accent at draw time. */
+  stroke: string;
+  /** Stroke width in px. */
+  width: number;
+  /** Opacity 0..1. */
+  opacity: number;
+  /** When true, points are rendered through a Catmull-Rom interpolation
+   *  emitting cubic-bezier path commands. When false, the path is a plain
+   *  polyline (M + L commands only). */
+  smooth: boolean;
+}
+
 export type AnnotationPayload =
   | CommentPayload
   | PinPayload
@@ -227,11 +248,13 @@ export type AnnotationPayload =
   | ReferencePayload
   | RulePayload
   | GhostProposalPayload
-  | ResonanceOverlayPayload;
+  | ResonanceOverlayPayload
+  | FreeVectorPayload;
 
 export const KNOWN_ANNOTATION_KINDS = new Set<AnnotationPayload['kind']>([
   'comment', 'pin', 'echo-arrow', 'region', 'brush-stroke',
   'reference', 'rule', 'ghost-proposal', 'resonance-overlay',
+  'free-vector',
 ]);
 
 // ─── The Annotation itself ──────────────────────────────────

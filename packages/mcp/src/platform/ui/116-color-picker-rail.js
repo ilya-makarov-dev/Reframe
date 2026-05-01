@@ -30,9 +30,18 @@
   var BRAND_PALETTE_INFLIGHT = {}; // slug → Promise
 
   function getActiveBrandSlug() {
-    // The Platform UI keeps the active brand slug on the project manifest
-    // (`window.__reframeProject.activeBrand` after StoreSync hydration).
-    // Falls back to localStorage which the dashboard switcher mirrors.
+    // Phase 3 Brief 3a Pin #8 — multi-brand UI fix per executor's Q2.
+    // Engine supports per-scene brand fully via StoredScene.brand. Until
+    // this fix the picker rail always read manifest.activeBrand globally
+    // and showed the wrong palette when scene's brand ≠ project default.
+    // Resolution order: scene's brand → project manifest → localStorage.
+    try {
+      if (window.__REFRAME_BOOT__ && window.__REFRAME_BOOT__.scenes) {
+        var activeId = (state && state.currentSession) || window.__REFRAME_BOOT__.activeSceneId;
+        var sceneBoot = activeId ? window.__REFRAME_BOOT__.scenes[activeId] : null;
+        if (sceneBoot && sceneBoot.brand) return String(sceneBoot.brand);
+      }
+    } catch (_) {}
     try {
       var p = window.__reframeProject || window.__REFRAME_BOOT__ && window.__REFRAME_BOOT__.project;
       if (p && (p.activeBrand || p.active_brand)) return String(p.activeBrand || p.active_brand);
@@ -276,7 +285,24 @@
     var hexInput = root.querySelector('.rfd-cp-hex');
     var hexError = root.querySelector('.rfd-cp-hex-error');
     var nativeInput = root.querySelector('.rfd-cp-native');
-    function commitHex(raw) {
+    // Phase 3 Brief 3c Pin #4 — auto-tokenRef inference. When the user
+    // types a hex that happens to match a brand role, re-couple it as a
+    // tokenBinding instead of leaving it decoupled (the UI-6a debt fix).
+    // Uses the workbench service's getRoleForHex helper via HTTP so the
+    // resolution is consistent across surfaces.
+    async function inferRoleForHex(hex) {
+      var brandSlug = getActiveBrandSlug();
+      if (!brandSlug || !hex) return null;
+      try {
+        var res = await fetch('/platform/api/workbench/role-for-hex?brandSlug=' +
+          encodeURIComponent(brandSlug) + '&hex=' + encodeURIComponent(hex));
+        if (!res.ok) return null;
+        var data = await res.json();
+        return data && typeof data.role === 'string' ? data.role : null;
+      } catch (_) { return null; }
+    }
+
+    async function commitHex(raw) {
       var v = normalizeHex(raw);
       if (!v) {
         if (hexError) hexError.style.display = '';
@@ -287,7 +313,11 @@
       patch[prop] = v;
       if (engineKey) {
         patch.tokenBindings = {};
-        patch.tokenBindings[engineKey] = null; // custom = unbind
+        // Auto-couple: hex matches a brand role → bind to that role
+        // so the next rebrand re-resolves it. No match → null (free-form,
+        // user-intent-preserved).
+        var role = await inferRoleForHex(v);
+        patch.tokenBindings[engineKey] = role;
       }
       try { onChange(patch); } catch (_) {}
       closeColorPickerRail();

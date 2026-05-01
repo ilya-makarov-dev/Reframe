@@ -6,6 +6,11 @@ allowed-tools:
   - "Read"
   - "Write"
   - "Edit"
+bus-context-types:
+  - site-intent
+bus-result-kinds:
+  - design-result
+bus-streaming: true
 ---
 
 # reframe-site-loop

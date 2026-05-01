@@ -71,26 +71,90 @@ export async function initPlatformViewport(): Promise<void> {
     ?? new URL(window.location.href).pathname.split('/').pop()
     ?? '';
 
-  // Variants URL param: `?variants=a,b,c` mounts a CompositionRenderer
-  // over pre-existing scene ids instead of a single DOMCanvas. The
-  // caller is responsible for having compiled those scenes beforehand;
-  // unknown scene ids render as empty iframes in their column (404 from
-  // /preview fetch is non-fatal — the column stays visible as a
-  // placeholder). Demo mode for Week 1 exit criteria.
+  // Variants URL param — two modes (Phase 4 Brief 4c Pin #1):
+  //   ?variants=a,b,c                   → CSV inline (legacy)
+  //   ?variants=<slug>                  → storage-backed
+  //
+  // Storage mode kicks in when the param value looks like a slug
+  // (`[a-z][a-z0-9-]*`, no commas) AND a stored spec exists at
+  // .reframe/variants/<slug>/variants.json. Otherwise we fall to CSV
+  // (preserves backward compat for `?variants=hero1,hero2,hero3` URLs
+  // that pre-date the variants storage engine).
+  //
+  // The other three composition kinds (flow / sampler / overlay)
+  // already dispatched storage-backed via their /api/<kind>/:id reads
+  // — only variants was URL-param-only before 4c.
   const urlParams = new URL(window.location.href).searchParams;
   const variantsParam = urlParams.get('variants');
-  const rawVariantIds = variantsParam
-    ? variantsParam.split(',').map((s) => s.trim()).filter(Boolean)
-    : [];
-  // Duplicate-id guard. `?variants=hero,hero,hero` (typo, bad paste, or
-  // naive attack) would, without this, register two canvases under the
-  // same hostId — registry.ts warns and the second mount clobbers the
-  // first, orphaning iframes and leaking listeners. Same class of bug
-  // we throw on in variants-compile (compile.variants.duplicate_name).
-  // Dedupe + warn here instead of throw — URL params are user-typed, not
-  // API calls; a soft fallback beats a hard crash on a typo.
-  const variantSceneIds = Array.from(new Set(rawVariantIds));
-  if (variantSceneIds.length !== rawVariantIds.length) {
+  const SLUG_RE = /^[a-z][a-z0-9-]*$/;
+  let storedVariantIds: string[] = [];
+  let storedVariantsLabels: string[] | undefined = undefined;
+  if (variantsParam && SLUG_RE.test(variantsParam)) {
+    try {
+      const resp = await fetch(`/platform/api/variants/${encodeURIComponent(variantsParam)}`);
+      if (resp.ok) {
+        const { spec } = await resp.json() as { spec: {
+          variantsId: string;
+          sceneId: string;
+          axes: Array<{ name: string; values: string[] }>;
+          grid?: { columns?: number; rows?: number };
+        } };
+        if (spec?.sceneId && Array.isArray(spec.axes) && spec.axes.length > 0) {
+          // Expand the Cartesian product of axes к cell count. Each
+          // cell renders the same base scene; per-cell axis-driven
+          // re-rendering is a future hop (would require variant scene
+          // compilation per cell — out of scope for the dispatch fix).
+          const cellCount = spec.axes.reduce(
+            (acc, a) => acc * Math.max(1, a.values.length),
+            1,
+          );
+          storedVariantIds = Array.from({ length: cellCount }, () => spec.sceneId);
+          // Build per-cell labels from axis values. cell N carries one
+          // value from each axis — straight Cartesian unroll.
+          const labels: string[] = [];
+          const recurse = (idx: number, acc: string[]): void => {
+            if (idx >= spec.axes.length) {
+              labels.push(acc.join(' · '));
+              return;
+            }
+            for (const v of spec.axes[idx].values) {
+              acc.push(`${spec.axes[idx].name}=${v}`);
+              recurse(idx + 1, acc);
+              acc.pop();
+            }
+          };
+          recurse(0, []);
+          storedVariantsLabels = labels;
+        }
+      }
+    } catch (err) {
+      console.warn(`[platform-bootstrap] storage-backed variants fetch failed for "${variantsParam}" — falling through к CSV`, err);
+    }
+  }
+  // Fall to CSV when storage-backed mode didn't yield anything (slug
+  // didn't match, file missing, or fetch error).
+  const rawVariantIds = storedVariantIds.length > 0
+    ? storedVariantIds
+    : (variantsParam
+        ? variantsParam.split(',').map((s) => s.trim()).filter(Boolean)
+        : []);
+  // Duplicate-id guard for the CSV path. `?variants=hero,hero,hero`
+  // (typo, bad paste, or naive attack) would otherwise register two
+  // canvases under the same hostId — registry.ts warns and the second
+  // mount clobbers the first, orphaning iframes and leaking listeners.
+  //
+  // Storage-backed mode legitimately repeats one base scene across the
+  // Cartesian product of axes; we keep variantSceneIds as the actual
+  // base ids (so iframes load `/preview/<baseId>`) and pass synthesised
+  // unique hostIds in parallel via variantHostIds. Skip dedupe in that
+  // case.
+  const variantSceneIds = storedVariantIds.length > 0
+    ? rawVariantIds
+    : Array.from(new Set(rawVariantIds));
+  const variantHostIds = storedVariantIds.length > 0
+    ? rawVariantIds.map((id, i) => `${id}#cell-${i}`)
+    : undefined;
+  if (storedVariantIds.length === 0 && variantSceneIds.length !== rawVariantIds.length) {
     console.warn(
       '[platform-bootstrap] ?variants contained duplicate sceneIds; deduped to ' +
       JSON.stringify(variantSceneIds),
@@ -260,14 +324,15 @@ export async function initPlatformViewport(): Promise<void> {
 
   if (variantSceneIds.length >= 2) {
     // Variants mode — mount N full DOMCanvases via CompositionRenderer.
-    // Labels default to the sceneIds themselves; host can override via
-    // future query param or page data-attribute.
+    // Storage-backed mode supplies axis-derived labels; CSV mode falls
+    // back to displaying the sceneId.
     compositionHandle = mountCompositionRenderer({
       host: container,
       composition: {
         kind: 'variants',
         sceneIds: variantSceneIds,
-        labels: variantSceneIds.map((id) => id),
+        hostIds: variantHostIds,
+        labels: storedVariantsLabels ?? variantSceneIds.map((id) => id),
       },
       onCanvasSelect: (_sceneId, ids) => {
         // Only forward selection from the currently-focused variant to

@@ -300,6 +300,286 @@
     flash('Use the timeline scrubber in the bottom bar');
   }
 
+  // ── Pen verb — free-vector drawing on top of canvas ──────────
+  //
+  // Phase 2 Brief 2b. Unlike the other verbs, Pen is anchor-free —
+  // the stroke floats above the scene at iframe-doc coordinates and is
+  // committed as a free-vector annotation. Activation paths:
+  //   1. Toolbar Pen button (#btn-pen)
+  //   2. Context-menu "Draw on top"
+  //   3. Pen verb in the chip bar (when a node is selected)
+  // All three call enterPenMode().
+  //
+  // While active, a glass style panel hangs off the top-right of the
+  // viewport showing color / width / opacity / smooth controls. Style
+  // state is persisted in localStorage (key 'reframe-pen-style') so the
+  // designer's last choice survives across sessions.
+
+  var PEN_STORAGE_KEY = 'reframe-pen-style';
+  var PEN_DEFAULT_STYLE = {
+    stroke: '#2b74ff',
+    width: 2,
+    opacity: 1,
+    smooth: true,
+  };
+  var PEN_PALETTE = ['#2b74ff', '#16a34a', '#dc2626', '#f59e0b', '#111111'];
+  var PEN_SAMPLE_DISTANCE = 4; // px in iframe-doc space
+
+  function loadPenStyle() {
+    try {
+      var raw = window.localStorage && window.localStorage.getItem(PEN_STORAGE_KEY);
+      if (!raw) return Object.assign({}, PEN_DEFAULT_STYLE);
+      var parsed = JSON.parse(raw);
+      return {
+        stroke: typeof parsed.stroke === 'string' ? parsed.stroke : PEN_DEFAULT_STYLE.stroke,
+        width:  typeof parsed.width  === 'number' ? parsed.width  : PEN_DEFAULT_STYLE.width,
+        opacity: typeof parsed.opacity === 'number' ? parsed.opacity : PEN_DEFAULT_STYLE.opacity,
+        smooth: typeof parsed.smooth === 'boolean' ? parsed.smooth : PEN_DEFAULT_STYLE.smooth,
+      };
+    } catch (_) { return Object.assign({}, PEN_DEFAULT_STYLE); }
+  }
+
+  function savePenStyle(style) {
+    try {
+      window.localStorage && window.localStorage.setItem(PEN_STORAGE_KEY, JSON.stringify(style));
+    } catch (_) {}
+  }
+
+  function enterPenMode() {
+    if (state.mode && state.mode.kind === 'pen') return;
+    var style = loadPenStyle();
+    enterMode({ kind: 'pen', style: style, drawing: false, points: [] });
+    showPenPanel(style);
+    activatePenCapture();
+    var btn = $('#btn-pen');
+    if (btn) btn.classList.add('active');
+  }
+
+  function exitPenMode() {
+    closePenPanel();
+    deactivatePenCapture();
+    var btn = $('#btn-pen');
+    if (btn) btn.classList.remove('active');
+  }
+
+  function togglePenMode() {
+    if (state.mode && state.mode.kind === 'pen') {
+      exitMode();
+    } else {
+      enterPenMode();
+    }
+  }
+
+  function showPenPanel(style) {
+    closePenPanel();
+    var swatchHtml = PEN_PALETTE.map(function(c) {
+      var active = c.toLowerCase() === String(style.stroke).toLowerCase();
+      return '<button class="pen-swatch' + (active ? ' active' : '') + '" data-pen-color="' + escape(c) + '" style="background:' + escape(c) + '" title="' + escape(c) + '"></button>';
+    }).join('');
+    var html =
+      '<div class="pen-panel" data-pen-panel>' +
+        '<div class="pen-panel-head">' +
+          '<span class="pen-panel-title">Pen ▸ Draw on canvas</span>' +
+          '<button class="pen-panel-close" data-pen-action="close" title="Close (Esc)">×</button>' +
+        '</div>' +
+        '<div class="pen-row">' +
+          '<label>Color</label>' +
+          '<div class="pen-swatches">' + swatchHtml +
+            '<input class="pen-color-custom" type="color" data-pen-field="stroke" value="' + escape(style.stroke) + '" title="Custom color">' +
+          '</div>' +
+        '</div>' +
+        '<div class="pen-row">' +
+          '<label>Width</label>' +
+          '<input type="range" min="1" max="8" step="0.5" data-pen-field="width" value="' + style.width + '">' +
+          '<span class="pen-val" data-pen-display="width">' + style.width + 'px</span>' +
+        '</div>' +
+        '<div class="pen-row">' +
+          '<label>Opacity</label>' +
+          '<input type="range" min="0.1" max="1" step="0.05" data-pen-field="opacity" value="' + style.opacity + '">' +
+          '<span class="pen-val" data-pen-display="opacity">' + style.opacity.toFixed(2) + '</span>' +
+        '</div>' +
+        '<div class="pen-row">' +
+          '<label class="pen-check"><input type="checkbox" data-pen-field="smooth"' + (style.smooth ? ' checked' : '') + '> Smooth curves</label>' +
+        '</div>' +
+        '<div class="pen-foot">Esc to cancel · drag to draw</div>' +
+      '</div>';
+    var wrap = document.createElement('div');
+    wrap.innerHTML = html;
+    var node = wrap.firstChild;
+    document.body.appendChild(node);
+    bindPenPanel(node);
+  }
+
+  function closePenPanel() {
+    var existing = $('[data-pen-panel]');
+    if (existing) existing.remove();
+  }
+
+  function bindPenPanel(panel) {
+    panel.addEventListener('click', function(e) {
+      var btn = e.target.closest('[data-pen-action="close"]');
+      if (btn) { exitMode(); return; }
+      var sw = e.target.closest('[data-pen-color]');
+      if (sw) {
+        var color = sw.getAttribute('data-pen-color');
+        if (state.mode && state.mode.kind === 'pen') {
+          state.mode.style.stroke = color;
+          savePenStyle(state.mode.style);
+          panel.querySelectorAll('[data-pen-color]').forEach(function(s) { s.classList.remove('active'); });
+          sw.classList.add('active');
+          var custom = panel.querySelector('[data-pen-field="stroke"]');
+          if (custom) custom.value = color;
+        }
+      }
+    });
+    panel.addEventListener('input', function(e) {
+      var t = e.target;
+      var field = t.getAttribute && t.getAttribute('data-pen-field');
+      if (!field || !state.mode || state.mode.kind !== 'pen') return;
+      if (field === 'stroke') {
+        state.mode.style.stroke = t.value;
+        panel.querySelectorAll('[data-pen-color]').forEach(function(s) {
+          s.classList.toggle('active', String(s.getAttribute('data-pen-color')).toLowerCase() === String(t.value).toLowerCase());
+        });
+      } else if (field === 'width') {
+        state.mode.style.width = Number(t.value);
+        var dw = panel.querySelector('[data-pen-display="width"]');
+        if (dw) dw.textContent = t.value + 'px';
+      } else if (field === 'opacity') {
+        state.mode.style.opacity = Number(t.value);
+        var dop = panel.querySelector('[data-pen-display="opacity"]');
+        if (dop) dop.textContent = Number(t.value).toFixed(2);
+      } else if (field === 'smooth') {
+        state.mode.style.smooth = !!t.checked;
+      }
+      savePenStyle(state.mode.style);
+    });
+  }
+
+  // Drawing capture overlay — sibling DIV layered on top of the
+  // existing SVG annotation overlay. Captures pointer events at parent
+  // layer (NOT inside iframe), translates to iframe-doc coords via the
+  // same SVG viewBox math the annotations layer uses.
+  var _penCaptureBindings = null;
+  function activatePenCapture() {
+    deactivatePenCapture();
+    var svg = $('.viewport-frame .annotations');
+    var frame = $('.viewport-frame');
+    if (!svg || !frame) return;
+    svg.classList.add('pen-active');
+    frame.classList.add('pen-active');
+
+    function onDown(e) {
+      if (!state.mode || state.mode.kind !== 'pen') return;
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var pt = svgCoordsFromEvent(e);
+      state.mode.drawing = true;
+      state.mode.points = [pt];
+      renderPenPreview();
+      svg.setPointerCapture && svg.setPointerCapture(e.pointerId);
+    }
+    function onMove(e) {
+      if (!state.mode || state.mode.kind !== 'pen' || !state.mode.drawing) return;
+      var pt = svgCoordsFromEvent(e);
+      var pts = state.mode.points;
+      var last = pts[pts.length - 1];
+      var dx = pt.x - last.x, dy = pt.y - last.y;
+      if (dx * dx + dy * dy < PEN_SAMPLE_DISTANCE * PEN_SAMPLE_DISTANCE) return;
+      pts.push(pt);
+      renderPenPreview();
+    }
+    async function onUp(e) {
+      if (!state.mode || state.mode.kind !== 'pen' || !state.mode.drawing) return;
+      state.mode.drawing = false;
+      var pts = state.mode.points || [];
+      state.mode.points = [];
+      clearPenPreview();
+      if (pts.length < 2) return;
+      var style = state.mode.style;
+      try {
+        await submitGesture({
+          kind: 'free-vector',
+          at: new Date().toISOString(),
+          sceneSlug: state.currentSceneSlug,
+          author: { kind: 'human', id: 'platform-ui' },
+          points: pts,
+          stroke: style.stroke,
+          width: style.width,
+          opacity: style.opacity,
+          smooth: style.smooth,
+        });
+        refreshAnnotations();
+      } catch (_) {}
+    }
+
+    svg.addEventListener('pointerdown', onDown);
+    svg.addEventListener('pointermove', onMove);
+    svg.addEventListener('pointerup', onUp);
+    svg.addEventListener('pointercancel', onUp);
+    _penCaptureBindings = { svg: svg, onDown: onDown, onMove: onMove, onUp: onUp };
+  }
+
+  function deactivatePenCapture() {
+    var svg = $('.viewport-frame .annotations');
+    var frame = $('.viewport-frame');
+    if (svg) svg.classList.remove('pen-active');
+    if (frame) frame.classList.remove('pen-active');
+    if (_penCaptureBindings) {
+      var b = _penCaptureBindings;
+      b.svg.removeEventListener('pointerdown', b.onDown);
+      b.svg.removeEventListener('pointermove', b.onMove);
+      b.svg.removeEventListener('pointerup', b.onUp);
+      b.svg.removeEventListener('pointercancel', b.onUp);
+      _penCaptureBindings = null;
+    }
+    clearPenPreview();
+  }
+
+  function renderPenPreview() {
+    if (!state.mode || state.mode.kind !== 'pen') return;
+    var svgGroup = $('.annotation-marks-svg');
+    if (!svgGroup) return;
+    var existing = svgGroup.querySelector('.pen-preview-path');
+    var pts = state.mode.points || [];
+    if (pts.length === 0) {
+      if (existing) existing.remove();
+      return;
+    }
+    var style = state.mode.style;
+    var d = pointsToPath(pts, !!style.smooth);
+    if (!existing) {
+      svgGroup.insertAdjacentHTML('beforeend',
+        '<path class="pen-preview-path" d="' + d + '" ' +
+          'stroke="' + escape(style.stroke) + '" stroke-width="' + style.width + '" ' +
+          'stroke-opacity="' + style.opacity + '" ' +
+          'fill="none" stroke-linecap="round" stroke-linejoin="round" />');
+    } else {
+      existing.setAttribute('d', d);
+      existing.setAttribute('stroke', style.stroke);
+      existing.setAttribute('stroke-width', style.width);
+      existing.setAttribute('stroke-opacity', style.opacity);
+    }
+  }
+
+  function clearPenPreview() {
+    var svgGroup = $('.annotation-marks-svg');
+    if (!svgGroup) return;
+    var existing = svgGroup.querySelector('.pen-preview-path');
+    if (existing) existing.remove();
+  }
+
+  function bindPenToolbarButton() {
+    var btn = $('#btn-pen');
+    if (!btn || btn.__penBound) return;
+    btn.__penBound = true;
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      togglePenMode();
+    });
+  }
+
   // ── Submode state machine ────────────────────────────
   // Modes are entered via chip click (or keyboard) and drive subsequent
   // clicks on the preview until a completion condition fires (second
@@ -318,6 +598,7 @@
   }
 
   function exitMode(reason) {
+    var prev = state.mode;
     state.mode = null;
     hideBanner();
     // Clean up any in-progress gesture artifacts.
@@ -333,6 +614,10 @@
     // Hide resonance panel if we were in that mode.
     const resoPanel = $('.resonance-panel');
     if (resoPanel) resoPanel.remove();
+    // Pen mode tear-down — close panel, drop capture bindings, clear preview.
+    if (prev && prev.kind === 'pen') {
+      exitPenMode();
+    }
     if (reason === 'cancelled') flash('Cancelled', 'error');
   }
 
@@ -379,6 +664,9 @@
       }
       case 're-anchor': {
         return '<span class="label">Re-anchor</span><span class="hint">Click a new anchor node</span><span class="counter">Esc to cancel</span>';
+      }
+      case 'pen': {
+        return '<span class="label">Pen</span><span class="hint">Drag to draw</span><span class="counter">Esc to exit</span>';
       }
       default:
         return '<span class="label">Mode</span>';

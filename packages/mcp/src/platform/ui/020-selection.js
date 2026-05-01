@@ -120,6 +120,13 @@
   }
 
   async function handleContextAction(action) {
+    // Pen draw is anchor-free — the only context action that works without
+    // a selection. Handle before the selection guard.
+    if (action === 'pen-draw') {
+      if (typeof togglePenMode === 'function') togglePenMode();
+      return;
+    }
+
     var frame = $('.viewport-frame');
     var sessionId = frame ? frame.getAttribute('data-session') : null;
     var nodeId = state.selection.inode;
@@ -161,7 +168,38 @@
         break;
       }
       case 'extract': {
-        flash('Extract component: use reframe_project extract_component via AI');
+        // Phase 4 Brief 4a Pin #6 — wire context-menu Extract action
+        // through workbench service. Designer prompts for a component
+        // name; subtree is saved as master + replaced with INSTANCE
+        // placeholder; redirects к workbench page on success so the
+        // designer sees the new entry in the catalog.
+        var name = window.prompt('Component name (e.g. PrimaryButton)');
+        if (!name) break;
+        try {
+          var res = await api('/platform/api/workbench/components/extract', {
+            sceneId: sessionId,
+            nodeId: nodeId,
+            name: name,
+          });
+          if (res.ok) {
+            flash('Extracted as ' + res.slug, 'success');
+            refreshLayersTree();
+            // Open the workbench page focused on the new component so the
+            // designer can verify slots / instances / preview.
+            window.open('/platform/workbench/components?slug=' +
+              encodeURIComponent(res.slug), '_blank');
+          }
+        } catch (err) {
+          flash('Extract failed: ' + ((err && err.message) || 'unknown'), 'error');
+        }
+        break;
+      }
+      case 'insert-component': {
+        // Phase 4 Brief 4a Pin #7 — Insert component flow from context
+        // menu. Opens the workbench catalog в новом tab; full picker UI
+        // (mini catalog over canvas) lands в Phase 4d alongside skill-bus
+        // so designers don't context-switch tabs for every insert.
+        window.open('/platform/workbench/components', '_blank');
         break;
       }
       case 'add-frame': {

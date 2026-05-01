@@ -24,7 +24,9 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type { PlatformContext } from '../router.js';
 import {
   readOverlaySpec,
+  writeOverlaySpec,
   loadBaseScene,
+  type OverlaySpec,
 } from '../../../../core/src/project/overlay-store.js';
 import { serializeGraph } from '../../../../core/src/serialize.js';
 import { ALL_LAYERS_BROWSER_SOURCE } from '../../../../core/src/engine/overlay-layers/index.js';
@@ -33,6 +35,19 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(body));
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c as Buffer));
+    req.on('end', () => {
+      if (chunks.length === 0) return resolve({});
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8'))); }
+      catch { resolve({}); }
+    });
+    req.on('error', () => resolve({}));
+  });
 }
 
 function parseOverlayPath(pathname: string): { overlayId: string; sub: string | null } | null {
@@ -47,6 +62,58 @@ export async function handleOverlayApi(
   ctx: PlatformContext,
 ): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'http://localhost');
+
+  // POST /platform/api/overlay — create/update spec (Phase 4 Brief 4c
+  // Pin #3 wizard write target). Body carries overlayId + baseSceneId
+  // + layers[]. Engine cap: max 3 layers per overlay.
+  if (url.pathname === '/platform/api/overlay' && req.method === 'POST') {
+    if (!ctx.projectDir) {
+      sendJson(res, 400, { ok: false, error: 'no project open' });
+      return true;
+    }
+    const body = await readJsonBody(req);
+    const overlayId = String(body.overlayId || '').trim();
+    if (!/^[a-z][a-z0-9-]*$/.test(overlayId)) {
+      sendJson(res, 400, { ok: false, error: 'invalid overlayId — lowercase + dash, must start with letter' });
+      return true;
+    }
+    const baseSceneId = String(body.baseSceneId || '').trim();
+    if (!baseSceneId) {
+      sendJson(res, 400, { ok: false, error: 'baseSceneId required' });
+      return true;
+    }
+    const layers = Array.isArray(body.layers) ? body.layers : [];
+    if (layers.length === 0) {
+      sendJson(res, 400, { ok: false, error: 'layers[] requires ≥1 entry' });
+      return true;
+    }
+    if (layers.length > 3) {
+      sendJson(res, 400, { ok: false, error: 'engine cap: max 3 layers per overlay' });
+      return true;
+    }
+    const now = new Date().toISOString();
+    const existing = readOverlaySpec(ctx.projectDir, overlayId);
+    const spec: OverlaySpec = {
+      overlayId,
+      name: body.name ? String(body.name) : (existing?.name ?? overlayId),
+      baseSceneId,
+      layers,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    try {
+      writeOverlaySpec(ctx.projectDir, spec);
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'composition:created:overlay', overlayId } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, spec });
+    } catch (e: any) {
+      sendJson(res, 400, { ok: false, error: e?.message ?? 'write failed' });
+    }
+    return true;
+  }
+
   const parsed = parseOverlayPath(url.pathname);
   if (!parsed) return false;
   const { overlayId, sub } = parsed;

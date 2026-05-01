@@ -466,6 +466,89 @@ export function registerBrand(
   return entry;
 }
 
+/**
+ * Phase 3 Brief 3d Pin #4 — clone a brand to a new slug.
+ *
+ * Reads .reframe/brands/<sourceSlug>/DESIGN.md, writes it byte-identical
+ * to .reframe/brands/<newSlug>/DESIGN.md, optionally copies the marks/
+ * directory (defaults to true), registers the new slug in the project
+ * manifest. The cloned brand becomes a first-class catalog entry — every
+ * 3b/3c edit flow (token/vocab/typography editors) operates on it
+ * without further wiring because they all dispatch via the brand slug.
+ *
+ * Validation:
+ *   - newSlug matches /^[a-z][a-z0-9-]*$/ (manifest path safety + URL safe)
+ *   - newSlug must not already be registered
+ *   - sourceSlug must exist on disk OR in the manifest
+ *
+ * Returns { ok: true, entry } on success, { ok: false, error } on any
+ * validation or I/O failure. Does NOT throw — caller decides response.
+ */
+export function cloneBrand(
+  projectDir: string,
+  sourceSlug: string,
+  newSlug: string,
+  options?: { copyMarks?: boolean; setActive?: boolean },
+): { ok: true; entry: BrandRegistryEntry } | { ok: false; error: string } {
+  if (!/^[a-z][a-z0-9-]*$/.test(newSlug)) {
+    return { ok: false, error: 'invalid newSlug: must match /^[a-z][a-z0-9-]*$/' };
+  }
+  if (sourceSlug === newSlug) {
+    return { ok: false, error: 'sourceSlug and newSlug must differ' };
+  }
+  const manifest = loadProject(projectDir);
+  if (manifest.brands?.[newSlug]) {
+    return { ok: false, error: `brand "${newSlug}" already exists` };
+  }
+  const sourceDir = path.join(reframeDir(projectDir), 'brands', sourceSlug);
+  const sourceMd = path.join(sourceDir, 'DESIGN.md');
+  if (!fs.existsSync(sourceMd)) {
+    return { ok: false, error: `source brand "${sourceSlug}" not found at ${sourceMd}` };
+  }
+  let content: string;
+  try {
+    content = fs.readFileSync(sourceMd, 'utf-8');
+  } catch (err: any) {
+    return { ok: false, error: `read failed: ${err?.message ?? err}` };
+  }
+
+  // registerBrand handles target dir creation + manifest write. setActive
+  // defaults to false here — cloning shouldn't disrupt the designer's
+  // current active-brand context. Caller can opt in.
+  let entry: BrandRegistryEntry;
+  try {
+    entry = registerBrand(projectDir, newSlug, content, {
+      setActive: options?.setActive === true,
+    });
+  } catch (err: any) {
+    return { ok: false, error: `registerBrand failed: ${err?.message ?? err}` };
+  }
+
+  // Marks dir copy (default ON). The new brand inherits the source's
+  // logos so the catalog card + workbench Brand Mark section show the
+  // right artwork from turn 1; designer can replace any variant after.
+  const copyMarks = options?.copyMarks !== false;
+  if (copyMarks) {
+    const sourceMarks = path.join(sourceDir, 'marks');
+    if (fs.existsSync(sourceMarks)) {
+      const destMarks = path.join(reframeDir(projectDir), 'brands', newSlug, 'marks');
+      try {
+        fs.mkdirSync(destMarks, { recursive: true });
+        for (const file of fs.readdirSync(sourceMarks)) {
+          if (!file.endsWith('.svg')) continue;
+          fs.copyFileSync(path.join(sourceMarks, file), path.join(destMarks, file));
+        }
+      } catch (err: any) {
+        // Marks copy is non-fatal — brand registration already succeeded.
+        // Caller can re-upload later. Surface the partial success.
+        return { ok: false, error: `marks copy failed (brand registered): ${err?.message ?? err}` };
+      }
+    }
+  }
+
+  return { ok: true, entry };
+}
+
 /** Read a registered brand's DESIGN.md. Returns null if not registered. */
 export function loadBrandFromProject(
   projectDir: string,

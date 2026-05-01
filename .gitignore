@@ -33,6 +33,9 @@ yarn-error.log*
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+# Draft skill — not ready to ship publicly. Iterate locally,
+# add to allowlist when product-lead methodology matures.
+.claude/skills/reframe-product-lead/
 *.swp
 *.swo
 *~
@@ -108,7 +111,40 @@ packages/studio/
 # /intents, /annotations, /threads, /snapshots, design.md, etc.
 # Nothing in here is source of truth — it's all derived from the
 # package source + user actions.
-.reframe/
+#
+# Pattern note: `.reframe/*` (not `.reframe/`) so the directory is
+# traversable and the negations below can re-include specific
+# subdirectories. With `.reframe/` git skips the dir entirely and
+# any `!.reframe/...` pattern is silently ignored.
+.reframe/*
+# Exception: 5 visual directions ship as seed brands for the no-brand
+# vague-brief case. They're source content, not user-generated cache.
+# Loaded via reframe_design action=extract brand=<id> like any catalog
+# brand. Adapted from open-design (Apache-2.0); see NOTICE for chain.
+!.reframe/brands/
+.reframe/brands/*
+!.reframe/brands/editorial-monocle/
+!.reframe/brands/editorial-monocle/**
+!.reframe/brands/modern-minimal/
+!.reframe/brands/modern-minimal/**
+!.reframe/brands/warm-soft/
+!.reframe/brands/warm-soft/**
+!.reframe/brands/tech-utility/
+!.reframe/brands/tech-utility/**
+!.reframe/brands/brutalist-experimental/
+!.reframe/brands/brutalist-experimental/**
+
+# ─── reframe QA / retro probe dumps ─────────────────────
+# Agent's ad-hoc probe scripts (.ts), bundle dumps (.html), and
+# screenshot artifacts (.png) used during retro-batch sweeps and
+# designer-qa investigations. Disposable, regenerated per session,
+# never source of truth.
+.reframe-probe/
+
+# ─── Research workspace ─────────────────────────────────
+# Coordinator + research-agent outputs. Audit notes, surveys,
+# whatever we looked at. Workspace, not source of truth.
+.research/
 
 # MCP config lives in the repo at .mcp.json — committed so Claude Code /
 # Cursor / any MCP client picks up reframe automatically on clone. The

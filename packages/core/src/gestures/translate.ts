@@ -31,6 +31,7 @@ import type {
   PinGesture,
   RuleGesture,
   TimeScrubGesture,
+  FreeVectorGesture,
 } from './types.js';
 
 export interface TranslatedGesture {
@@ -64,6 +65,7 @@ export function translateGesture(g: Gesture): TranslatedGesture | null {
     case 'pin':        return translatePin(g);
     case 'rule':       return translateRule(g);
     case 'time-scrub': return translateTimeScrub(g);
+    case 'free-vector': return translateFreeVector(g);
   }
 }
 
@@ -282,6 +284,27 @@ function translateRule(g: RuleGesture): TranslatedGesture {
     },
     intentParts,
     threadTitle: `rule: ${g.rule}`,
+  };
+}
+
+function translateFreeVector(g: FreeVectorGesture): TranslatedGesture {
+  // Free-vector floats above the scene without anchoring to any node, so it
+  // hangs off a scene-level pseudo-anchor. Threading is still ensured by the
+  // gesture-API caller — the resulting thread groups any further conversation
+  // about the stroke (replies, edits) under the same scene anchor.
+  return {
+    anchor: `scene:${g.sceneSlug}`,
+    sceneSlug: g.sceneSlug,
+    author: author(g),
+    annotation: {
+      kind: 'free-vector',
+      points: g.points,
+      stroke: g.stroke,
+      width: g.width,
+      opacity: g.opacity,
+      smooth: g.smooth,
+    },
+    threadTitle: `pen stroke (${g.points.length} pts)`,
   };
 }
 

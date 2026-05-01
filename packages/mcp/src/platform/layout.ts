@@ -647,10 +647,24 @@ export function renderMacroDropdowns(): string {
       </button>
     </div>`;
 
+  // Pen — direct-action toggle (no dropdown). Sits with Detach because the
+  // pen tool, like detach, is a primary canvas-side mutation users reach for
+  // independently of node selection. Click toggles pen mode on/off; while on
+  // a glass style panel hangs off the canvas and drag captures a polyline
+  // committed as a free-vector annotation.
+  const penBtn = `
+    <div class="macro-group">
+      <button class="macro-btn" id="btn-pen" data-pen-toggle title="Pen — draw free-vector annotations on top of the canvas. Esc to exit.">
+        <span class="macro-icon">✎</span>
+        <span>Pen</span>
+      </button>
+    </div>`;
+
   return `<div class="macro-dropdowns" data-macro-dropdowns>
     ${makeDropdown('generate', '✨', 'Generate', generateMenu)}
     ${makeDropdown('modify',   '✎',  'Modify',   modifyMenu)}
     ${detachBtn}
+    ${penBtn}
     ${makeDropdown('preview',  '👁', 'Preview',  previewMenu)}
     ${makeDropdown('more',     '⋯',  'More',     moreMenu)}
   </div>`;

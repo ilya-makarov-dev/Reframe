@@ -17,10 +17,25 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type { PlatformContext } from '../router.js';
 import {
   readSamplerSpec,
+  writeSamplerSpec,
   loadCellScenes,
+  type SamplerSpec,
 } from '../../../../core/src/project/sampler-store.js';
 import { serializeGraph } from '../../../../core/src/serialize.js';
 import { exportSceneGraphToSvg } from '../../../../core/src/exporters/svg.js';
+
+function readBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c as Buffer));
+    req.on('end', () => {
+      if (chunks.length === 0) return resolve({});
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8'))); }
+      catch { resolve({}); }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
@@ -58,6 +73,44 @@ export async function handleSamplerApi(
       return true;
     }
     sendJson(res, 200, { ok: true, spec });
+    return true;
+  }
+
+  // POST /platform/api/sampler/:samplerId — create/update spec
+  // (Phase 4 Brief 4b Pin #4: sampler wizard write target).
+  if (req.method === 'POST' && sub === null) {
+    const body = await readBody(req);
+    if (!/^[a-z][a-z0-9\-]*$/.test(samplerId)) {
+      sendJson(res, 400, { ok: false, error: 'invalid samplerId — lowercase + dash only, must start with letter' });
+      return true;
+    }
+    const cellSceneIds = Array.isArray(body.cellSceneIds) ? body.cellSceneIds.map(String) : [];
+    if (cellSceneIds.length === 0) {
+      sendJson(res, 400, { ok: false, error: 'cellSceneIds required (non-empty)' });
+      return true;
+    }
+    const grid = body.grid && typeof body.grid === 'object' ? body.grid : { columns: cellSceneIds.length };
+    const now = new Date().toISOString();
+    const existing = readSamplerSpec(projectDir, samplerId);
+    const spec: SamplerSpec = {
+      samplerId,
+      name: body.name ? String(body.name) : existing?.name,
+      sharedBrand: body.sharedBrand ? String(body.sharedBrand) : existing?.sharedBrand,
+      cellSceneIds,
+      grid,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    try {
+      writeSamplerSpec(projectDir, spec);
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'composition:created:sampler', samplerId } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, spec });
+    } catch (e: any) {
+      sendJson(res, 400, { ok: false, error: e?.message ?? 'write failed' });
+    }
     return true;
   }
 

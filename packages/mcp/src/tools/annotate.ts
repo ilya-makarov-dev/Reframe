@@ -276,6 +276,7 @@ function describePayload(p: AnnotationPayload): string {
     case 'rule':              return `rule "${p.rule}" enforced=${p.enforced}${p.value !== undefined ? ` value=${JSON.stringify(p.value)}` : ''}`;
     case 'ghost-proposal':    return `ghost intent=${p.intentId} "${p.summary}"`;
     case 'resonance-overlay': return `resonance seed=${p.seed} axes=[${p.axes.join(',')}] matches=${p.matches.length}`;
+    case 'free-vector':       return `free-vector points=${p.points.length} stroke=${p.stroke} width=${p.width} smooth=${p.smooth}`;
   }
 }
 
@@ -290,6 +291,7 @@ function deriveThreadTitle(payload: AnnotationPayload): string {
     case 'rule':              return `rule: ${payload.rule}`;
     case 'ghost-proposal':    return payload.summary.slice(0, 60);
     case 'resonance-overlay': return `resonance (${payload.matches.length} matches)`;
+    case 'free-vector':       return `pen stroke (${payload.points.length} pts)`;
   }
 }
 

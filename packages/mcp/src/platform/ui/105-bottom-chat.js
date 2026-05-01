@@ -325,8 +325,23 @@
       // health probe resolves (project-page path). Without the fallback
       // the agent lost the brand chip on every project session and the
       // [Scope: …] prefix went out to the LLM without the active brand.
-      var brandLabel = document.querySelector('[data-brand-picker-label]');
-      var brandText = brandLabel ? (brandLabel.textContent || '').trim() : '';
+      // Phase 3 Brief 3a Pin #8 — read scene's brand first (StoredScene.brand
+      // via boot payload). Falls back to global brand picker label which
+      // tracks manifest.activeBrand. This fixes the multi-brand UI bug
+      // surfaced in executor's Q2 — picker chip used to lie about which
+      // brand the agent was scoping against on per-scene-brand setups.
+      var brandText = '';
+      try {
+        if (window.__REFRAME_BOOT__ && window.__REFRAME_BOOT__.scenes) {
+          var activeId = (state && state.currentSession) || window.__REFRAME_BOOT__.activeSceneId;
+          var sceneBoot = activeId ? window.__REFRAME_BOOT__.scenes[activeId] : null;
+          if (sceneBoot && sceneBoot.brand) brandText = String(sceneBoot.brand).trim();
+        }
+      } catch (_) {}
+      if (!brandText) {
+        var brandLabel = document.querySelector('[data-brand-picker-label]');
+        brandText = brandLabel ? (brandLabel.textContent || '').trim() : '';
+      }
       if (!brandText || brandText === 'No brand') {
         brandText = (window.__reframeActiveBrand || '').trim();
       }

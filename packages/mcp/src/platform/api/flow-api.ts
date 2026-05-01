@@ -18,9 +18,11 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type { PlatformContext } from '../router.js';
 import {
   readFlowSpec,
+  writeFlowSpec,
   readFlowState,
   writeFlowState,
   transitionTo,
+  type FlowSpec,
 } from '../../../../core/src/project/flow-store.js';
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -56,6 +58,55 @@ export async function handleFlowApi(
   ctx: PlatformContext,
 ): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'http://localhost');
+
+  // POST /platform/api/flow — create/update spec (Phase 4 Brief 4c
+  // Pin #2 wizard write target). Body carries flowId + stepSceneIds[]
+  // + transitions[]. Mirrors variants endpoint shape.
+  if (url.pathname === '/platform/api/flow' && req.method === 'POST') {
+    if (!ctx.projectDir) {
+      sendJson(res, 400, { ok: false, error: 'no project open' });
+      return true;
+    }
+    let body: any;
+    try { body = await readJsonBody(req); }
+    catch (err: any) {
+      sendJson(res, 400, { ok: false, error: 'malformed JSON: ' + err.message });
+      return true;
+    }
+    const flowId = String(body.flowId || '').trim();
+    if (!/^[a-z][a-z0-9-]*$/.test(flowId)) {
+      sendJson(res, 400, { ok: false, error: 'invalid flowId — lowercase + dash, must start with letter' });
+      return true;
+    }
+    const stepSceneIds = Array.isArray(body.stepSceneIds) ? body.stepSceneIds.map(String) : [];
+    if (stepSceneIds.length < 2) {
+      sendJson(res, 400, { ok: false, error: 'stepSceneIds requires ≥2 entries' });
+      return true;
+    }
+    const transitions = Array.isArray(body.transitions) ? body.transitions : [];
+    const now = new Date().toISOString();
+    const existing = readFlowSpec(ctx.projectDir, flowId);
+    const spec: FlowSpec = {
+      flowId,
+      name: body.name ? String(body.name) : existing?.name,
+      stepSceneIds,
+      transitions,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    try {
+      writeFlowSpec(ctx.projectDir, spec);
+      try {
+        const { emitEvent } = await import('../../http-server.js');
+        emitEvent({ type: 'composition:created:flow', flowId } as any);
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { ok: true, spec });
+    } catch (e: any) {
+      sendJson(res, 400, { ok: false, error: e?.message ?? 'write failed' });
+    }
+    return true;
+  }
+
   const parsed = parseFlowPath(url.pathname);
   if (!parsed) return false;
   const { flowId, sub } = parsed;

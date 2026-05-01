@@ -6,6 +6,14 @@ allowed-tools:
   - "mcp__reframe__reframe_edit"
   - "mcp__reframe__reframe_inspect"
   - "Read"
+bus-context-types:
+  - brand-load
+  - brand-edit
+  - brand-extract
+bus-result-kinds:
+  - edit-result
+  - design-result
+bus-streaming: false
 ---
 
 # reframe-brand
@@ -120,6 +128,22 @@ Ten load-bearing axes that MUST flow from DESIGN.md into the rendered scene. Eac
 | **10. Voice / tone** (when DESIGN.md specifies it) | Voice § / Copy guidelines | Generic AI-gen copy overrides brand voice — Stripe's precise prose becomes marketing-speak | Read copy voice vs DESIGN.md Voice section; mismatch = silent drift |
 
 **Rule:** before calling `reframe_inspect brandFidelity`, re-walk this table on the compiled scene. Fidelity score tells you how bad it is; the contract tells you which axis broke.
+
+## Vocalise the brand before writing — one sentence the user can redirect cheaply
+
+After `reframe_design action=extract brand=<slug>` lands and you've Read the cached `.reframe/brands/<slug>/DESIGN.md`, **before any HTML or `reframe_compile` call**, state the system you'll bind в **one sentence**: the dominant background, the single accent (with hex), the display + body type pairing, and the load-bearing posture rule (corner scale / shadow philosophy / accent budget).
+
+Examples of correct vocalise:
+
+- "Warm cream background `#fdf3e8`, single terracotta accent `#cf6a5f`, Tiempos Headline display + Söhne body, gentle 14px radii on cards." (warm-soft)
+- "Off-white `#f9f4ec` paper, single warm rust `#c64e31` accent used at most twice, Iowan Old Style display + system sans body, hairline borders + 0px radii — no shadows ever." (editorial-monocle)
+- "Stripe — `#0a2540` near-black surface, `#635bff` purple primary accent + `#00d4ff` cyan secondary, Sohne-Var weight ladder 400/510/590/700, 8px button radius, soft 0 1px 3px elevation tier." (Stripe brand load)
+
+Why: the user reads the sentence and either says "yes, build" or "no — make the accent rust not blue" before you've spent 30 seconds writing HTML. A wrong direction caught at vocalise is 10× cheaper than one caught after compile + inspect + critic. The vocalise sentence is also the first thing `reframe-critic` cites when judging brand fidelity post-compile — so it's not just a checkpoint, it's the contract you're binding against.
+
+**Rule:** vocalise once per brand load. Don't vocalise on every edit; once the user accepts the system, it's locked until they ask to rebrand.
+
+**When to skip vocalise:** the user explicitly says "skip the recap, just build" / "I know the brand, go" / they're в the middle of an iteration (mid-edit on already-vocalised scene). Otherwise — even on quick scenes — vocalise. The sentence is small; the redirect-cost it saves is large.
 
 ## When DESIGN.md is silent — don't fill it
 

@@ -303,6 +303,36 @@ export function renderEditorShell(options: {
       cursor: default;
       outline: none;
     }
+
+    /* Annotation overlays - Phase 2 Brief 2b Pin #10. Layered over the
+       DOM-canvas iframe + native canvas. Pointer-events default off so
+       the canvas remains interactive; specific marks (free-vector,
+       comment dots) re-enable on themselves. The .viewport-frame class
+       on canvas-area lets 040-annotations.js render code resolve in
+       editor-shell, sharing the legacy scene-page render path. */
+    /* z-index 25 sits above the canvas iframe (which composes the
+       scene HTML at default stack) so free-vector strokes receive
+       pointer events on their stroke geometry. SVG itself stays
+       pointer-events:none so the rest of the canvas keeps its
+       interaction (zoom, pan, selection). The pen-active class
+       flips to auto only while drawing. */
+    #canvas-area svg.annotations {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 25;
+    }
+    #canvas-area svg.annotations.pen-active,
+    #canvas-area svg.annotations.gesture-active { pointer-events: auto; }
+    #canvas-area .annotation-marks-html {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 26;
+    }
+    #canvas-area .annotation-marks-html > * { pointer-events: auto; }
     #loading {
       position: absolute; inset: 0;
       display: flex; align-items: center; justify-content: center;
@@ -440,9 +470,22 @@ export function renderEditorShell(options: {
     <div class="panel-resize panel-resize-sidebar" data-panel-resize="sidebar"></div>
     <div class="panel-resize panel-resize-right" data-panel-resize="right"></div>
 
-    <main id="canvas-area">
+    <main id="canvas-area" class="viewport-frame">
       <div id="loading"><div class="spinner"></div></div>
       <canvas id="reframe-viewport" tabindex="0"${sceneAttr} data-session="${esc(options.sceneIds?.split(',')[0] ?? '')}"></canvas>
+
+      <!-- Phase 2 Brief 2b Pin #10 — Annotation overlay mount.
+           Default viewBox 1440×900 matches VIEWPORT_DIMS.desktop, the
+           coordinate space the existing 040-annotations.js render code
+           and pen-capture write to. preserveAspectRatio="none" so the
+           overlay stretches to fill #canvas-area at any aspect ratio.
+           data-annotations-overlay flag lets a future viewport-driven
+           binder update viewBox when state.currentViewport changes
+           (deferred — desktop is the only stable case today). -->
+      <svg class="annotations" data-annotations-overlay viewBox="0 0 1440 900" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+        <g class="annotation-marks-svg"></g>
+      </svg>
+      <div class="annotation-marks-html"></div>
 
       <!-- Viewport preview switcher: Desktop / Tablet / Phone.
            Visual preview only — applies a CSS viewport-clip to the
@@ -532,7 +575,24 @@ export function renderEditorShell(options: {
       </div>
     </main>
 
-    <aside id="panel" style="display:flex;flex-direction:column;min-height:0;">
+    <aside id="panel" style="display:flex;flex-direction:column;min-height:0;position:relative;">
+      <!-- Phase 2 Brief 2c — thread detail panel mount. Glass overlay over
+           the inspector contents (position:absolute inset:0 + z-index 6
+           via .thread-panel CSS). openThreadPanel(threadId) fetches the
+           hydrated thread + renders title/meta/events/reply form into
+           the data-field elements; closeThreadPanel toggles .hidden. -->
+      <div class="thread-panel hidden" data-thread-panel>
+        <div class="thread-panel-head">
+          <div class="close-row">
+            <button class="close-btn" data-action="close-thread">← Back</button>
+          </div>
+          <div class="title" data-field="title">Thread</div>
+          <div class="meta" data-field="meta"></div>
+        </div>
+        <div class="thread-panel-body" data-field="body"></div>
+        <div class="thread-panel-actions" data-field="actions"></div>
+      </div>
+
       <!-- Single always-visible Properties pane. Right-panel tabs are gone:
            Agent moved to a floating prompt (right-click on canvas / Cmd+K),
            block insertion moved to the floating block palette (Cmd+P). The
@@ -559,6 +619,13 @@ export function renderEditorShell(options: {
         </div>
       </div>
     </aside>
+    <!-- Phase 1 UI-6b — Missing-surfaces drawer. Slide-in from the
+         right edge with 4 tabs (Quality / Variations / Tokens /
+         Rebrand). Mounted as a sibling of <aside id="panel">, NOT
+         nested inside the inspector — UI-6a Pin #4 architectural
+         lesson — so inspector innerHTML overwrites can't wipe it.
+         Bound by 170-drawer.js bindDrawer(). -->
+    <div class="drawer-root" data-drawer-root aria-hidden="true"></div>
     ${renderBottomChat()}
     <!-- Phase 1 UI-1 — narrow-viewport toast. CSS in platform-ui.css
          drives display via body.reframe-viewport-narrow class set by

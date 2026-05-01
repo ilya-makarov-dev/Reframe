@@ -5,6 +5,11 @@ allowed-tools:
   - "mcp__reframe__reframe_export"
   - "mcp__reframe__reframe_inspect"
   - "Read"
+bus-context-types:
+  - export-intent
+bus-result-kinds:
+  - export-result
+bus-streaming: false
 ---
 
 # reframe-to-react

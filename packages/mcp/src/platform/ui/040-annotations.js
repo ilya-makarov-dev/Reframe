@@ -139,6 +139,7 @@
         case 'reference':         renderReferenceMark(ann, svgParts, htmlParts); break;
         case 'resonance-overlay': renderResonanceOverlayMark(ann, svgParts, htmlParts); break;
         case 'ghost-proposal':    renderGhostProposal(ann, svgParts, htmlParts); break;
+        case 'free-vector':       renderFreeVectorMark(ann, svgParts, htmlParts); break;
       }
     }
     if (svgGroup) svgGroup.innerHTML = svgParts.join('');
@@ -422,7 +423,171 @@
     return '<div class="diff-chips">' + parts.join('') + '</div>';
   }
 
+  // Convert an array of {x,y} points into an SVG path `d` attribute.
+  // Plain mode: `M x0,y0 L x1,y1 ...`.
+  // Smooth mode: Catmull-Rom interpolation emitted as cubic-bezier `C` segments
+  //   so the generated path is rendered smoothly by every SVG implementation
+  //   without depending on a non-standard interpolator. Tension = 0.5.
+  function pointsToPath(points, smooth) {
+    if (!points || points.length === 0) return '';
+    if (points.length === 1) {
+      return 'M' + points[0].x + ',' + points[0].y;
+    }
+    if (!smooth || points.length < 3) {
+      var d = 'M' + points[0].x + ',' + points[0].y;
+      for (var i = 1; i < points.length; i++) {
+        d += ' L' + points[i].x + ',' + points[i].y;
+      }
+      return d;
+    }
+    var out = 'M' + points[0].x + ',' + points[0].y;
+    for (var j = 0; j < points.length - 1; j++) {
+      var p0 = points[j === 0 ? 0 : j - 1];
+      var p1 = points[j];
+      var p2 = points[j + 1];
+      var p3 = points[j + 2 < points.length ? j + 2 : points.length - 1];
+      var cp1x = p1.x + (p2.x - p0.x) / 6;
+      var cp1y = p1.y + (p2.y - p0.y) / 6;
+      var cp2x = p2.x - (p3.x - p1.x) / 6;
+      var cp2y = p2.y - (p3.y - p1.y) / 6;
+      out += ' C' + cp1x + ',' + cp1y + ' ' + cp2x + ',' + cp2y + ' ' + p2.x + ',' + p2.y;
+    }
+    return out;
+  }
+
+  function renderFreeVectorMark(ann, svgOut, htmlOut) {
+    var p = ann.payload;
+    var points = p.points || [];
+    if (points.length === 0) return;
+    var d = pointsToPath(points, !!p.smooth);
+    var stroke = String(p.stroke || '#2b74ff');
+    var width = Number(p.width != null ? p.width : 2);
+    var opacity = Number(p.opacity != null ? p.opacity : 1);
+    svgOut.push(
+      '<path class="mark-free-vector" data-ann="' + escape(ann.id) + '" d="' + d + '" ' +
+        'stroke="' + escape(stroke) + '" stroke-width="' + width + '" stroke-opacity="' + opacity + '" ' +
+        'fill="none" stroke-linecap="round" stroke-linejoin="round" />'
+    );
+  }
+
+  // Free-vector eraser — hover any pen stroke (when Pen mode is NOT active)
+  // to highlight + reveal a delete pill. Click pill or press Delete on a
+  // highlighted stroke to dismiss the annotation. Esc clears the highlight.
+  // Implicit eraser, no separate tool mode.
+  var _eraserSelectedId = null;
+
+  function bindFreeVectorEraser() {
+    var svg = $('.annotation-marks-svg');
+    if (!svg) return;
+    var paths = svg.querySelectorAll('path.mark-free-vector[data-ann]');
+    paths.forEach(function(path) {
+      path.addEventListener('mouseenter', function() {
+        if (state.mode && state.mode.kind === 'pen') return;
+        path.classList.add('hover');
+      });
+      path.addEventListener('mouseleave', function() {
+        path.classList.remove('hover');
+      });
+      path.addEventListener('click', function(e) {
+        if (state.mode && state.mode.kind === 'pen') return;
+        e.stopPropagation();
+        var id = path.getAttribute('data-ann');
+        if (!id) return;
+        selectFreeVectorForErase(id);
+      });
+    });
+  }
+
+  function selectFreeVectorForErase(id) {
+    _eraserSelectedId = id;
+    var svg = $('.annotation-marks-svg');
+    if (svg) {
+      svg.querySelectorAll('path.mark-free-vector').forEach(function(p) {
+        p.classList.toggle('eraser-selected', p.getAttribute('data-ann') === id);
+      });
+    }
+    showEraserDeleteIcon(id);
+  }
+
+  function clearEraserSelection() {
+    _eraserSelectedId = null;
+    var svg = $('.annotation-marks-svg');
+    if (svg) {
+      svg.querySelectorAll('path.mark-free-vector').forEach(function(p) {
+        p.classList.remove('eraser-selected');
+      });
+    }
+    hideEraserDeleteIcon();
+  }
+
+  function showEraserDeleteIcon(id) {
+    hideEraserDeleteIcon();
+    var svg = $('.annotation-marks-svg');
+    if (!svg) return;
+    var path = svg.querySelector('path.mark-free-vector[data-ann="' + id + '"]');
+    if (!path) return;
+    var bb;
+    try { bb = path.getBBox(); } catch (_) { return; }
+    // Position at the path's first point in screen-space (need to convert
+    // from iframe-doc coords to frame pixels).
+    var scr = bboxToScreen({ x: bb.x + bb.width, y: bb.y, w: 0, h: 0 });
+    var btn = document.createElement('button');
+    btn.className = 'free-vector-erase-btn';
+    btn.setAttribute('data-erase-ann', id);
+    btn.setAttribute('title', 'Remove stroke (Delete)');
+    btn.style.left = (scr.left + 4) + 'px';
+    btn.style.top = (scr.top - 8) + 'px';
+    btn.innerHTML = '×';
+    var host = $('.annotation-marks-html');
+    if (host) host.appendChild(btn);
+    btn.addEventListener('click', async function(e) {
+      e.stopPropagation();
+      await eraseFreeVector(id);
+    });
+  }
+
+  function hideEraserDeleteIcon() {
+    var existing = document.querySelector('.free-vector-erase-btn');
+    if (existing) existing.remove();
+  }
+
+  async function eraseFreeVector(id) {
+    if (!id) return;
+    try {
+      await api('/platform/api/annotate-transition', {
+        annotationId: id,
+        toStatus: 'dismissed',
+      });
+      clearEraserSelection();
+      flash('Stroke removed', 'success');
+      refreshAnnotations();
+    } catch (_) {}
+  }
+
+  // Wire global keyboard handlers for the eraser (Delete + Esc clear).
+  // Bind once at module-level so it survives re-renders. Guard with the
+  // private flag so it doesn't double-bind.
+  if (typeof window !== 'undefined' && !window.__reframeFreeVectorEraserBound) {
+    window.__reframeFreeVectorEraserBound = true;
+    document.addEventListener('keydown', function(e) {
+      if (!_eraserSelectedId) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        eraseFreeVector(_eraserSelectedId);
+      } else if (e.key === 'Escape') {
+        clearEraserSelection();
+      }
+    });
+    document.addEventListener('click', function(e) {
+      if (!_eraserSelectedId) return;
+      if (e.target && (e.target.closest('.free-vector-erase-btn') ||
+          e.target.closest('path.mark-free-vector'))) return;
+      clearEraserSelection();
+    });
+  }
+
   function bindMarkInteractions() {
+    bindFreeVectorEraser();
     // Click a mark → scroll the stream to its thread (via annotation id).
     $$('.annotation-marks-html .mark[data-ann]').forEach(function(el) {
       el.addEventListener('click', function(e) {
@@ -468,6 +633,13 @@
   // Thread detail panel
   // ════════════════════════════════════════════════════════
 
+  // Phase 2 Brief 2c — public hook for designer-qa probe + future
+  // toolbar entry points. Exposed under a debug namespace so internal
+  // refactors don't accidentally rely on it.
+  if (typeof window !== 'undefined') {
+    window.__reframeDebug = window.__reframeDebug || {};
+  }
+
   async function openThreadPanel(threadId) {
     try {
       const data = await api('/platform/api/threads/get?id=' + encodeURIComponent(threadId));
@@ -485,6 +657,11 @@
     if (panel) panel.classList.add('hidden');
     const stream = $('.stream');
     if (stream) stream.style.display = '';
+  }
+
+  if (typeof window !== 'undefined') {
+    window.__reframeDebug.openThreadPanel = openThreadPanel;
+    window.__reframeDebug.closeThreadPanel = closeThreadPanel;
   }
 
   function renderThreadPanel(data) {
@@ -521,14 +698,16 @@
 
     const bodyEl = panel.querySelector('[data-field="body"]');
     if (bodyEl) {
-      if (events.length === 0) {
-        bodyEl.innerHTML =
-          '<div class="thread-event">' +
-            '<div class="event-body muted">Empty thread.</div>' +
-          '</div>';
-      } else {
-        bodyEl.innerHTML = events.map(renderThreadEvent).join('');
-      }
+      const eventsHtml = events.length === 0
+        ? '<div class="thread-event"><div class="event-body muted">Empty thread.</div></div>'
+        : events.map(renderThreadEvent).join('');
+      // Phase 2 Brief 2c — reply form footer. Mounted inside the body
+      // container after the chronological events list, gated on thread
+      // status: archived threads are read-only with a small note in
+      // place of the form.
+      const replyHtml = renderThreadReplyForm(t);
+      bodyEl.innerHTML = eventsHtml + replyHtml;
+      bindThreadReplyForm(bodyEl, t);
     }
 
     // Thread-level actions
@@ -574,6 +753,19 @@
     }
   }
 
+  // Phase 2 Brief 2c — light @-mention parsing. Operates on an
+  // ALREADY-ESCAPED body string (escape() was called first), so it's
+  // XSS-safe by construction: the regex matches `@\w+` literal chars
+  // which can never coincide with HTML special-chars after escape().
+  // Output wraps each match in a span for visual styling — no
+  // notification/autocomplete semantics in scope (Phase 6 territory).
+  function parseMentions(escapedBody) {
+    if (!escapedBody) return '';
+    return escapedBody.replace(/@(\w+)/g, function(_match, name) {
+      return '<span class="thread-mention">@' + name + '</span>';
+    });
+  }
+
   function renderThreadEvent(ev) {
     const authorKind = (ev.author && ev.author.kind) || 'human';
     const authorName = (ev.author && ev.author.id) || authorKind;
@@ -588,7 +780,15 @@
     } else {
       const a = ev.data;
       kindTag = 'annotation · ' + escape(String(a.payload.kind));
-      body = escape(describeAnnotationPayload(a.payload));
+      // Comment annotations get @-mention parsing on the raw text. The
+      // describePayload path wraps it in quotes which would break the
+      // mention regex on the leading `"@`, so we route comments
+      // directly here.
+      if (a.payload && a.payload.kind === 'comment') {
+        body = parseMentions(escape(a.payload.text || ''));
+      } else {
+        body = escape(describeAnnotationPayload(a.payload));
+      }
     }
     const accentLeft = ev.kind === 'annotation' && ev.data.payload && ev.data.payload.kind === 'ghost-proposal';
     return '<div class="thread-event' + (accentLeft ? ' accent-left' : '') + '">' +
@@ -599,6 +799,206 @@
       '</div>' +
       '<div class="event-body">' + body + '</div>' +
     '</div>';
+  }
+
+  // Phase 2 Brief 2c — reply form. Archived threads are read-only;
+  // active/resolved/orphaned threads show the textarea + Send affordance.
+  function renderThreadReplyForm(thread) {
+    if (!thread) return '';
+    if (thread.status === 'archived') {
+      return '<div class="thread-reply-archived">Thread archived. Reopen to add replies.</div>';
+    }
+    return '<div class="thread-reply-form" data-thread-reply data-thread-id="' + escape(thread.id) + '">' +
+        '<textarea class="thread-reply-input" data-thread-reply-input placeholder="Reply or @mention…" rows="2" maxlength="4000"></textarea>' +
+        '<div class="thread-reply-actions">' +
+          '<span class="thread-reply-hint">Cmd+Enter to send</span>' +
+          '<button class="btn btn-primary btn-sm" data-thread-action="send-reply" disabled>Send</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  function bindThreadReplyForm(bodyEl, thread) {
+    if (!bodyEl || !thread || thread.status === 'archived') return;
+    const form = bodyEl.querySelector('[data-thread-reply]');
+    if (!form) return;
+    const textarea = form.querySelector('[data-thread-reply-input]');
+    const sendBtn = form.querySelector('[data-thread-action="send-reply"]');
+    if (!textarea || !sendBtn) return;
+
+    function refreshSendState() {
+      sendBtn.disabled = textarea.value.trim().length === 0;
+      // Auto-resize up to 6 rows (~ 6 * 18px line-height + padding).
+      textarea.style.height = 'auto';
+      const max = 6 * 18 + 16;
+      textarea.style.height = Math.min(textarea.scrollHeight, max) + 'px';
+    }
+
+    // Phase 4 Brief 4b Pin #7 — thread panel slash-command bus migration
+    // (closes 3.5 Pin #11).
+    //
+    // Replies that START with a slash (`/critic ...`, `/design ...`)
+    // route to /platform/api/skill-bus/invoke instead of the plain
+    // /threads/reply path. The thread panel listens for SSE
+    // skill-bus:result events filtered by requestId, renders results
+    // inline using the Phase 3.5 result-rendering library
+    // (152-skill-result-render.js). Plain comments unchanged.
+    function parseSlashCommand(body) {
+      var m = body.match(/^\/(\w[\w-]*)\s*(.*)$/s);
+      if (!m) return null;
+      var verb = m[1];
+      var rest = m[2].trim();
+      // Verb → canonical skill name. Phase 4d may surface this as a
+      // user-configurable verb registry; for now hard-coded mapping.
+      var SKILL_BY_VERB = {
+        'critic':           'reframe-critic',
+        'critique':         'reframe-critic',
+        'design':           'reframe-design',
+        'enhance':          'reframe-enhance',
+        'brand':            'reframe-brand',
+        'motion':           'reframe-motion',
+        'animate':          'reframe-motion',
+        'review':           'reframe-critic',
+      };
+      var skill = SKILL_BY_VERB[verb.toLowerCase()];
+      if (!skill) return null;
+      return { skill: skill, verb: verb, prompt: rest };
+    }
+
+    function freshRequestId() {
+      return 'r-' + Date.now().toString(36) + '-' +
+        Math.random().toString(36).slice(2, 7);
+    }
+
+    async function submitReply() {
+      const trimmed = textarea.value.trim();
+      if (!trimmed) return;
+      sendBtn.disabled = true;
+      textarea.readOnly = true;
+      sendBtn.textContent = 'Sending…';
+
+      // Slash-command path → skill-bus invocation.
+      const slash = parseSlashCommand(trimmed);
+      if (slash) {
+        const requestId = freshRequestId();
+        try {
+          // Determine context kind by skill — the bus router validates
+          // context.kind against each skill's bus-context-types.
+          // reframe-critic accepts critique-target / scene-compiled;
+          // reframe-design accepts design-intent / scene-edit.
+          var contextKind = (slash.skill === 'reframe-critic') ? 'critique-target' :
+                            (slash.skill === 'reframe-brand')  ? 'brand-load' :
+                            (slash.skill === 'reframe-motion') ? 'motion-intent' :
+                                                                  'design-intent';
+          // Append an optimistic local entry в thread events log so the
+          // designer sees the slash invocation lands in the timeline
+          // immediately, then the bus result event upgrades it inline.
+          mountThreadBusEntry(bodyEl, requestId, slash.skill, slash.verb, slash.prompt);
+          await api('/platform/api/skill-bus/invoke', {
+            skill: slash.skill,
+            requestId: requestId,
+            context: {
+              kind: contextKind,
+              threadId: thread.id,
+              anchor: thread.anchor || null,
+              prompt: slash.prompt,
+              sceneSlug: thread.sceneSlug || null,
+            },
+          });
+          textarea.value = '';
+          flash('/' + slash.verb + ' dispatched', 'success');
+        } catch (e) {
+          flash('Bus invoke failed', 'error');
+          sendBtn.disabled = false;
+          textarea.readOnly = false;
+          sendBtn.textContent = 'Send';
+          return;
+        }
+        sendBtn.disabled = false;
+        textarea.readOnly = false;
+        sendBtn.textContent = 'Send';
+        refreshSendState();
+        return;
+      }
+
+      // Plain reply path — unchanged.
+      try {
+        await api('/platform/api/threads/reply', {
+          threadId: thread.id,
+          body: trimmed,
+        });
+        textarea.value = '';
+        flash('Reply sent', 'success');
+        // Reuse the existing refetch path so the new comment slots
+        // into the chronologically-sorted events list correctly.
+        openThreadPanel(thread.id);
+        refreshAnnotations();
+      } catch (e) {
+        flash('Reply failed', 'error');
+        sendBtn.disabled = false;
+        textarea.readOnly = false;
+        sendBtn.textContent = 'Send';
+      }
+    }
+
+    // Mount an inline bus-result entry into the thread events stream.
+    // Renders a Phase 3.5 progress card initially; upgrades to a result
+    // card when the SSE skill-bus:result event for this requestId fires.
+    function mountThreadBusEntry(panelBody, requestId, skill, verb, prompt) {
+      if (!panelBody || typeof renderSkillProgress !== 'function') return;
+      var entriesHost = panelBody.querySelector('.thread-events') || panelBody;
+      var wrap = document.createElement('div');
+      wrap.className = 'thread-bus-entry';
+      wrap.setAttribute('data-thread-bus-entry', requestId);
+      wrap.innerHTML =
+        '<div class="thread-bus-head">' +
+          '<span class="thread-bus-verb">/' + verb + '</span>' +
+          '<span class="thread-bus-skill">' + skill + '</span>' +
+        '</div>' +
+        renderSkillProgress({ requestId: requestId, skill: skill, phase: 'queued' });
+      entriesHost.appendChild(wrap);
+
+      // Subscribe to bus events. Reuses the Phase 3.5 sibling registry.
+      if (!Array.isArray(window.__reframeSkillBusSubscribers)) {
+        window.__reframeSkillBusSubscribers = [];
+      }
+      window.__reframeSkillBusSubscribers.push(function(ev) {
+        if (!ev || ev.requestId !== requestId) return;
+        if (ev.type === 'skill-bus:progress') {
+          var prog = wrap.querySelector('[data-skill-progress]') || wrap;
+          prog.outerHTML = renderSkillProgress({
+            requestId: ev.requestId, skill: ev.skill, phase: ev.phase,
+          });
+        } else if (ev.type === 'skill-bus:result') {
+          wrap.innerHTML =
+            '<div class="thread-bus-head">' +
+              '<span class="thread-bus-verb">/' + verb + '</span>' +
+              '<span class="thread-bus-skill">' + skill + '</span>' +
+            '</div>' +
+            renderSkillResult({
+              requestId: ev.requestId,
+              skill: ev.skill,
+              ok: ev.ok,
+              payload: ev.payload,
+              error: ev.error,
+            });
+          if (typeof bindSkillResultActions === 'function') bindSkillResultActions(wrap);
+        }
+      });
+      void prompt;
+    }
+
+    textarea.addEventListener('input', refreshSendState);
+    textarea.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        submitReply();
+      }
+    });
+    sendBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      submitReply();
+    });
+    refreshSendState();
   }
 
   function describeAnnotationPayload(p) {
